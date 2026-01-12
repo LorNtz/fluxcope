@@ -139,7 +139,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let info_text = match app.state.selected() {
                 Some(idx) => {
                     if idx < app.requests.len() {
-                        format!("Details for {}", app.requests[idx].uri)
+                        let req = &app.requests[idx];
+                        match app.active_tab {
+                            app::ActiveTab::RequestHeader => {
+                                format!("Method: {}\nURI: {}\n\nHeaders:\n{}", 
+                                    req.method, 
+                                    req.uri,
+                                    req.req_headers.iter().map(|(k,v)| format!("{}: {}", k, v)).collect::<Vec<_>>().join("\n")
+                                )
+                            },
+                            app::ActiveTab::RequestBody => {
+                                "Unimplemented".to_string()
+                            },
+                            app::ActiveTab::ResponseHeader => {
+                                "Unimplemented".to_string()
+                            },
+                            app::ActiveTab::ResponseBody => {
+                                "Unimplemented".to_string()
+                            }
+                        }
                     } else {
                         "Selected index out of bounds".to_string()
                     }
