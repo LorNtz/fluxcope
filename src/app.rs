@@ -40,9 +40,15 @@ impl App {
 
     pub fn add_request(&mut self, req: CapturedData) {
         if !self.recording { return; }
-        
+
+        let was_empty = self.requests.is_empty();
         self.requests.push(req.clone());
         log::info!("request received: {}", req.uri);
+
+        // Auto-select the first request when captured
+        if was_empty {
+            self.state.select(Some(0));
+        }
     }
 
     pub fn add_log(&mut self, msg: String) {

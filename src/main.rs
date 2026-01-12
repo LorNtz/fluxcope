@@ -7,9 +7,10 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{ Constraint, Direction, Layout },
+    layout::{ Alignment, Constraint, Direction, Layout },
     style::{ Modifier, Style },
     symbols,
+    text::Line,
     widgets::{ Block, BorderType, Borders, List, ListItem, Paragraph, Tabs, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState },
 };
 use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::{PrivateKey}};
@@ -100,8 +101,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .map(|req| ListItem::new(format!("{} {}", req.method, req.uri)))
                 .collect();
 
+            // Selection indicator title (bottom-right aligned)
+            let selection_title = if app.requests.is_empty() {
+                String::new()
+            } else {
+                let selected = app.state.selected().map(|i| i + 1).unwrap_or(0);
+                let total = app.requests.len();
+                format!("{} of {}", selected, total)
+            };
+
             let list = List::new(items)
-                .block(Block::default().title("Requests").borders(Borders::ALL).border_type(BorderType::Rounded))
+                .block(Block::default()
+                    .title("Requests")
+                    .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded))
                 .highlight_style(Style::default().add_modifier(Modifier::BOLD))
                 .highlight_symbol("→ ");
 
