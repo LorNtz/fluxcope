@@ -23,6 +23,7 @@ pub struct App {
     pub active_tab: ActiveTab,
     pub recording: bool,
     pub vertical_scroll: u16,
+    pub log_panel_visible: bool,
 }
 
 impl App {
@@ -35,6 +36,7 @@ impl App {
             active_tab: ActiveTab::RequestHeader,
             recording: true,
             vertical_scroll: 0,
+            log_panel_visible: true,
         }
     }
 
@@ -113,5 +115,9 @@ impl App {
 
     fn reset_scroll(&mut self) {
         self.vertical_scroll = 0;
+    }
+
+    pub fn toggle_log_panel(&mut self) {
+        self.log_panel_visible = !self.log_panel_visible;
     }
 }

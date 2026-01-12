@@ -132,10 +132,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let right_content_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(50), // Main Details
-                    Constraint::Percentage(50), // Logs
-                ].as_ref())
+                .constraints(if app.log_panel_visible {
+                    [
+                        Constraint::Percentage(50), // Main Details
+                        Constraint::Percentage(50), // Logs
+                    ].as_ref()
+                } else {
+                    [
+                        Constraint::Percentage(100), // Main Details (full)
+                        Constraint::Percentage(0),   // Logs (hidden)
+                    ].as_ref()
+                })
                 .split(right_main_chunks[1]);
 
             let tabs = Tabs::new(vec!["Request Header", "Request Body", "Response Header", "Response Body"])
@@ -208,17 +215,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
 
 
-            // Log Panel
-            let log_items: Vec<ListItem> = app.logs
-                .iter()
-                .rev()
-                .map(|l| ListItem::new(l.clone()))
-                .collect();
+            // Log Panel (only render when visible)
+            if app.log_panel_visible {
+                let log_items: Vec<ListItem> = app.logs
+                    .iter()
+                    .rev()
+                    .map(|l| ListItem::new(l.clone()))
+                    .collect();
 
-            let log_list = List::new(log_items)
-                .block(Block::default().title("Logs").borders(Borders::ALL).border_type(BorderType::Rounded));
+                let log_list = List::new(log_items)
+                    .block(Block::default().title("Logs").borders(Borders::ALL).border_type(BorderType::Rounded));
 
-            frame.render_stateful_widget(log_list, right_content_chunks[1], &mut app.log_state);
+                frame.render_stateful_widget(log_list, right_content_chunks[1], &mut app.log_state);
+            }
         })?;
 
         // Handle Input & Network Events
@@ -231,7 +240,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     KeyCode::Char('K') => app.scroll_up(),
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                    _ => {} 
+                    KeyCode::Char('@') => app.toggle_log_panel(),
+                    _ => {}
                 }
             }
         }
