@@ -1,10 +1,12 @@
 use ratatui::widgets::ListState;
 use crate::proxy_handler::CapturedData;
 
+#[derive(Debug, PartialEq)]
 pub enum ActiveTab {
-    Request,
-    Response,
-    Body,
+    RequestHeader,
+    RequestBody,
+    ResponseHeader,
+    ResponseBody,
 }
 
 #[derive(Debug)]
@@ -20,6 +22,7 @@ pub struct App {
     pub log_state: ListState,
     pub active_tab: ActiveTab,
     pub recording: bool,
+    pub vertical_scroll: u16,
 }
 
 impl App {
@@ -29,8 +32,9 @@ impl App {
             logs: vec![],
             state: ListState::default(),
             log_state: ListState::default(),
-            active_tab: ActiveTab::Request,
+            active_tab: ActiveTab::RequestHeader,
             recording: true,
+            vertical_scroll: 0,
         }
     }
 
@@ -62,6 +66,7 @@ impl App {
             None => 0,
         };
         self.state.select(Some(i));
+        self.reset_scroll();
     }
 
     pub fn previous(&mut self) {
@@ -79,13 +84,28 @@ impl App {
             None => 0,
         };
         self.state.select(Some(i));
+        self.reset_scroll();
     }
 
     pub fn next_tab(&mut self) {
         self.active_tab = match self.active_tab {
-            ActiveTab::Request => ActiveTab::Response,
-            ActiveTab::Response => ActiveTab::Body,
-            ActiveTab::Body => ActiveTab::Request,
+            ActiveTab::RequestHeader => ActiveTab::RequestBody,
+            ActiveTab::RequestBody => ActiveTab::ResponseHeader,
+            ActiveTab::ResponseHeader => ActiveTab::ResponseBody,
+            ActiveTab::ResponseBody => ActiveTab::RequestHeader,
         };
+        self.reset_scroll();
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
+    }
+
+    fn reset_scroll(&mut self) {
+        self.vertical_scroll = 0;
     }
 }

@@ -5,11 +5,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Paragraph, Tabs, Wrap, List, ListItem},
     Terminal,
-    style::{Style, Modifier},
+    backend::CrosstermBackend,
+    layout::{ Constraint, Direction, Layout },
+    style::{ Modifier, Style },
+    symbols,
+    widgets::{ Block, BorderType, Borders, List, ListItem, Paragraph, Tabs, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState },
 };
 use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::{PrivateKey}};
 use tokio::sync::mpsc;
@@ -82,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
                 .split(frame.area());
-            
+
             // Left Panel: List
             let items: Vec<ListItem> = app.requests
                 .iter()
@@ -90,9 +91,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .collect();
 
             let list = List::new(items)
-                .block(Block::default().title("Requests").borders(Borders::ALL))
+                .block(Block::default().title("Requests").borders(Borders::ALL).border_type(BorderType::Rounded))
                 .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-                .highlight_symbol(">> ");
+                .highlight_symbol("→ ");
 
             frame.render_stateful_widget(list, chunks[0], &mut app.state);
 
@@ -113,12 +114,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ].as_ref())
                 .split(right_main_chunks[1]);
 
-            let tabs = Tabs::new(vec!["Request", "Response", "Body"])
-                .block(Block::default().borders(Borders::ALL).title("Info"))
+            let tabs = Tabs::new(vec!["Request Header", "Request Body", "Response Header", "Response Body"])
+                .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded))
+                .divider(symbols::DOT)
                 .select(match app.active_tab {
-                    app::ActiveTab::Request => 0,
-                    app::ActiveTab::Response => 1,
-                    app::ActiveTab::Body => 2,
+                    app::ActiveTab::RequestHeader => 0,
+                    app::ActiveTab::RequestBody => 1,
+                    app::ActiveTab::ResponseHeader => 2,
+                    app::ActiveTab::ResponseBody => 3
                 });
             frame.render_widget(tabs, right_main_chunks[0]);
 
@@ -133,20 +136,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 },
                 None => "Select a request".to_string(),
             };
-            frame.render_widget(Paragraph::new(info_text).wrap(Wrap { trim: true }), right_content_chunks[0]);
+
+            let line_count = info_text.lines().count();
+            let main_display = Paragraph::new(info_text)
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(match app.active_tab {
+                        app::ActiveTab::RequestHeader => "Request Header",
+                        app::ActiveTab::RequestBody => "Request Body",
+                        app::ActiveTab::ResponseHeader => "Response Header",
+                        app::ActiveTab::ResponseBody => "Response Body"
+                    }))
+                .wrap(Wrap { trim: false }) 
+                .scroll((app.vertical_scroll, 0));
+
+            frame.render_widget(main_display, right_content_chunks[0]);
+
+            // Scrollbar
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let mut scrollbar_state = ScrollbarState::new(line_count).position(app.vertical_scroll as usize);
+            frame.render_stateful_widget(
+                scrollbar,
+                right_content_chunks[0].inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+                &mut scrollbar_state,
+            );
+
 
             // Log Panel
             let log_items: Vec<ListItem> = app.logs
                 .iter()
-                .rev() // Show newest at the bottom? List usually renders top to bottom.
-                       // If we want auto-scroll, we just keep appending and scrolling.
-                       // For now, let's just show them order by time.
+                .rev()
                 .map(|l| ListItem::new(l.clone()))
                 .collect();
-            
+
             let log_list = List::new(log_items)
-                .block(Block::default().title("Logs").borders(Borders::ALL));
-            
+                .block(Block::default().title("Logs").borders(Borders::ALL).border_type(BorderType::Rounded));
+
             frame.render_stateful_widget(log_list, right_content_chunks[1], &mut app.log_state);
         })?;
 
@@ -156,6 +185,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => app.next_tab(),
+                    KeyCode::Char('J') => app.scroll_down(),
+                    KeyCode::Char('K') => app.scroll_up(),
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     _ => {} 
