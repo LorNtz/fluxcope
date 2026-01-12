@@ -36,11 +36,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     log::info!("Application started");
 
     // 3. Setup Proxy (Background Task)
-    let cert = ca::create_ca();
-    
-    // let (ca_cert, ca_key) = ca::create_ca();
-    let cert_der = cert.serialize_der().unwrap();
-    let key_der = cert.serialize_private_key_der(); // This returns Vec<u8>
+    // Load or create CA certificate (persists across runs)
+    let ca = ca::create_or_load_ca();
+
+    // Get DER bytes for the proxy
+    let cert_der = ca.cert_der();
+    let key_der = ca.key_der();
+
+    // Export CA certificate as PEM for client trust (copy from .certificate directory)
+    let cert_src_path = ".certificate/ca_cert.pem";
+    let cert_dst_path = "proxy_ca.pem";
+    if let Err(e) = std::fs::copy(cert_src_path, cert_dst_path) {
+        log::error!("Failed to copy CA certificate to {}: {}", cert_dst_path, e);
+    } else {
+        log::info!("CA certificate available at {}. Use it to trust the proxy (e.g., curl --cacert proxy_ca.pem ...)", cert_dst_path);
+    }
 
     let rustls_cert = rustls::Certificate(cert_der);
     let rustls_key = PrivateKey(key_der);
