@@ -31,6 +31,65 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Format URL-encoded form data as key-value pairs
+/// Returns formatted string like "key1: value1\nkey2: value2"
+fn format_form_body(body: &str) -> String {
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            let value = parts.next().unwrap_or("");
+            // URL-decode both key and value
+            let key_decoded = decode_url_component(key);
+            let value_decoded = decode_url_component(value);
+            format!("{}: {}", key_decoded, value_decoded)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Convert a hex character to its numeric value (0-15)
+fn hex_to_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Simple URL decoder for form data
+fn decode_url_component(s: &str) -> String {
+    let mut result = String::new();
+    let mut bytes = s.as_bytes().iter();
+    while let Some(&b) = bytes.next() {
+        if b == b'%' {
+            let hex1 = bytes.next();
+            let hex2 = bytes.next();
+            if let (Some(&h1), Some(&h2)) = (hex1, hex2) {
+                if let (Some(hi), Some(lo)) = (hex_to_nibble(h1), hex_to_nibble(h2)) {
+                    result.push((hi * 16 + lo) as char);
+                } else {
+                    result.push(b as char);
+                    result.push(h1 as char);
+                    result.push(h2 as char);
+                }
+            } else {
+                result.push(b as char);
+                if let Some(&h1) = hex1 {
+                    result.push(h1 as char);
+                }
+            }
+        } else if b == b'+' {
+            result.push(' ');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Setup Channel
@@ -217,7 +276,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     if body.is_empty() {
                                         "(Empty body)".to_string()
                                     } else {
-                                        body.clone()
+                                        // Check if this is URL-encoded form data
+                                        let is_form_data = req.req_headers.iter()
+                                            .any(|(k, v)| {
+                                                k.to_lowercase() == "content-type"
+                                                    && v.to_lowercase().contains("application/x-www-form-urlencoded")
+                                            });
+                                        if is_form_data {
+                                            format_form_body(body)
+                                        } else {
+                                            body.clone()
+                                        }
                                     }
                                 }
                                 None => "(No body)".to_string(),
