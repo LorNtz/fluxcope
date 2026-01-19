@@ -18,7 +18,7 @@ impl AppLogger {
             .append(true)
             .open("debug.log")
             .unwrap();
-        
+
         Self {
             file: Mutex::new(file),
             tx,

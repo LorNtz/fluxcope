@@ -1,5 +1,5 @@
-use ratatui::widgets::ListState;
 use crate::proxy_handler::CapturedData;
+use ratatui::widgets::ListState;
 
 #[derive(Debug, PartialEq)]
 pub enum ActiveTab {
@@ -41,7 +41,9 @@ impl App {
     }
 
     pub fn add_request(&mut self, req: CapturedData) {
-        if !self.recording { return; }
+        if !self.recording {
+            return;
+        }
 
         let was_empty = self.requests.is_empty();
         self.requests.push(req.clone());

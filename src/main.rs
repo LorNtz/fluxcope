@@ -1,34 +1,45 @@
-use std::{error::Error, io, net::SocketAddr};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::PrivateKey};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{ Alignment, Constraint, Direction, Layout },
-    style::{ Modifier, Style },
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Modifier, Style},
     symbols,
     text::Line,
-    widgets::{ Block, BorderType, Borders, List, ListItem, Paragraph, Tabs, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState },
+    widgets::{
+        Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Tabs, Wrap,
+    },
 };
-use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::{PrivateKey}};
+use std::{error::Error, io, net::SocketAddr};
 use tokio::sync::mpsc;
 
-mod ca;
-mod proxy_handler;
 mod app;
+mod ca;
 mod logging;
+mod proxy_handler;
 
 use app::{App, AppEvent};
-use proxy_handler::LogHandler;
 use logging::AppLogger;
+use proxy_handler::LogHandler;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Setup Channel
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+
+    // Setup pending requests storage for request-response matching
+    let pending_requests = Arc::new(Mutex::new(
+        HashMap::<uuid::Uuid, proxy_handler::CapturedData>::new(),
+    ));
 
     // 2. Setup Logger
     if let Err(e) = AppLogger::init(tx.clone()) {
@@ -50,29 +61,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = std::fs::copy(cert_src_path, cert_dst_path) {
         log::error!("Failed to copy CA certificate to {}: {}", cert_dst_path, e);
     } else {
-        log::info!("CA certificate available at {}. Use it to trust the proxy (e.g., curl --cacert proxy_ca.pem ...)", cert_dst_path);
+        log::info!(
+            "CA certificate available at {}. Use it to trust the proxy (e.g., curl --cacert proxy_ca.pem ...)",
+            cert_dst_path
+        );
     }
 
     let rustls_cert = rustls::Certificate(cert_der);
     let rustls_key = PrivateKey(key_der);
-    
+
     let ca = RcgenAuthority::new(
         rustls_key,  // Private Key comes first
         rustls_cert, // Certificate comes second
-        1_000        // Cache size
-    ).unwrap();
+        1_000,       // Cache size
+    )
+    .unwrap();
 
     let proxy = ProxyBuilder::new()
         .with_addr(SocketAddr::from(([127, 0, 0, 1], 8989)))
         .with_rustls_client()
         .with_ca(ca)
-        .with_http_handler(LogHandler { tx: tx.clone() })
+        .with_http_handler(LogHandler {
+            tx: tx.clone(),
+            pending_requests: Arc::clone(&pending_requests),
+        })
         .build();
 
     tokio::spawn(async move {
-        if let Err(e) = proxy.start(async {
-            let _ = tokio::signal::ctrl_c().await;
-        }).await {
+        if let Err(e) = proxy
+            .start(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+        {
             panic!("Failed to establish proxy: {}", e);
             // eprintln!("Proxy failed: {}", e);
         }
@@ -96,7 +117,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .split(frame.area());
 
             // Left Panel: List
-            let items: Vec<ListItem> = app.requests
+            let items: Vec<ListItem> = app
+                .requests
                 .iter()
                 .map(|req| ListItem::new(format!("{} {}", req.method, req.uri)))
                 .collect();
@@ -111,11 +133,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             let list = List::new(items)
-                .block(Block::default()
-                    .title("Requests")
-                    .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded))
+                .block(
+                    Block::default()
+                        .title("Requests")
+                        .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
                 .highlight_style(Style::default().add_modifier(Modifier::BOLD))
                 .highlight_symbol("→ ");
 
@@ -124,10 +148,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Right Panel: Details
             let right_main_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3), // Tabs
-                    Constraint::Min(0),    // Rest
-                ].as_ref())
+                .constraints(
+                    [
+                        Constraint::Length(3), // Tabs
+                        Constraint::Min(0),    // Rest
+                    ]
+                    .as_ref(),
+                )
                 .split(chunks[1]);
 
             let right_content_chunks = Layout::default()
@@ -136,24 +163,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     [
                         Constraint::Percentage(50), // Main Details
                         Constraint::Percentage(50), // Logs
-                    ].as_ref()
+                    ]
+                    .as_ref()
                 } else {
                     [
                         Constraint::Percentage(100), // Main Details (full)
                         Constraint::Percentage(0),   // Logs (hidden)
-                    ].as_ref()
+                    ]
+                    .as_ref()
                 })
                 .split(right_main_chunks[1]);
 
-            let tabs = Tabs::new(vec!["Request Header", "Request Body", "Response Header", "Response Body"])
-                .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded))
-                .divider(symbols::DOT)
-                .select(match app.active_tab {
-                    app::ActiveTab::RequestHeader => 0,
-                    app::ActiveTab::RequestBody => 1,
-                    app::ActiveTab::ResponseHeader => 2,
-                    app::ActiveTab::ResponseBody => 3
-                });
+            let tabs = Tabs::new(vec![
+                "Request Header",
+                "Request Body",
+                "Response Header",
+                "Response Body",
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded),
+            )
+            .divider(symbols::DOT)
+            .select(match app.active_tab {
+                app::ActiveTab::RequestHeader => 0,
+                app::ActiveTab::RequestBody => 1,
+                app::ActiveTab::ResponseHeader => 2,
+                app::ActiveTab::ResponseBody => 3,
+            });
             frame.render_widget(tabs, right_main_chunks[0]);
 
             // Detail Content
@@ -163,41 +201,70 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let req = &app.requests[idx];
                         match app.active_tab {
                             app::ActiveTab::RequestHeader => {
-                                format!("Method: {}\nURI: {}\n\nHeaders:\n{}", 
-                                    req.method, 
+                                format!(
+                                    "Method: {}\nURI: {}\n\nHeaders:\n{}",
+                                    req.method,
                                     req.uri,
-                                    req.req_headers.iter().map(|(k,v)| format!("{}: {}", k, v)).collect::<Vec<_>>().join("\n")
+                                    req.req_headers
+                                        .iter()
+                                        .map(|(k, v)| format!("{}: {}", k, v))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
                                 )
-                            },
-                            app::ActiveTab::RequestBody => {
-                                "Unimplemented".to_string()
+                            }
+                            app::ActiveTab::RequestBody => match &req.req_body {
+                                Some(body) => {
+                                    if body.is_empty() {
+                                        "(Empty body)".to_string()
+                                    } else {
+                                        body.clone()
+                                    }
+                                }
+                                None => "(No body)".to_string(),
                             },
                             app::ActiveTab::ResponseHeader => {
-                                "Unimplemented".to_string()
-                            },
-                            app::ActiveTab::ResponseBody => {
-                                "Unimplemented".to_string()
+                                format!(
+                                    "Status: {}\n\nHeaders:\n{}",
+                                    req.status.map_or("N/A".to_string(), |s| s.to_string()),
+                                    req.res_headers
+                                        .iter()
+                                        .map(|(k, v)| format!("{}: {}", k, v))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                )
                             }
+                            app::ActiveTab::ResponseBody => match &req.res_body {
+                                Some(body) => {
+                                    if body.is_empty() {
+                                        "(Empty body)".to_string()
+                                    } else {
+                                        body.clone()
+                                    }
+                                }
+                                None => "(No body)".to_string(),
+                            },
                         }
                     } else {
                         "Selected index out of bounds".to_string()
                     }
-                },
+                }
                 None => "Select a request".to_string(),
             };
 
             let line_count = info_text.lines().count();
             let main_display = Paragraph::new(info_text)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(match app.active_tab {
-                        app::ActiveTab::RequestHeader => "Request Header",
-                        app::ActiveTab::RequestBody => "Request Body",
-                        app::ActiveTab::ResponseHeader => "Response Header",
-                        app::ActiveTab::ResponseBody => "Response Body"
-                    }))
-                .wrap(Wrap { trim: false }) 
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(match app.active_tab {
+                            app::ActiveTab::RequestHeader => "Request Header",
+                            app::ActiveTab::RequestBody => "Request Body",
+                            app::ActiveTab::ResponseHeader => "Response Header",
+                            app::ActiveTab::ResponseBody => "Response Body",
+                        }),
+                )
+                .wrap(Wrap { trim: false })
                 .scroll((app.vertical_scroll, 0));
 
             frame.render_widget(main_display, right_content_chunks[0]);
@@ -207,24 +274,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .orientation(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
-            let mut scrollbar_state = ScrollbarState::new(line_count).position(app.vertical_scroll as usize);
+            let mut scrollbar_state =
+                ScrollbarState::new(line_count).position(app.vertical_scroll as usize);
             frame.render_stateful_widget(
                 scrollbar,
-                right_content_chunks[0].inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+                right_content_chunks[0].inner(ratatui::layout::Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
                 &mut scrollbar_state,
             );
 
-
             // Log Panel (only render when visible)
             if app.log_panel_visible {
-                let log_items: Vec<ListItem> = app.logs
+                let log_items: Vec<ListItem> = app
+                    .logs
                     .iter()
                     .rev()
                     .map(|l| ListItem::new(l.clone()))
                     .collect();
 
-                let log_list = List::new(log_items)
-                    .block(Block::default().title("Logs").borders(Borders::ALL).border_type(BorderType::Rounded));
+                let log_list = List::new(log_items).block(
+                    Block::default()
+                        .title("Logs")
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                );
 
                 frame.render_stateful_widget(log_list, right_content_chunks[1], &mut app.log_state);
             }
@@ -257,6 +332,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Cleanup
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     Ok(())
 }
