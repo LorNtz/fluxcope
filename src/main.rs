@@ -8,7 +8,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Style},
     style::Color,
     symbols,
     text::Line,
@@ -48,6 +48,13 @@ fn format_form_body(body: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Format JSON body with proper wrapping and indentation
+fn format_json_body(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| body.to_string()))
+        .unwrap_or_else(|_| body.to_string())
 }
 
 /// Convert a hex character to its numeric value (0-15)
@@ -308,7 +315,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     if body.is_empty() {
                                         "(Empty body)".to_string()
                                     } else {
-                                        body.clone()
+                                        format_json_body(body)
                                     }
                                 }
                                 None => "(No body)".to_string(),
