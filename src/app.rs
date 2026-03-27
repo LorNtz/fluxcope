@@ -1,4 +1,5 @@
 use crate::proxy_handler::CapturedData;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
 #[derive(Debug, PartialEq)]
@@ -19,11 +20,17 @@ pub struct App {
     pub requests: Vec<CapturedData>,
     pub logs: Vec<String>,
     pub state: ListState,
-    pub log_state: ListState,
+    pub log_scroll: u16,
+    pub max_log_scroll: u16,
     pub active_tab: ActiveTab,
     pub recording: bool,
     pub vertical_scroll: u16,
+    pub max_vertical_scroll: u16,
     pub log_panel_visible: bool,
+    // Panel rects for mouse hit-testing (updated each frame)
+    pub main_display_rect: Rect,
+    pub log_panel_rect: Rect,
+    pub request_list_rect: Rect,
 }
 
 impl App {
@@ -32,11 +39,16 @@ impl App {
             requests: vec![],
             logs: vec![],
             state: ListState::default(),
-            log_state: ListState::default(),
+            log_scroll: 0,
+            max_log_scroll: 0,
             active_tab: ActiveTab::RequestHeader,
             recording: true,
             vertical_scroll: 0,
+            max_vertical_scroll: 0,
             log_panel_visible: true,
+            main_display_rect: Rect::default(),
+            log_panel_rect: Rect::default(),
+            request_list_rect: Rect::default(),
         }
     }
 
@@ -57,8 +69,7 @@ impl App {
 
     pub fn add_log(&mut self, msg: String) {
         self.logs.push(msg);
-        // Auto-scroll to bottom
-        self.log_state.select(Some(self.logs.len() - 1));
+        // Auto-scroll to bottom (we'll handle this in rendering)
     }
 
     pub fn next(&mut self) {
@@ -108,11 +119,19 @@ impl App {
     }
 
     pub fn scroll_down(&mut self) {
-        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
+        self.vertical_scroll = self.vertical_scroll.saturating_add(1).min(self.max_vertical_scroll);
     }
 
     pub fn scroll_up(&mut self) {
         self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
+    }
+
+    pub fn scroll_log_down(&mut self) {
+        self.log_scroll = self.log_scroll.saturating_add(1).min(self.max_log_scroll);
+    }
+
+    pub fn scroll_log_up(&mut self) {
+        self.log_scroll = self.log_scroll.saturating_sub(1);
     }
 
     fn reset_scroll(&mut self) {

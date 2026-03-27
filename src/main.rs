@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -203,6 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .highlight_symbol("→ ");
 
             frame.render_stateful_widget(list, chunks[0], &mut app.state);
+            app.request_list_rect = chunks[0];
 
             // Right Panel: Details
             let right_main_chunks = Layout::default()
@@ -320,8 +321,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None => "Select a request".to_string(),
             };
 
-            let line_count = info_text.lines().count();
-            let main_display = Paragraph::new(info_text)
+            let mut main_display = Paragraph::new(info_text)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -333,18 +333,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             app::ActiveTab::ResponseBody => "Response Body",
                         }),
                 )
-                .wrap(Wrap { trim: false })
-                .scroll((app.vertical_scroll, 0));
+                .wrap(Wrap { trim: false });
+            let total_lines: u16 = main_display.line_count(right_content_chunks[0].width).try_into().unwrap();
+            app.max_vertical_scroll = total_lines.saturating_sub(right_content_chunks[0].height);
+            main_display = main_display.scroll((app.vertical_scroll.min(app.max_vertical_scroll), 0));
 
             frame.render_widget(main_display, right_content_chunks[0]);
-
+            app.main_display_rect = right_content_chunks[0];
+            app.log_panel_rect = right_content_chunks[1];
+            
             // Scrollbar
             let scrollbar = Scrollbar::default()
                 .orientation(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
             let mut scrollbar_state =
-                ScrollbarState::new(line_count).position(app.vertical_scroll as usize);
+                ScrollbarState::new(app.max_vertical_scroll.into()).position(app.vertical_scroll as usize);
             frame.render_stateful_widget(
                 scrollbar,
                 right_content_chunks[0].inner(ratatui::layout::Margin {
@@ -356,28 +360,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // Log Panel (only render when visible)
             if app.log_panel_visible {
-                let log_items: Vec<ListItem> = app
-                    .logs
-                    .iter()
-                    .rev()
-                    .map(|l| ListItem::new(l.clone()))
-                    .collect();
+                // Join all log messages with newlines for paragraph display
+                // Newer logs should be at the end, so we don't reverse
+                let log_text = app.logs.join("\n");
 
-                let log_list = List::new(log_items).block(
-                    Block::default()
-                        .title("Logs")
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded),
+                let mut log_paragraph = Paragraph::new(log_text)
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .title("Logs")
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded),
+                    );
+                let log_total_lines: u16 = log_paragraph.line_count(right_content_chunks[1].width).try_into().unwrap();
+                app.max_log_scroll = log_total_lines.saturating_sub(right_content_chunks[1].height);
+                log_paragraph = log_paragraph.scroll((app.log_scroll.min(app.max_log_scroll), 0));
+
+                frame.render_widget(log_paragraph, right_content_chunks[1]);
+
+                let mut log_scrollbar_state = ScrollbarState::default()
+                    .content_length(app.max_log_scroll.into())
+                    .position(app.log_scroll.into());
+
+                let log_scrollbar = Scrollbar::default()
+                    .orientation(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"));
+
+                frame.render_stateful_widget(
+                    log_scrollbar,
+                    right_content_chunks[1].inner(ratatui::layout::Margin {
+                        vertical: 1,
+                        horizontal: 0,
+                    }),
+                    &mut log_scrollbar_state,
                 );
-
-                frame.render_stateful_widget(log_list, right_content_chunks[1], &mut app.log_state);
             }
         })?;
 
         // Handle Input & Network Events
         if crossterm::event::poll(std::time::Duration::from_millis(10))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
+            match event::read()? {
+                Event::Key(key) => match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => app.next_tab(),
                     KeyCode::Char('J') => app.scroll_down(),
@@ -386,7 +410,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Char('@') => app.toggle_log_panel(),
                     _ => {}
+                },
+                Event::Mouse(mouse) => {
+                    let col = mouse.column;
+                    let row = mouse.row;
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            if app.log_panel_visible && app.log_panel_rect.contains((col, row).into()) {
+                                app.scroll_log_down();
+                            } else if app.main_display_rect.contains((col, row).into()) {
+                                app.scroll_down();
+                            } else if app.request_list_rect.contains((col, row).into()) {
+                                app.next();
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            if app.log_panel_visible && app.log_panel_rect.contains((col, row).into()) {
+                                app.scroll_log_up();
+                            } else if app.main_display_rect.contains((col, row).into()) {
+                                app.scroll_up();
+                            } else if app.request_list_rect.contains((col, row).into()) {
+                                app.previous();
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                _ => {}
             }
         }
 
