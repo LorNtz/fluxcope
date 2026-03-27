@@ -9,6 +9,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
+    style::Color,
     symbols,
     text::Line,
     widgets::{
@@ -186,7 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let selection_title = if app.requests.is_empty() {
                 String::new()
             } else {
-                let selected = app.state.selected().map(|i| i + 1).unwrap_or(0);
+                let selected = app.request_list.state.selected().map(|i| i + 1).unwrap_or(0);
                 let total = app.requests.len();
                 format!("{} of {}", selected, total)
             };
@@ -199,11 +200,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded),
                 )
-                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-                .highlight_symbol("→ ");
+                .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray));
 
-            frame.render_stateful_widget(list, chunks[0], &mut app.state);
-            app.request_list_rect = chunks[0];
+            frame.render_stateful_widget(list, chunks[0], &mut app.request_list.state);
+            app.request_list.rect = chunks[0];
 
             // Right Panel: Details
             let right_main_chunks = Layout::default()
@@ -219,7 +219,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let right_content_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(if app.log_panel_visible {
+                .constraints(if app.log_panel.visible {
                     [
                         Constraint::Percentage(50), // Main Details
                         Constraint::Percentage(50), // Logs
@@ -246,21 +246,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .border_type(BorderType::Rounded),
             )
             .divider(symbols::DOT)
-            .select(match app.active_tab {
-                app::ActiveTab::RequestHeader => 0,
-                app::ActiveTab::RequestBody => 1,
-                app::ActiveTab::ResponseHeader => 2,
-                app::ActiveTab::ResponseBody => 3,
+            .select(match app.detail_panel.active_tab {
+                app::MainDisplayTab::RequestHeader => 0,
+                app::MainDisplayTab::RequestBody => 1,
+                app::MainDisplayTab::ResponseHeader => 2,
+                app::MainDisplayTab::ResponseBody => 3,
             });
             frame.render_widget(tabs, right_main_chunks[0]);
 
             // Detail Content
-            let info_text = match app.state.selected() {
+            let info_text = match app.request_list.state.selected() {
                 Some(idx) => {
                     if idx < app.requests.len() {
                         let req = &app.requests[idx];
-                        match app.active_tab {
-                            app::ActiveTab::RequestHeader => {
+                        match app.detail_panel.active_tab {
+                            app::MainDisplayTab::RequestHeader => {
                                 format!(
                                     "Method: {}\nURI: {}\n\nHeaders:\n{}",
                                     req.method,
@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         .join("\n")
                                 )
                             }
-                            app::ActiveTab::RequestBody => match &req.req_body {
+                            app::MainDisplayTab::RequestBody => match &req.req_body {
                                 Some(body) => {
                                     if body.is_empty() {
                                         "(Empty body)".to_string()
@@ -292,7 +292,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 None => "(No body)".to_string(),
                             },
-                            app::ActiveTab::ResponseHeader => {
+                            app::MainDisplayTab::ResponseHeader => {
                                 format!(
                                     "Status: {}\n\nHeaders:\n{}",
                                     req.status.map_or("N/A".to_string(), |s| s.to_string()),
@@ -303,7 +303,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         .join("\n")
                                 )
                             }
-                            app::ActiveTab::ResponseBody => match &req.res_body {
+                            app::MainDisplayTab::ResponseBody => match &req.res_body {
                                 Some(body) => {
                                     if body.is_empty() {
                                         "(Empty body)".to_string()
@@ -326,21 +326,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .title(match app.active_tab {
-                            app::ActiveTab::RequestHeader => "Request Header",
-                            app::ActiveTab::RequestBody => "Request Body",
-                            app::ActiveTab::ResponseHeader => "Response Header",
-                            app::ActiveTab::ResponseBody => "Response Body",
+                        .title(match app.detail_panel.active_tab {
+                            app::MainDisplayTab::RequestHeader => "Request Header",
+                            app::MainDisplayTab::RequestBody => "Request Body",
+                            app::MainDisplayTab::ResponseHeader => "Response Header",
+                            app::MainDisplayTab::ResponseBody => "Response Body",
                         }),
                 )
                 .wrap(Wrap { trim: false });
             let total_lines: u16 = main_display.line_count(right_content_chunks[0].width).try_into().unwrap();
-            app.max_vertical_scroll = total_lines.saturating_sub(right_content_chunks[0].height);
-            main_display = main_display.scroll((app.vertical_scroll.min(app.max_vertical_scroll), 0));
+            app.detail_panel.scroll.max_offset = total_lines.saturating_sub(right_content_chunks[0].height);
+            main_display = main_display.scroll((app.detail_panel.scroll.offset.min(app.detail_panel.scroll.max_offset), 0));
 
             frame.render_widget(main_display, right_content_chunks[0]);
-            app.main_display_rect = right_content_chunks[0];
-            app.log_panel_rect = right_content_chunks[1];
+            app.detail_panel.rect = right_content_chunks[0];
+            app.log_panel.rect = right_content_chunks[1];
             
             // Scrollbar
             let scrollbar = Scrollbar::default()
@@ -348,7 +348,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
             let mut scrollbar_state =
-                ScrollbarState::new(app.max_vertical_scroll.into()).position(app.vertical_scroll as usize);
+                ScrollbarState::new(app.detail_panel.scroll.max_offset as usize).position(app.detail_panel.scroll.offset as usize);
             frame.render_stateful_widget(
                 scrollbar,
                 right_content_chunks[0].inner(ratatui::layout::Margin {
@@ -359,10 +359,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
 
             // Log Panel (only render when visible)
-            if app.log_panel_visible {
+            if app.log_panel.visible {
                 // Join all log messages with newlines for paragraph display
                 // Newer logs should be at the end, so we don't reverse
-                let log_text = app.logs.join("\n");
+                let log_text = app.log_panel.logs.join("\n");
 
                 let mut log_paragraph = Paragraph::new(log_text)
                     .wrap(Wrap { trim: false })
@@ -373,14 +373,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             .border_type(BorderType::Rounded),
                     );
                 let log_total_lines: u16 = log_paragraph.line_count(right_content_chunks[1].width).try_into().unwrap();
-                app.max_log_scroll = log_total_lines.saturating_sub(right_content_chunks[1].height);
-                log_paragraph = log_paragraph.scroll((app.log_scroll.min(app.max_log_scroll), 0));
+                app.log_panel.scroll.max_offset = log_total_lines.saturating_sub(right_content_chunks[1].height);
+                log_paragraph = log_paragraph.scroll((app.log_panel.scroll.offset.min(app.log_panel.scroll.max_offset), 0));
 
                 frame.render_widget(log_paragraph, right_content_chunks[1]);
 
                 let mut log_scrollbar_state = ScrollbarState::default()
-                    .content_length(app.max_log_scroll.into())
-                    .position(app.log_scroll.into());
+                    .content_length(app.log_panel.scroll.max_offset.into())
+                    .position(app.log_panel.scroll.offset.into());
 
                 let log_scrollbar = Scrollbar::default()
                     .orientation(ScrollbarOrientation::VerticalRight)
@@ -403,12 +403,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Tab => app.next_tab(),
-                    KeyCode::Char('J') => app.scroll_down(),
-                    KeyCode::Char('K') => app.scroll_up(),
+                    KeyCode::Tab => app.detail_panel.next_tab(),
+                    KeyCode::Char('J') => app.detail_panel.scroll.scroll_down(),
+                    KeyCode::Char('K') => app.detail_panel.scroll.scroll_up(),
                     KeyCode::Char('j') | KeyCode::Down => app.next(),
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                    KeyCode::Char('@') => app.toggle_log_panel(),
+                    KeyCode::Char('@') => app.log_panel.toggle(),
                     _ => {}
                 },
                 Event::Mouse(mouse) => {
@@ -416,20 +416,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let row = mouse.row;
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
-                            if app.log_panel_visible && app.log_panel_rect.contains((col, row).into()) {
-                                app.scroll_log_down();
-                            } else if app.main_display_rect.contains((col, row).into()) {
-                                app.scroll_down();
-                            } else if app.request_list_rect.contains((col, row).into()) {
+                            if app.log_panel.visible && app.log_panel.rect.contains((col, row).into()) {
+                                app.log_panel.scroll.scroll_down();
+                            } else if app.detail_panel.rect.contains((col, row).into()) {
+                                app.detail_panel.scroll.scroll_down();
+                            } else if app.request_list.rect.contains((col, row).into()) {
                                 app.next();
                             }
                         }
                         MouseEventKind::ScrollUp => {
-                            if app.log_panel_visible && app.log_panel_rect.contains((col, row).into()) {
-                                app.scroll_log_up();
-                            } else if app.main_display_rect.contains((col, row).into()) {
-                                app.scroll_up();
-                            } else if app.request_list_rect.contains((col, row).into()) {
+                            if app.log_panel.visible && app.log_panel.rect.contains((col, row).into()) {
+                                app.log_panel.scroll.scroll_up();
+                            } else if app.detail_panel.rect.contains((col, row).into()) {
+                                app.detail_panel.scroll.scroll_up();
+                            } else if app.request_list.rect.contains((col, row).into()) {
                                 app.previous();
                             }
                         }
@@ -444,7 +444,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         while let Ok(event) = rx.try_recv() {
             match event {
                 AppEvent::NetworkRequest(req) => app.add_request(req),
-                AppEvent::LogMessage(msg) => app.add_log(msg),
+                AppEvent::LogMessage(msg) => app.log_panel.add_log(msg),
             }
         }
     }
