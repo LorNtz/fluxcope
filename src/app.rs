@@ -1,13 +1,34 @@
 use crate::proxy_handler::CapturedData;
+use crossterm::event::{KeyCode, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MainDisplayTab {
     RequestHeader,
     RequestBody,
     ResponseHeader,
     ResponseBody,
+}
+
+impl MainDisplayTab {
+    pub fn title(self) -> &'static str {
+        match self {
+            MainDisplayTab::RequestHeader => "Request Header",
+            MainDisplayTab::RequestBody => "Request Body",
+            MainDisplayTab::ResponseHeader => "Response Header",
+            MainDisplayTab::ResponseBody => "Response Body",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            MainDisplayTab::RequestHeader => 0,
+            MainDisplayTab::RequestBody => 1,
+            MainDisplayTab::ResponseHeader => 2,
+            MainDisplayTab::ResponseBody => 3,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -175,5 +196,77 @@ impl App {
         };
         self.request_list.state.select(Some(i));
         self.detail_panel.scroll.reset();
+    }
+
+    pub fn selected_request(&self) -> Option<&CapturedData> {
+        self.request_list
+            .state
+            .selected()
+            .and_then(|index| self.requests.get(index))
+    }
+
+    pub fn handle_key_press(&mut self, key_code: KeyCode) -> bool {
+        match key_code {
+            KeyCode::Char('q') => true,
+            KeyCode::Tab => {
+                self.detail_panel.next_tab();
+                false
+            }
+            KeyCode::Char('J') => {
+                self.detail_panel.scroll.scroll_down();
+                false
+            }
+            KeyCode::Char('K') => {
+                self.detail_panel.scroll.scroll_up();
+                false
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.next();
+                false
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.previous();
+                false
+            }
+            KeyCode::Char('@') => {
+                self.log_panel.toggle();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let col = mouse.column;
+        let row = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if self.log_panel.visible && self.log_panel.rect.contains((col, row).into()) {
+                    self.log_panel.scroll.scroll_down();
+                } else if self.detail_panel.rect.contains((col, row).into()) {
+                    self.detail_panel.scroll.scroll_down();
+                } else if self.request_list.rect.contains((col, row).into()) {
+                    self.next();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if self.log_panel.visible && self.log_panel.rect.contains((col, row).into()) {
+                    self.log_panel.scroll.scroll_up();
+                } else if self.detail_panel.rect.contains((col, row).into()) {
+                    self.detail_panel.scroll.scroll_up();
+                } else if self.request_list.rect.contains((col, row).into()) {
+                    self.previous();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn handle_app_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::NetworkRequest(req) => self.add_request(req),
+            AppEvent::LogMessage(msg) => self.log_panel.add_log(msg),
+        }
     }
 }

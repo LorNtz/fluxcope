@@ -1,9 +1,9 @@
-use log::{Record, Level, Metadata, SetLoggerError};
-use std::fs::{File, OpenOptions};
-use std::sync::Mutex;
-use std::io::Write;
-use tokio::sync::mpsc;
 use crate::app::AppEvent;
+use log::{Level, Metadata, Record, SetLoggerError};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::sync::Mutex;
+use tokio::sync::mpsc;
 
 pub struct AppLogger {
     file: Mutex<File>,
@@ -43,8 +43,13 @@ impl log::Log for AppLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let log_msg = format!("{} - [{}] {}", record.level(), record.target(), record.args());
-            
+            let log_msg = format!(
+                "{} - [{}] {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+
             // Write to file
             if let Ok(mut file) = self.file.lock() {
                 if let Err(e) = writeln!(file, "{}", log_msg) {

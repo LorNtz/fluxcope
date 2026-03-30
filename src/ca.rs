@@ -1,5 +1,7 @@
 // src/ca.rs
-use rcgen::{Certificate, BasicConstraints, IsCa, KeyUsagePurpose, CertificateParams, DistinguishedName};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyUsagePurpose,
+};
 use std::fs;
 use std::path::PathBuf;
 
@@ -24,7 +26,11 @@ impl CaData {
         let cert_der = cert.serialize_der().unwrap();
         let key_der = cert.serialize_private_key_der();
         let cert_pem = cert.serialize_pem().unwrap();
-        CaData { cert_der, key_der, cert_pem }
+        CaData {
+            cert_der,
+            key_der,
+            cert_pem,
+        }
     }
 
     /// Load CaData from DER files on disk
@@ -37,7 +43,11 @@ impl CaData {
         let key_der = fs::read(key_path)?;
         let cert_pem = fs::read_to_string(pem_path)?;
 
-        Ok(CaData { cert_der, key_der, cert_pem })
+        Ok(CaData {
+            cert_der,
+            key_der,
+            cert_pem,
+        })
     }
 
     /// Save to disk
@@ -78,7 +88,7 @@ pub fn create_or_load_ca() -> CaData {
             Ok(data) => {
                 log::info!("Successfully loaded existing CA certificate");
                 return data;
-            },
+            }
             Err(e) => {
                 log::warn!("Failed to load existing CA certificate: {}", e);
                 log::info!("Creating new CA certificate...");
@@ -104,8 +114,13 @@ fn create_ca() -> Certificate {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.distinguished_name = DistinguishedName::new();
-    params.distinguished_name.push(rcgen::DnType::CommonName, "Proxy TUI CA");
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Proxy TUI CA");
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
 
     Certificate::from_params(params).unwrap()
 }
@@ -126,16 +141,28 @@ mod tests {
         let cert_pem1 = ca1.cert_pem();
 
         // Verify files were created
-        assert!(cert_dir.join(CA_CERT_FILE).exists(), "Certificate DER file should exist");
-        assert!(cert_dir.join(CA_KEY_FILE).exists(), "Key DER file should exist");
-        assert!(cert_dir.join(CA_CERT_PEM).exists(), "Certificate PEM file should exist");
+        assert!(
+            cert_dir.join(CA_CERT_FILE).exists(),
+            "Certificate DER file should exist"
+        );
+        assert!(
+            cert_dir.join(CA_KEY_FILE).exists(),
+            "Key DER file should exist"
+        );
+        assert!(
+            cert_dir.join(CA_CERT_PEM).exists(),
+            "Certificate PEM file should exist"
+        );
 
         // Second run - should load existing certificate
         let ca2 = create_or_load_ca_custom(&cert_dir);
         let cert_pem2 = ca2.cert_pem();
 
         // Certificates should match
-        assert_eq!(cert_pem1, cert_pem2, "Loaded certificate should match original");
+        assert_eq!(
+            cert_pem1, cert_pem2,
+            "Loaded certificate should match original"
+        );
 
         // DER bytes should also match
         assert_eq!(ca1.cert_der(), ca2.cert_der(), "DER bytes should match");

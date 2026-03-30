@@ -55,9 +55,16 @@ impl HttpHandler for LogHandler {
                     if bytes.is_empty() {
                         None
                     } else {
-                        Some(format!("[Binary body: {} bytes, first 32 bytes in hex: {}]",
+                        Some(format!(
+                            "[Binary body: {} bytes, first 32 bytes in hex: {}]",
                             bytes.len(),
-                            bytes.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")))
+                            bytes
+                                .iter()
+                                .take(32)
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ))
                     }
                 };
                 (body_str, bytes)
@@ -105,9 +112,16 @@ impl HttpHandler for LogHandler {
                     if bytes.is_empty() {
                         None
                     } else {
-                        Some(format!("[Binary body: {} bytes, first 32 bytes in hex: {}]",
+                        Some(format!(
+                            "[Binary body: {} bytes, first 32 bytes in hex: {}]",
                             bytes.len(),
-                            bytes.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")))
+                            bytes
+                                .iter()
+                                .take(32)
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ))
                     }
                 };
                 (body_str, bytes)
