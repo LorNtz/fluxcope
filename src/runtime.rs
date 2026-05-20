@@ -56,6 +56,8 @@ fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingReq
         })
         .build();
 
+    log::info!("Proxy server listening on http://127.0.0.1:8989");
+
     tokio::spawn(async move {
         if let Err(error) = proxy
             .start(async {
