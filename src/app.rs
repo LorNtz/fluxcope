@@ -1,6 +1,5 @@
 use crate::proxy_handler::CapturedData;
-use crossterm::event::{KeyCode, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
+use crossterm::event::KeyCode;
 use ratatui::widgets::ListState;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,14 +64,12 @@ impl ScrollState {
 
 pub struct RequestListPanel {
     pub state: ListState,
-    pub rect: Rect,
 }
 
 impl RequestListPanel {
     pub fn new() -> Self {
         Self {
             state: ListState::default(),
-            rect: Rect::default(),
         }
     }
 }
@@ -80,7 +77,6 @@ impl RequestListPanel {
 pub struct DetailPanel {
     pub active_tab: MainDisplayTab,
     pub scroll: ScrollState,
-    pub rect: Rect,
 }
 
 impl DetailPanel {
@@ -88,7 +84,6 @@ impl DetailPanel {
         Self {
             active_tab: MainDisplayTab::RequestHeader,
             scroll: ScrollState::new(),
-            rect: Rect::default(),
         }
     }
 
@@ -107,7 +102,6 @@ pub struct LogPanel {
     pub logs: Vec<String>,
     pub scroll: ScrollState,
     pub visible: bool,
-    pub rect: Rect,
 }
 
 impl LogPanel {
@@ -116,7 +110,6 @@ impl LogPanel {
             logs: vec![],
             scroll: ScrollState::new(),
             visible: true,
-            rect: Rect::default(),
         }
     }
 
@@ -233,33 +226,6 @@ impl App {
                 false
             }
             _ => false,
-        }
-    }
-
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let col = mouse.column;
-        let row = mouse.row;
-
-        match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                if self.log_panel.visible && self.log_panel.rect.contains((col, row).into()) {
-                    self.log_panel.scroll.scroll_down();
-                } else if self.detail_panel.rect.contains((col, row).into()) {
-                    self.detail_panel.scroll.scroll_down();
-                } else if self.request_list.rect.contains((col, row).into()) {
-                    self.next();
-                }
-            }
-            MouseEventKind::ScrollUp => {
-                if self.log_panel.visible && self.log_panel.rect.contains((col, row).into()) {
-                    self.log_panel.scroll.scroll_up();
-                } else if self.detail_panel.rect.contains((col, row).into()) {
-                    self.detail_panel.scroll.scroll_up();
-                } else if self.request_list.rect.contains((col, row).into()) {
-                    self.previous();
-                }
-            }
-            _ => {}
         }
     }
 

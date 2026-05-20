@@ -3,7 +3,7 @@ use crate::{
     ca,
     logging::AppLogger,
     proxy_handler::{CapturedData, LogHandler},
-    ui,
+    ui::RootView,
 };
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
@@ -83,18 +83,24 @@ fn export_ca_certificate() {
 
 struct AppRuntime {
     app: App,
+    ui: RootView,
     rx: mpsc::UnboundedReceiver<AppEvent>,
     tui: Tui,
 }
 
 impl AppRuntime {
     fn new(app: App, rx: mpsc::UnboundedReceiver<AppEvent>, tui: Tui) -> Self {
-        Self { app, rx, tui }
+        Self {
+            app,
+            ui: RootView::new(),
+            rx,
+            tui,
+        }
     }
 
     fn run(mut self) -> Result<(), Box<dyn Error>> {
         loop {
-            self.tui.draw(&mut self.app)?;
+            self.tui.draw(&mut self.ui, &mut self.app)?;
 
             if self.handle_terminal_events()? {
                 return Ok(());
@@ -112,7 +118,7 @@ impl AppRuntime {
         match event::read()? {
             Event::Key(key) => Ok(self.app.handle_key_press(key.code)),
             Event::Mouse(mouse) => {
-                self.app.handle_mouse(mouse);
+                self.ui.handle_mouse(mouse, &mut self.app);
                 Ok(false)
             }
             _ => Ok(false),
@@ -140,9 +146,9 @@ impl Tui {
         Ok(Self { terminal })
     }
 
-    fn draw(&mut self, app: &mut App) -> io::Result<()> {
+    fn draw(&mut self, ui: &mut RootView, app: &mut App) -> io::Result<()> {
         self.terminal
-            .draw(|frame| ui::render(frame, app))
+            .draw(|frame| ui.render(frame, app))
             .map(|_| ())
     }
 }

@@ -1,7 +1,8 @@
 use crate::app::{App, MainDisplayTab};
+use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Margin},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Style},
     symbols,
     text::Line,
@@ -11,159 +12,414 @@ use ratatui::{
     },
 };
 
-pub fn render(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(frame.area());
+trait View {
+    fn area(&self) -> Rect;
+    fn set_area(&mut self, area: Rect);
+    fn render(&self, frame: &mut Frame, app: &mut App);
 
-    render_request_list(frame, app, chunks[0]);
-    render_right_panel(frame, app, chunks[1]);
-}
+    fn layout(&mut self, area: Rect, _app: &App) {
+        self.set_area(area);
+    }
 
-fn render_request_list(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem> = app
-        .requests
-        .iter()
-        .map(|req| ListItem::new(format!("{} {}", req.method, req.uri)))
-        .collect();
-
-    let selection_title = if app.requests.is_empty() {
-        String::new()
-    } else {
-        let selected = app
-            .request_list
-            .state
-            .selected()
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        format!("{} of {}", selected, app.requests.len())
-    };
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title("Requests")
-                .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
-        )
-        .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray));
-
-    frame.render_stateful_widget(list, area, &mut app.request_list.state);
-    app.request_list.rect = area;
-}
-
-fn render_right_panel(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
-
-    let content_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(if app.log_panel.visible {
-            [Constraint::Percentage(50), Constraint::Percentage(50)]
-        } else {
-            [Constraint::Percentage(100), Constraint::Percentage(0)]
-        })
-        .split(main_chunks[1]);
-
-    render_tabs(frame, app, main_chunks[0]);
-    render_detail_panel(frame, app, content_chunks[0]);
-    app.log_panel.rect = content_chunks[1];
-
-    if app.log_panel.visible {
-        render_log_panel(frame, app, content_chunks[1]);
+    fn contains_mouse(&self, mouse: MouseEvent) -> bool {
+        self.area().contains((mouse.column, mouse.row).into())
     }
 }
 
-fn render_tabs(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let tabs = Tabs::new(vec![
-        MainDisplayTab::RequestHeader.title(),
-        MainDisplayTab::RequestBody.title(),
-        MainDisplayTab::ResponseHeader.title(),
-        MainDisplayTab::ResponseBody.title(),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded),
-    )
-    .divider(symbols::DOT)
-    .select(app.detail_panel.active_tab.index());
-
-    frame.render_widget(tabs, area);
+trait MouseHandler: View {
+    fn handle_mouse(&self, _mouse: MouseEvent, _app: &mut App) -> bool {
+        false
+    }
 }
 
-fn render_detail_panel(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let detail_text = build_detail_text(app);
-    let mut paragraph = Paragraph::new(detail_text)
+pub struct RootView {
+    area: Rect,
+    request_list: RequestListView,
+    right_panel: RightPanelView,
+}
+
+impl RootView {
+    pub fn new() -> Self {
+        Self {
+            area: Rect::default(),
+            request_list: RequestListView::new(),
+            right_panel: RightPanelView::new(),
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, app: &mut App) {
+        View::layout(self, frame.area(), app);
+        View::render(self, frame, app);
+    }
+
+    pub fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) {
+        let _ = MouseHandler::handle_mouse(self, mouse, app);
+    }
+}
+
+impl View for RootView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        self.request_list.render(frame, app);
+        self.right_panel.render(frame, app);
+    }
+
+    fn layout(&mut self, area: Rect, app: &App) {
+        self.set_area(area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(area);
+
+        self.request_list.layout(chunks[0], app);
+        self.right_panel.layout(chunks[1], app);
+    }
+}
+
+impl MouseHandler for RootView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
+    }
+}
+
+struct RequestListView {
+    area: Rect,
+}
+
+impl RequestListView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+        }
+    }
+}
+
+impl View for RequestListView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        let items: Vec<ListItem> = app
+            .requests
+            .iter()
+            .map(|req| ListItem::new(format!("{} {}", req.method, req.uri)))
+            .collect();
+
+        let selection_title = if app.requests.is_empty() {
+            String::new()
+        } else {
+            let selected = app
+                .request_list
+                .state
+                .selected()
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            format!("{} of {}", selected, app.requests.len())
+        };
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title("Requests")
+                    .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded),
+            )
+            .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray));
+
+        frame.render_stateful_widget(list, self.area(), &mut app.request_list.state);
+    }
+}
+
+impl MouseHandler for RequestListView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        if !self.contains_mouse(mouse) {
+            return false;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.next();
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                app.previous();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+struct RightPanelView {
+    area: Rect,
+    tabs: TabsView,
+    detail: DetailView,
+    log: LogView,
+}
+
+impl RightPanelView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+            tabs: TabsView::new(),
+            detail: DetailView::new(),
+            log: LogView::new(),
+        }
+    }
+}
+
+impl View for RightPanelView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        self.tabs.render(frame, app);
+        self.detail.render(frame, app);
+
+        if app.log_panel.visible {
+            self.log.render(frame, app);
+        }
+    }
+
+    fn layout(&mut self, area: Rect, app: &App) {
+        self.set_area(area);
+
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        let content_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(if app.log_panel.visible {
+                [Constraint::Percentage(50), Constraint::Percentage(50)]
+            } else {
+                [Constraint::Percentage(100), Constraint::Percentage(0)]
+            })
+            .split(main_chunks[1]);
+
+        self.tabs.layout(main_chunks[0], app);
+        self.detail.layout(content_chunks[0], app);
+        self.log.layout(content_chunks[1], app);
+    }
+}
+
+impl MouseHandler for RightPanelView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        (app.log_panel.visible && self.log.handle_mouse(mouse, app))
+            || self.detail.handle_mouse(mouse, app)
+    }
+}
+
+struct TabsView {
+    area: Rect,
+}
+
+impl TabsView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+        }
+    }
+}
+
+impl View for TabsView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        let tabs = Tabs::new(vec![
+            MainDisplayTab::RequestHeader.title(),
+            MainDisplayTab::RequestBody.title(),
+            MainDisplayTab::ResponseHeader.title(),
+            MainDisplayTab::ResponseBody.title(),
+        ])
         .block(
             Block::default()
-                .title(app.detail_panel.active_tab.title())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded),
         )
-        .wrap(Wrap { trim: false });
+        .divider(symbols::DOT)
+        .select(app.detail_panel.active_tab.index());
 
-    let total_lines: u16 = paragraph
-        .line_count(area.width)
-        .try_into()
-        .unwrap_or(u16::MAX);
-    app.detail_panel.scroll.max_offset = total_lines.saturating_sub(area.height);
-    paragraph = paragraph.scroll((
-        app.detail_panel
-            .scroll
-            .offset
-            .min(app.detail_panel.scroll.max_offset),
-        0,
-    ));
-
-    frame.render_widget(paragraph, area);
-    app.detail_panel.rect = area;
-
-    render_scrollbar(
-        frame,
-        area,
-        app.detail_panel.scroll.max_offset,
-        app.detail_panel.scroll.offset,
-    );
+        frame.render_widget(tabs, self.area());
+    }
 }
 
-fn render_log_panel(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let mut paragraph = Paragraph::new(app.log_panel.logs.join("\n"))
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title("Logs")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
+struct DetailView {
+    area: Rect,
+}
+
+impl DetailView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+        }
+    }
+}
+
+impl View for DetailView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        let detail_text = build_detail_text(app);
+        let mut paragraph = Paragraph::new(detail_text)
+            .block(
+                Block::default()
+                    .title(app.detail_panel.active_tab.title())
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded),
+            )
+            .wrap(Wrap { trim: false });
+
+        let total_lines: u16 = paragraph
+            .line_count(self.area().width)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        app.detail_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
+        paragraph = paragraph.scroll((
+            app.detail_panel
+                .scroll
+                .offset
+                .min(app.detail_panel.scroll.max_offset),
+            0,
+        ));
+
+        frame.render_widget(paragraph, self.area());
+        render_scrollbar(
+            frame,
+            self.area(),
+            app.detail_panel.scroll.max_offset,
+            app.detail_panel.scroll.offset,
         );
-
-    let total_lines: u16 = paragraph
-        .line_count(area.width)
-        .try_into()
-        .unwrap_or(u16::MAX);
-    app.log_panel.scroll.max_offset = total_lines.saturating_sub(area.height);
-    paragraph = paragraph.scroll((
-        app.log_panel
-            .scroll
-            .offset
-            .min(app.log_panel.scroll.max_offset),
-        0,
-    ));
-
-    frame.render_widget(paragraph, area);
-    render_scrollbar(
-        frame,
-        area,
-        app.log_panel.scroll.max_offset,
-        app.log_panel.scroll.offset,
-    );
+    }
 }
 
-fn render_scrollbar(frame: &mut Frame, area: ratatui::layout::Rect, max_offset: u16, offset: u16) {
+impl MouseHandler for DetailView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        if !self.contains_mouse(mouse) {
+            return false;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.detail_panel.scroll.scroll_down();
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                app.detail_panel.scroll.scroll_up();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+struct LogView {
+    area: Rect,
+}
+
+impl LogView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+        }
+    }
+}
+
+impl View for LogView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        let mut paragraph = Paragraph::new(app.log_panel.logs.join("\n"))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Logs")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded),
+            );
+
+        let total_lines: u16 = paragraph
+            .line_count(self.area().width)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        app.log_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
+        paragraph = paragraph.scroll((
+            app.log_panel
+                .scroll
+                .offset
+                .min(app.log_panel.scroll.max_offset),
+            0,
+        ));
+
+        frame.render_widget(paragraph, self.area());
+        render_scrollbar(
+            frame,
+            self.area(),
+            app.log_panel.scroll.max_offset,
+            app.log_panel.scroll.offset,
+        );
+    }
+}
+
+impl MouseHandler for LogView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        if !self.contains_mouse(mouse) {
+            return false;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.log_panel.scroll.scroll_down();
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                app.log_panel.scroll.scroll_up();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn render_scrollbar(frame: &mut Frame, area: Rect, max_offset: u16, offset: u16) {
     let scrollbar = Scrollbar::default()
         .orientation(ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("↑"))
