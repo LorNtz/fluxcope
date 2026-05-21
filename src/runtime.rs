@@ -17,6 +17,11 @@ use tokio::sync::{Mutex, mpsc};
 type PendingRequests = Arc<Mutex<HashMap<uuid::Uuid, CapturedData>>>;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
+    // Check if port is already in use by another instance
+    if let Err(e) = std::net::TcpListener::bind("127.0.0.1:8989") {
+        return Err(format!("Failed to bind to proxy port 8989: {}. Is another instance running?", e).into());
+    }
+
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
     let pending_requests = Arc::new(Mutex::new(HashMap::new()));
 
