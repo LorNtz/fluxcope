@@ -30,3 +30,4 @@ url = "2.5"
 parking_lot = "0.12" # Faster Mutex/RwLock
 log = "0.4"
 uuid = "1.19.0"
+qrcode = { version = "0.14", default-features = false }

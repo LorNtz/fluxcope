@@ -34,6 +34,7 @@ impl MainDisplayTab {
 pub enum AppEvent {
     NetworkRequest(CapturedData),
     LogMessage(String),
+    CertificateDownloadReady(String),
 }
 
 pub struct ScrollState {
@@ -122,12 +123,39 @@ impl LogPanel {
     }
 }
 
+pub struct CertificatePopup {
+    pub visible: bool,
+    pub download_url: Option<String>,
+}
+
+impl CertificatePopup {
+    pub fn new() -> Self {
+        Self {
+            visible: false,
+            download_url: None,
+        }
+    }
+
+    pub fn open(&mut self) {
+        self.visible = true;
+    }
+
+    pub fn close(&mut self) {
+        self.visible = false;
+    }
+
+    pub fn set_download_url(&mut self, download_url: String) {
+        self.download_url = Some(download_url);
+    }
+}
+
 pub struct App {
     pub requests: Vec<CapturedData>,
     pub recording: bool,
     pub request_list: RequestListPanel,
     pub detail_panel: DetailPanel,
     pub log_panel: LogPanel,
+    pub certificate_popup: CertificatePopup,
 }
 
 impl App {
@@ -138,6 +166,7 @@ impl App {
             request_list: RequestListPanel::new(),
             detail_panel: DetailPanel::new(),
             log_panel: LogPanel::new(),
+            certificate_popup: CertificatePopup::new(),
         }
     }
 
@@ -199,6 +228,11 @@ impl App {
     }
 
     pub fn handle_key_press(&mut self, key_code: KeyCode) -> bool {
+        if self.certificate_popup.visible && key_code == KeyCode::Esc {
+            self.certificate_popup.close();
+            return false;
+        }
+
         match key_code {
             KeyCode::Char('q') => true,
             KeyCode::Tab => {
@@ -225,6 +259,10 @@ impl App {
                 self.log_panel.toggle();
                 false
             }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.certificate_popup.open();
+                false
+            }
             _ => false,
         }
     }
@@ -233,6 +271,9 @@ impl App {
         match event {
             AppEvent::NetworkRequest(req) => self.add_request(req),
             AppEvent::LogMessage(msg) => self.log_panel.add_log(msg),
+            AppEvent::CertificateDownloadReady(download_url) => {
+                self.certificate_popup.set_download_url(download_url)
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::app::{App, MainDisplayTab};
 use crossterm::event::{MouseEvent, MouseEventKind};
+use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -7,8 +8,8 @@ use ratatui::{
     symbols,
     text::Line,
     widgets::{
-        Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Tabs, Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
     },
 };
 
@@ -69,6 +70,10 @@ impl View for RootView {
     fn render(&self, frame: &mut Frame, app: &mut App) {
         self.request_list.render(frame, app);
         self.right_panel.render(frame, app);
+
+        if app.certificate_popup.visible {
+            render_certificate_popup(frame, app);
+        }
     }
 
     fn layout(&mut self, area: Rect, app: &App) {
@@ -434,6 +439,219 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, max_offset: u16, offset: u16)
         }),
         &mut state,
     );
+}
+
+fn render_certificate_popup(frame: &mut Frame, app: &App) {
+    let download_url = app.certificate_popup.download_url.as_deref();
+    let qr_lines = download_url.map(build_qr_lines).unwrap_or_default();
+    let description_lines = [
+        "Connect your mobile phone to the same LAN as this device",
+        "then scan to download the proxy CA certificate and install it.",
+        "Don't forget to manually trust the CA if you're on iOS 10 or later.",
+    ];
+    let qr_width = qr_lines
+        .iter()
+        .map(|line| line.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    let text_width = description_lines
+        .iter()
+        .copied()
+        .chain([
+            "Certificate download URL is unavailable.",
+            "Press Esc to close",
+        ])
+        .chain(download_url)
+        .map(text_width)
+        .max()
+        .unwrap_or(0);
+    let available_width = frame.area().width.saturating_sub(4).max(1);
+    let width = qr_width
+        .max(text_width)
+        .saturating_add(4)
+        .max(56)
+        .min(available_width);
+    let wrap_width = width.saturating_sub(4).max(1);
+    let available_height = frame.area().height.saturating_sub(2).max(1);
+    let content_height = available_height.saturating_sub(2) as usize;
+
+    let mut lines = PopupLines::new();
+    lines.push_blank();
+    for description in description_lines {
+        lines.push_centered_wrapped(description, wrap_width);
+    }
+    lines.push_blank();
+
+    if qr_lines.is_empty() {
+        lines.push_centered_wrapped("Certificate download URL is unavailable.", wrap_width);
+    } else {
+        lines.extend_centered(qr_lines);
+        if let Some(download_url) = download_url {
+            let url_lines = wrap_text(download_url, wrap_width);
+            if lines.len() + url_lines.len() < content_height {
+                lines.push_blank();
+                lines.extend_centered(url_lines);
+                lines.push_blank();
+            }
+        }
+    }
+
+    let height = lines
+        .len()
+        .try_into()
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(available_height);
+    let area = centered_rect(width, height, frame.area());
+
+    let content = Paragraph::new(lines.into_lines())
+        .block(
+            Block::default()
+                .title("Install Certificate")
+                .title_alignment(Alignment::Center)
+                .title_bottom(Line::from("Press Esc to close").alignment(Alignment::Center))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        )
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(content, area);
+}
+
+struct PopupLines {
+    lines: Vec<Line<'static>>,
+}
+
+impl PopupLines {
+    fn new() -> Self {
+        Self { lines: Vec::new() }
+    }
+
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn push_blank(&mut self) {
+        self.lines.push(Line::from(""));
+    }
+
+    fn push_centered_wrapped(&mut self, text: &str, max_width: u16) {
+        self.extend_centered(wrap_text(text, max_width));
+    }
+
+    fn extend_centered(&mut self, lines: impl IntoIterator<Item = String>) {
+        self.lines.extend(
+            lines
+                .into_iter()
+                .map(|line| Line::from(line).alignment(Alignment::Center)),
+        );
+    }
+
+    fn into_lines(self) -> Vec<Line<'static>> {
+        self.lines
+    }
+}
+
+fn wrap_text(text: &str, max_width: u16) -> Vec<String> {
+    let max_width = max_width as usize;
+    if max_width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_width = text_width(word) as usize;
+        if current.is_empty() {
+            if word_width <= max_width {
+                current.push_str(word);
+            } else {
+                lines.extend(hard_wrap_text(word, max_width));
+            }
+            continue;
+        }
+
+        let next_width = text_width(&current) as usize + 1 + word_width;
+        if next_width <= max_width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = String::new();
+            if word_width <= max_width {
+                current.push_str(word);
+            } else {
+                lines.extend(hard_wrap_text(word, max_width));
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
+    }
+}
+
+fn hard_wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        if current.chars().count() >= max_width {
+            lines.push(current);
+            current = String::new();
+        }
+        current.push(ch);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+fn text_width(text: &str) -> u16 {
+    text.chars().count().try_into().unwrap_or(u16::MAX)
+}
+
+fn build_qr_lines(download_url: &str) -> Vec<String> {
+    match QrCode::with_error_correction_level(download_url.as_bytes(), EcLevel::L) {
+        Ok(code) => code
+            .render::<unicode::Dense1x2>()
+            .quiet_zone(false)
+            .build()
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        Err(_) => vec!["Unable to generate QR code".to_string()],
+    }
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 fn build_detail_text(app: &App) -> String {

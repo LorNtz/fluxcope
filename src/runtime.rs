@@ -11,15 +11,33 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::PrivateKey};
-use std::{collections::HashMap, error::Error, io, net::SocketAddr, sync::Arc, time::Duration};
+use hyper::{
+    Body, Method, Request, Response, Server,
+    header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+    service::{make_service_fn, service_fn},
+};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    error::Error,
+    io,
+    net::{IpAddr, SocketAddr, UdpSocket},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{Mutex, mpsc};
 
 type PendingRequests = Arc<Mutex<HashMap<uuid::Uuid, CapturedData>>>;
+const CERT_DOWNLOAD_FILE: &str = "proxy_ca.pem";
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     // Check if port is already in use by another instance
     if let Err(e) = std::net::TcpListener::bind("127.0.0.1:8989") {
-        return Err(format!("Failed to bind to proxy port 8989: {}. Is another instance running?", e).into());
+        return Err(format!(
+            "Failed to bind to proxy port 8989: {}. Is another instance running?",
+            e
+        )
+        .into());
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -43,6 +61,9 @@ fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
 fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingRequests) {
     let ca = ca::create_or_load_ca();
     export_ca_certificate();
+    if let Some(download_url) = start_certificate_download_server(ca.cert_pem()) {
+        let _ = tx.send(AppEvent::CertificateDownloadReady(download_url));
+    }
 
     let authority = RcgenAuthority::new(
         PrivateKey(ca.key_der()),
@@ -77,7 +98,7 @@ fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingReq
 
 fn export_ca_certificate() {
     let cert_src_path = ".certificate/ca_cert.pem";
-    let cert_dst_path = "proxy_ca.pem";
+    let cert_dst_path = CERT_DOWNLOAD_FILE;
 
     if let Err(error) = std::fs::copy(cert_src_path, cert_dst_path) {
         log::error!("Failed to copy CA certificate to {cert_dst_path}: {error}");
@@ -85,6 +106,94 @@ fn export_ca_certificate() {
         log::info!(
             "CA certificate available at {cert_dst_path}. Use it to trust the proxy (e.g., curl --cacert proxy_ca.pem ...)"
         );
+    }
+}
+
+fn start_certificate_download_server(cert_pem: String) -> Option<String> {
+    let listener = match std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))) {
+        Ok(listener) => listener,
+        Err(error) => {
+            log::error!("Failed to start certificate download server: {error}");
+            return None;
+        }
+    };
+
+    let local_addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(error) => {
+            log::error!("Failed to read certificate download server address: {error}");
+            return None;
+        }
+    };
+
+    if let Err(error) = listener.set_nonblocking(true) {
+        log::error!("Failed to configure certificate download server: {error}");
+        return None;
+    }
+
+    let host = detect_lan_ip()
+        .map(format_url_host)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let url = format!("http://{host}:{}/{CERT_DOWNLOAD_FILE}", local_addr.port());
+
+    let make_service = make_service_fn(move |_| {
+        let cert_pem = cert_pem.clone();
+        async move {
+            Ok::<_, Infallible>(service_fn(move |req| {
+                let cert_pem = cert_pem.clone();
+                async move { Ok::<_, Infallible>(certificate_download_response(req, cert_pem)) }
+            }))
+        }
+    });
+
+    let server = match Server::from_tcp(listener) {
+        Ok(server) => server.serve(make_service),
+        Err(error) => {
+            log::error!("Failed to create certificate download server: {error}");
+            return None;
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(error) = server.await {
+            log::error!("Certificate download server stopped: {error}");
+        }
+    });
+
+    log::info!("CA certificate download URL: {url}");
+    Some(url)
+}
+
+fn certificate_download_response(req: Request<Body>, cert_pem: String) -> Response<Body> {
+    if req.method() == Method::GET && req.uri().path() == format!("/{CERT_DOWNLOAD_FILE}") {
+        return Response::builder()
+            .header(CONTENT_TYPE, "application/x-x509-ca-cert")
+            .header(
+                CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{CERT_DOWNLOAD_FILE}\""),
+            )
+            .body(Body::from(cert_pem))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+
+    Response::builder()
+        .status(404)
+        .body(Body::from("Not found"))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn detect_lan_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+
+    if ip.is_loopback() { None } else { Some(ip) }
+}
+
+fn format_url_host(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
     }
 }
 
