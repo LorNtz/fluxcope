@@ -1425,7 +1425,9 @@ dependencies = [
 name = "proxy-tui"
 version = "0.1.0"
 dependencies = [
+ "brotli",
  "crossterm",
+ "flate2",
  "futures",
  "http",
  "hudsucker",
@@ -1444,6 +1446,7 @@ dependencies = [
  "tui-tree-widget",
  "url",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

@@ -26,6 +26,9 @@ serde_json = "1"
 serde_yaml = "0.9"
 http = "0.2"
 url = "2.5"
+brotli = "8"
+flate2 = "1"
+zstd = "0.13"
 
 # Utilities
 parking_lot = "0.12" # Faster Mutex/RwLock
