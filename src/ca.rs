@@ -3,15 +3,11 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyUsagePurpose,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 // File names (not paths) - the directory is added separately
 const CA_CERT_FILE: &str = "ca_cert.der";
 const CA_KEY_FILE: &str = "ca_key.der";
-const CA_CERT_PEM: &str = "ca_cert.pem";
-
-// Default directory for certificate storage
-const CA_DIR: &str = ".certificate";
 
 /// Represents the CA certificate data - either DER bytes or PEM for export
 pub struct CaData {
@@ -34,10 +30,10 @@ impl CaData {
     }
 
     /// Load CaData from DER files on disk
-    fn from_disk(cert_dir: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    fn from_disk(cert_dir: &Path, pem_filename: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let cert_path = cert_dir.join(CA_CERT_FILE);
         let key_path = cert_dir.join(CA_KEY_FILE);
-        let pem_path = cert_dir.join(CA_CERT_PEM);
+        let pem_path = cert_dir.join(pem_filename);
 
         let cert_der = fs::read(cert_path)?;
         let key_der = fs::read(key_path)?;
@@ -51,11 +47,11 @@ impl CaData {
     }
 
     /// Save to disk
-    fn save(&self, cert_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    fn save(&self, cert_dir: &Path, pem_filename: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(cert_dir)?;
         fs::write(cert_dir.join(CA_CERT_FILE), &self.cert_der)?;
         fs::write(cert_dir.join(CA_KEY_FILE), &self.key_der)?;
-        fs::write(cert_dir.join(CA_CERT_PEM), &self.cert_pem)?;
+        fs::write(cert_dir.join(pem_filename), &self.cert_pem)?;
         Ok(())
     }
 
@@ -76,15 +72,14 @@ impl CaData {
 }
 
 /// Create or load CA certificate from disk
-pub fn create_or_load_ca() -> CaData {
-    let cert_dir = PathBuf::from(CA_DIR);
+pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> CaData {
     let cert_path = cert_dir.join(CA_CERT_FILE);
     let key_path = cert_dir.join(CA_KEY_FILE);
 
     // Try to load existing certificate
     if cert_path.exists() && key_path.exists() {
         log::info!("Loading existing CA certificate from {:?}", cert_dir);
-        match CaData::from_disk(&cert_dir) {
+        match CaData::from_disk(cert_dir, pem_filename) {
             Ok(data) => {
                 log::info!("Successfully loaded existing CA certificate");
                 return data;
@@ -101,7 +96,7 @@ pub fn create_or_load_ca() -> CaData {
     let data = CaData::from_cert(&cert);
 
     // Save to disk
-    if let Err(e) = data.save(&cert_dir) {
+    if let Err(e) = data.save(cert_dir, pem_filename) {
         log::error!("Failed to save CA certificate: {}", e);
     } else {
         log::info!("CA certificate saved to {:?}", cert_dir);
@@ -128,16 +123,19 @@ fn create_ca() -> Certificate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_certificate_persistence() {
-        let cert_dir = PathBuf::from(".proxy-tui_test");
+        let cert_dir = temp_cert_dir();
+        let pem_filename = "proxy-ca.pem";
 
         // Clean up before test
         let _ = fs::remove_dir_all(&cert_dir);
 
         // First run - should create new certificate
-        let ca1 = create_or_load_ca_custom(&cert_dir);
+        let ca1 = create_or_load_ca(&cert_dir, pem_filename);
         let cert_pem1 = ca1.cert_pem();
 
         // Verify files were created
@@ -150,12 +148,12 @@ mod tests {
             "Key DER file should exist"
         );
         assert!(
-            cert_dir.join(CA_CERT_PEM).exists(),
+            cert_dir.join(pem_filename).exists(),
             "Certificate PEM file should exist"
         );
 
         // Second run - should load existing certificate
-        let ca2 = create_or_load_ca_custom(&cert_dir);
+        let ca2 = create_or_load_ca(&cert_dir, pem_filename);
         let cert_pem2 = ca2.cert_pem();
 
         // Certificates should match
@@ -172,17 +170,12 @@ mod tests {
         let _ = fs::remove_dir_all(&cert_dir);
     }
 
-    fn create_or_load_ca_custom(cert_dir: &PathBuf) -> CaData {
-        let cert_path = cert_dir.join(CA_CERT_FILE);
-        let key_path = cert_dir.join(CA_KEY_FILE);
+    fn temp_cert_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
 
-        if cert_path.exists() && key_path.exists() {
-            return CaData::from_disk(cert_dir).unwrap();
-        }
-
-        let cert = create_ca();
-        let data = CaData::from_cert(&cert);
-        data.save(cert_dir).unwrap();
-        data
+        std::env::temp_dir().join(format!("proxy-tui-ca-{nanos}"))
     }
 }

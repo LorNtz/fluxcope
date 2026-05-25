@@ -3,6 +3,7 @@ mod ca;
 mod logging;
 mod proxy_handler;
 mod runtime;
+mod settings;
 mod ui;
 
 #[tokio::main]

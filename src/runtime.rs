@@ -3,6 +3,7 @@ use crate::{
     ca,
     logging::AppLogger,
     proxy_handler::{CapturedData, LogHandler},
+    settings::SettingsManager,
     ui::RootView,
 };
 use crossterm::{
@@ -22,20 +23,25 @@ use std::{
     error::Error,
     io,
     net::{IpAddr, SocketAddr, UdpSocket},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
 use tokio::sync::{Mutex, mpsc};
 
 type PendingRequests = Arc<Mutex<HashMap<uuid::Uuid, CapturedData>>>;
-const CERT_DOWNLOAD_FILE: &str = "proxy_ca.pem";
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
+    let settings = SettingsManager::load()?;
+    let proxy_port = settings.server_port();
+    let certificate_store_dir = settings.certificate_store_dir()?;
+    let certificate_pem_filename = settings.certificate_pem_filename().to_string();
+
     // Check if port is already in use by another instance
-    if let Err(e) = std::net::TcpListener::bind("127.0.0.1:8989") {
+    if let Err(e) = std::net::TcpListener::bind(("127.0.0.1", proxy_port)) {
         return Err(format!(
-            "Failed to bind to proxy port 8989: {}. Is another instance running?",
-            e
+            "Failed to bind to proxy port {}: {}. Is another instance running?",
+            proxy_port, e
         )
         .into());
     }
@@ -44,11 +50,18 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let pending_requests = Arc::new(Mutex::new(HashMap::new()));
 
     init_logger(tx.clone());
-    start_proxy(tx, pending_requests);
+    log::info!("Loaded settings from {}", settings.path().display());
+    start_proxy(
+        tx,
+        pending_requests,
+        proxy_port,
+        certificate_store_dir,
+        certificate_pem_filename,
+    );
 
     let tui = Tui::enter()?;
     let app = App::new();
-    AppRuntime::new(app, rx, tui).run()
+    AppRuntime::new(app, rx, tui, settings).run()
 }
 
 fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
@@ -58,10 +71,23 @@ fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
     log::info!("Application started");
 }
 
-fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingRequests) {
-    let ca = ca::create_or_load_ca();
-    export_ca_certificate();
-    if let Some(download_url) = start_certificate_download_server(ca.cert_pem()) {
+fn start_proxy(
+    tx: mpsc::UnboundedSender<AppEvent>,
+    pending_requests: PendingRequests,
+    proxy_port: u16,
+    certificate_store_dir: PathBuf,
+    certificate_pem_filename: String,
+) {
+    let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename);
+    log::info!(
+        "CA certificate available at {}",
+        certificate_store_dir
+            .join(&certificate_pem_filename)
+            .display()
+    );
+    if let Some(download_url) =
+        start_certificate_download_server(ca.cert_pem(), certificate_pem_filename)
+    {
         let _ = tx.send(AppEvent::CertificateDownloadReady(download_url));
     }
 
@@ -73,7 +99,7 @@ fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingReq
     .unwrap();
 
     let proxy = ProxyBuilder::new()
-        .with_addr(SocketAddr::from(([127, 0, 0, 1], 8989)))
+        .with_addr(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
         .with_rustls_client()
         .with_ca(authority)
         .with_http_handler(LogHandler {
@@ -82,7 +108,7 @@ fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingReq
         })
         .build();
 
-    log::info!("Proxy server listening on http://127.0.0.1:8989");
+    log::info!("Proxy server listening on http://127.0.0.1:{proxy_port}");
 
     tokio::spawn(async move {
         if let Err(error) = proxy
@@ -96,20 +122,7 @@ fn start_proxy(tx: mpsc::UnboundedSender<AppEvent>, pending_requests: PendingReq
     });
 }
 
-fn export_ca_certificate() {
-    let cert_src_path = ".certificate/ca_cert.pem";
-    let cert_dst_path = CERT_DOWNLOAD_FILE;
-
-    if let Err(error) = std::fs::copy(cert_src_path, cert_dst_path) {
-        log::error!("Failed to copy CA certificate to {cert_dst_path}: {error}");
-    } else {
-        log::info!(
-            "CA certificate available at {cert_dst_path}. Use it to trust the proxy (e.g., curl --cacert proxy_ca.pem ...)"
-        );
-    }
-}
-
-fn start_certificate_download_server(cert_pem: String) -> Option<String> {
+fn start_certificate_download_server(cert_pem: String, cert_filename: String) -> Option<String> {
     let listener = match std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))) {
         Ok(listener) => listener,
         Err(error) => {
@@ -134,14 +147,18 @@ fn start_certificate_download_server(cert_pem: String) -> Option<String> {
     let host = detect_lan_ip()
         .map(format_url_host)
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let url = format!("http://{host}:{}/{CERT_DOWNLOAD_FILE}", local_addr.port());
+    let url = format!("http://{host}:{}/{cert_filename}", local_addr.port());
 
     let make_service = make_service_fn(move |_| {
         let cert_pem = cert_pem.clone();
+        let cert_filename = cert_filename.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let cert_pem = cert_pem.clone();
-                async move { Ok::<_, Infallible>(certificate_download_response(req, cert_pem)) }
+                let cert_filename = cert_filename.clone();
+                async move {
+                    Ok::<_, Infallible>(certificate_download_response(req, cert_pem, cert_filename))
+                }
             }))
         }
     });
@@ -164,13 +181,17 @@ fn start_certificate_download_server(cert_pem: String) -> Option<String> {
     Some(url)
 }
 
-fn certificate_download_response(req: Request<Body>, cert_pem: String) -> Response<Body> {
-    if req.method() == Method::GET && req.uri().path() == format!("/{CERT_DOWNLOAD_FILE}") {
+fn certificate_download_response(
+    req: Request<Body>,
+    cert_pem: String,
+    cert_filename: String,
+) -> Response<Body> {
+    if req.method() == Method::GET && req.uri().path() == format!("/{cert_filename}") {
         return Response::builder()
             .header(CONTENT_TYPE, "application/x-x509-ca-cert")
             .header(
                 CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{CERT_DOWNLOAD_FILE}\""),
+                format!("attachment; filename=\"{cert_filename}\""),
             )
             .body(Body::from(cert_pem))
             .unwrap_or_else(|_| Response::new(Body::empty()));
@@ -202,15 +223,22 @@ struct AppRuntime {
     ui: RootView,
     rx: mpsc::UnboundedReceiver<AppEvent>,
     tui: Tui,
+    _settings: SettingsManager,
 }
 
 impl AppRuntime {
-    fn new(app: App, rx: mpsc::UnboundedReceiver<AppEvent>, tui: Tui) -> Self {
+    fn new(
+        app: App,
+        rx: mpsc::UnboundedReceiver<AppEvent>,
+        tui: Tui,
+        settings: SettingsManager,
+    ) -> Self {
         Self {
             app,
             ui: RootView::new(),
             rx,
             tui,
+            _settings: settings,
         }
     }
 
