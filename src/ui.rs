@@ -1,17 +1,18 @@
-use crate::app::{App, MainDisplayTab};
+use crate::app::{App, MainDisplayTab, RequestTreeEntry, request_tree_entry};
 use crossterm::event::{MouseEvent, MouseEventKind};
 use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Style},
     symbols,
     text::Line,
     widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Tabs, Wrap,
     },
 };
+use tui_tree_widget::{Tree, TreeItem};
 
 trait View {
     fn area(&self) -> Rect;
@@ -117,35 +118,27 @@ impl View for RequestListView {
     }
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
-        let items: Vec<ListItem> = app
-            .requests
-            .iter()
-            .map(|req| ListItem::new(format!("{} {}", req.method, req.uri)))
-            .collect();
-
-        let selection_title = if app.requests.is_empty() {
-            String::new()
-        } else {
-            let selected = app
-                .request_list
-                .state
-                .selected()
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            format!("{} of {}", selected, app.requests.len())
-        };
-
-        let list = List::new(items)
+        let items = build_request_tree_items(app);
+        let tree = Tree::new(&items)
+            .expect("request tree identifiers are unique")
             .block(
                 Block::default()
                     .title("Requests")
-                    .title_bottom(Line::from(selection_title).alignment(Alignment::Right))
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded),
             )
-            .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray));
+            .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray))
+            .node_closed_symbol("▶ ")
+            .node_open_symbol("▼ ")
+            .node_no_children_symbol("  ")
+            .experimental_scrollbar(Some(
+                Scrollbar::default()
+                    .orientation(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
+            ));
 
-        frame.render_stateful_widget(list, self.area(), &mut app.request_list.state);
+        frame.render_stateful_widget(tree, self.area(), &mut app.request_list.state);
     }
 }
 
@@ -157,15 +150,204 @@ impl MouseHandler for RequestListView {
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                app.next();
+                app.request_list.scroll_down();
                 true
             }
             MouseEventKind::ScrollUp => {
-                app.previous();
+                app.request_list.scroll_up();
+                true
+            }
+            MouseEventKind::Down(_) => {
+                let changed = app
+                    .request_list
+                    .click_at(Position::new(mouse.column, mouse.row));
+                app.apply_request_list_change(changed);
                 true
             }
             _ => false,
         }
+    }
+}
+
+#[derive(Debug)]
+struct RequestTreeNode {
+    identifier: String,
+    label: String,
+    children: Vec<RequestTreeNode>,
+}
+
+impl RequestTreeNode {
+    fn new(identifier: String, label: String) -> Self {
+        Self {
+            identifier,
+            label,
+            children: Vec::new(),
+        }
+    }
+
+    fn branch_child_mut_or_insert(&mut self, identifier: String, label: String) -> &mut Self {
+        if let Some(index) = self
+            .children
+            .iter()
+            .position(|child| child.identifier == identifier)
+        {
+            return &mut self.children[index];
+        }
+
+        let insert_index = self
+            .children
+            .iter()
+            .position(RequestTreeNode::is_leaf)
+            .unwrap_or(self.children.len());
+        self.children
+            .insert(insert_index, Self::new(identifier, label));
+        &mut self.children[insert_index]
+    }
+
+    fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    fn into_tree_item(self) -> TreeItem<'static, String> {
+        if self.children.is_empty() {
+            TreeItem::new_leaf(self.identifier, self.label)
+        } else {
+            TreeItem::new(
+                self.identifier,
+                self.label,
+                self.children
+                    .into_iter()
+                    .map(RequestTreeNode::into_tree_item)
+                    .collect(),
+            )
+            .expect("request tree node child identifiers are unique")
+        }
+    }
+}
+
+fn build_request_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
+    let mut roots = Vec::new();
+
+    for (index, req) in app.requests.iter().enumerate() {
+        insert_request_tree_entry(&mut roots, request_tree_entry(req, index));
+    }
+
+    roots
+        .into_iter()
+        .map(RequestTreeNode::into_tree_item)
+        .collect()
+}
+
+fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTreeEntry) {
+    let identifiers = entry.request_path();
+    let Some(origin_identifier) = identifiers.first() else {
+        return;
+    };
+    let Some(request_identifier) = identifiers.last() else {
+        return;
+    };
+
+    let current = root_mut_or_insert(roots, origin_identifier.clone(), entry.origin.clone());
+    let parent_segments = entry
+        .segments
+        .split_last()
+        .map_or(&[] as &[String], |(_, parent_segments)| parent_segments);
+
+    let mut current = current;
+    let parent_identifiers = if identifiers.len() > 2 {
+        &identifiers[1..identifiers.len() - 1]
+    } else {
+        &[]
+    };
+    for (identifier, label) in parent_identifiers.iter().zip(parent_segments) {
+        current = current.branch_child_mut_or_insert(identifier.clone(), label.clone());
+    }
+
+    let leaf_label = entry
+        .segments
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
+    current
+        .children
+        .push(RequestTreeNode::new(request_identifier.clone(), leaf_label));
+}
+
+fn root_mut_or_insert(
+    roots: &mut Vec<RequestTreeNode>,
+    identifier: String,
+    label: String,
+) -> &mut RequestTreeNode {
+    if let Some(index) = roots.iter().position(|root| root.identifier == identifier) {
+        return &mut roots[index];
+    }
+
+    roots.push(RequestTreeNode::new(identifier, label));
+    roots
+        .last_mut()
+        .expect("root was inserted immediately before access")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy_handler::CapturedData;
+    use crate::settings::{RequestListSettings, UiSettings};
+    use http::Method;
+
+    fn ui_settings(auto_expand: bool) -> UiSettings {
+        UiSettings {
+            request_list: RequestListSettings { auto_expand },
+        }
+    }
+
+    fn captured(uri: &str) -> CapturedData {
+        CapturedData {
+            id: uuid::Uuid::nil(),
+            method: Method::GET,
+            uri: uri.to_string(),
+            status: None,
+            req_headers: vec![],
+            res_headers: vec![],
+            req_body: None,
+            res_body: None,
+        }
+    }
+
+    #[test]
+    fn request_tree_orders_branch_nodes_before_leaf_requests() {
+        let mut app = App::new(ui_settings(true));
+        app.add_request(captured("https://a.com/some/api2"));
+        app.add_request(captured("https://a.com/some/path/api1"));
+
+        let items = build_request_tree_items(&app);
+        let origin = &items[0];
+        let some = &origin.children()[0];
+        let child_identifiers = some
+            .children()
+            .iter()
+            .map(|child| child.identifier().as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(child_identifiers, ["segment:path", "request:0"]);
+    }
+
+    #[test]
+    fn request_tree_preserves_branch_incoming_order_before_leaves() {
+        let mut app = App::new(ui_settings(true));
+        app.add_request(captured("https://a.com/some/api0"));
+        app.add_request(captured("https://a.com/some/b/api1"));
+        app.add_request(captured("https://a.com/some/a/api2"));
+
+        let items = build_request_tree_items(&app);
+        let some = &items[0].children()[0];
+        let child_identifiers = some
+            .children()
+            .iter()
+            .map(|child| child.identifier().as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(child_identifiers, ["segment:b", "segment:a", "request:0"]);
     }
 }
 
@@ -268,7 +450,7 @@ impl View for TabsView {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded),
         )
-        .divider(symbols::DOT)
+        .divider(symbols::line::VERTICAL)
         .select(app.detail_panel.active_tab.index());
 
         frame.render_widget(tabs, self.area());

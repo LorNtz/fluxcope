@@ -7,7 +7,7 @@ edition = "2024"
 # TUI
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
-tui-tree-widget = "0.21" # Essential for the left panel
+tui-tree-widget = "0.23" # Essential for the left panel
 
 # Async & Runtime
 tokio = { version = "1", features = ["full"] }

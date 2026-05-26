@@ -60,7 +60,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let tui = Tui::enter()?;
-    let app = App::new();
+    let app = App::new(settings.ui_settings().clone());
     AppRuntime::new(app, rx, tui, settings).run()
 }
 

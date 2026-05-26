@@ -13,6 +13,7 @@ const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "proxy-ca.pem";
 pub struct AppSettings {
     pub server: ServerSettings,
     pub certificate: CertificateSettings,
+    pub ui: UiSettings,
 }
 
 impl Default for AppSettings {
@@ -20,6 +21,7 @@ impl Default for AppSettings {
         Self {
             server: ServerSettings::default(),
             certificate: CertificateSettings::default(),
+            ui: UiSettings::default(),
         }
     }
 }
@@ -51,6 +53,32 @@ impl Default for CertificateSettings {
             store_dir: DEFAULT_CERTIFICATE_STORE_DIR.to_string(),
             pem_filename: DEFAULT_CERTIFICATE_PEM_FILENAME.to_string(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UiSettings {
+    pub request_list: RequestListSettings,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            request_list: RequestListSettings::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RequestListSettings {
+    pub auto_expand: bool,
+}
+
+impl Default for RequestListSettings {
+    fn default() -> Self {
+        Self { auto_expand: false }
     }
 }
 
@@ -102,6 +130,10 @@ impl SettingsManager {
 
     pub fn certificate_pem_filename(&self) -> &str {
         &self.settings.certificate.pem_filename
+    }
+
+    pub fn ui_settings(&self) -> &UiSettings {
+        &self.settings.ui
     }
 
     #[allow(dead_code)]
@@ -191,6 +223,7 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             saved.certificate.pem_filename
         );
+        assert!(!saved.ui.request_list.auto_expand);
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -218,6 +251,7 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             manager.certificate_pem_filename()
         );
+        assert!(!manager.ui_settings().request_list.auto_expand);
 
         let saved: AppSettings =
             serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
@@ -227,6 +261,27 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             saved.certificate.pem_filename
         );
+        assert!(!saved.ui.request_list.auto_expand);
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_request_list_auto_expand_setting() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, "ui:\n  request_list:\n    auto_expand: true\n")?;
+
+        let manager = SettingsManager::load_from_path(&path)?;
+
+        assert!(manager.ui_settings().request_list.auto_expand);
+
+        let saved: AppSettings =
+            serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        assert!(saved.ui.request_list.auto_expand);
 
         let _ = fs::remove_file(path);
         Ok(())

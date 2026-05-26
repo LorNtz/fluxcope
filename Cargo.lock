@@ -282,19 +282,6 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "compact_str"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f86b9c4c00838774a6d902ef931eff7470720c51d90c2e32cfe15dc304737b3f"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "ryu",
- "static_assertions",
-]
-
-[[package]]
-name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b79c4069c6cad78e2e0cdfcbd26275770669fb39fd308a752dc110e83b9af32"
@@ -1435,7 +1422,7 @@ dependencies = [
  "log",
  "parking_lot",
  "qrcode",
- "ratatui 0.29.0",
+ "ratatui",
  "rcgen 0.11.3",
  "rustls",
  "serde",
@@ -1529,33 +1516,13 @@ dependencies = [
 
 [[package]]
 name = "ratatui"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d16546c5b5962abf8ce6e2881e722b4e0ae3b6f1a08a26ae3573c55853ca68d3"
-dependencies = [
- "bitflags 2.10.0",
- "cassowary",
- "compact_str 0.7.1",
- "itertools",
- "lru",
- "paste",
- "stability",
- "strum",
- "strum_macros",
- "unicode-segmentation",
- "unicode-truncate",
- "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "ratatui"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eabd94c2f37801c20583fc49dd5cd6b0ba68c716787c2dd6ed18571e1e63117b"
 dependencies = [
  "bitflags 2.10.0",
  "cassowary",
- "compact_str 0.8.1",
+ "compact_str",
  "crossterm",
  "indoc",
  "instability",
@@ -1965,16 +1932,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
-name = "stability"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d904e7009df136af5297832a3ace3370cd14ff1546a232f4f185036c2736fcac"
-dependencies = [
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2257,12 +2214,12 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui-tree-widget"
-version = "0.21.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ac69db35529be6a75f9d27516ff33df299e2e8e961a1986d52185cef0427352"
+checksum = "c14c4488e071617f5b5922222193cdf6725835e492c6229557af85d3c1a4e903"
 dependencies = [
- "ratatui 0.27.0",
- "unicode-width 0.1.14",
+ "ratatui",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
