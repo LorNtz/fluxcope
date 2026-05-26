@@ -8,10 +8,7 @@ use hudsucker::{
         header::{CONTENT_ENCODING, HeaderMap},
     },
 };
-use std::collections::HashMap;
 use std::io::{self, Read};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 #[allow(dead_code)]
@@ -27,19 +24,20 @@ pub struct CapturedData {
     pub res_body: Option<String>,
 }
 
-#[derive(Clone)]
 pub struct LogHandler {
-    pub tx: mpsc::UnboundedSender<AppEvent>,
-    pub pending_requests: Arc<Mutex<HashMap<uuid::Uuid, CapturedData>>>,
+    tx: mpsc::UnboundedSender<AppEvent>,
+    current_request: Option<CapturedData>,
 }
 
-#[async_trait]
-impl HttpHandler for LogHandler {
-    async fn handle_request(
-        &mut self,
-        _ctx: &HttpContext,
-        req: Request<Body>,
-    ) -> RequestOrResponse {
+impl LogHandler {
+    pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+        Self {
+            tx,
+            current_request: None,
+        }
+    }
+
+    async fn capture_request(&mut self, req: Request<Body>) -> RequestOrResponse {
         // Skip CONNECT requests - they're just for establishing HTTPS tunnels
         // and not actual application requests we want to display
         if req.method() == Method::CONNECT {
@@ -74,14 +72,12 @@ impl HttpHandler for LogHandler {
 
         let reconstructed_req = Request::from_parts(parts, Body::from(req_body_bytes));
 
-        let mut pending = self.pending_requests.lock().await;
-        pending.insert(id, data);
-        drop(pending);
+        self.current_request = Some(data);
 
         RequestOrResponse::Request(reconstructed_req)
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+    async fn capture_response(&mut self, res: Response<Body>) -> Response<Body> {
         let (parts, body) = res.into_parts();
 
         let (res_body, res_body_bytes) = match hyper::body::to_bytes(body).await {
@@ -101,17 +97,38 @@ impl HttpHandler for LogHandler {
 
         let reconstructed_res = Response::from_parts(parts, Body::from(res_body_bytes));
 
-        let mut pending = self.pending_requests.lock().await;
-        if let Some(mut data) = pending.values().next().cloned() {
+        if let Some(mut data) = self.current_request.take() {
             data.status = Some(status);
             data.res_headers = res_headers;
             data.res_body = res_body;
             let _ = self.tx.send(AppEvent::NetworkRequest(data));
-            pending.clear();
         }
-        drop(pending);
 
         reconstructed_res
+    }
+}
+
+impl Clone for LogHandler {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            current_request: None,
+        }
+    }
+}
+
+#[async_trait]
+impl HttpHandler for LogHandler {
+    async fn handle_request(
+        &mut self,
+        _ctx: &HttpContext,
+        req: Request<Body>,
+    ) -> RequestOrResponse {
+        self.capture_request(req).await
+    }
+
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+        self.capture_response(res).await
     }
 }
 
@@ -217,5 +234,63 @@ mod tests {
             Some("[Binary body: 3 bytes, first 32 bytes in hex: ff 00 80]".to_string()),
             body_for_display(&body, &headers)
         );
+    }
+
+    #[tokio::test]
+    async fn cloned_handlers_capture_concurrent_requests_independently() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let base_handler = LogHandler::new(tx);
+        let mut slow_handler = base_handler.clone();
+        let mut fast_handler = base_handler.clone();
+
+        forward_request(&mut slow_handler, "https://example.com/slow").await;
+        forward_request(&mut fast_handler, "https://example.com/fast").await;
+
+        fast_handler
+            .capture_response(test_response(200, "fast body"))
+            .await;
+        slow_handler
+            .capture_response(test_response(201, "slow body"))
+            .await;
+
+        let fast = received_request(&mut rx);
+        let slow = received_request(&mut rx);
+
+        assert_eq!(fast.uri, "https://example.com/fast");
+        assert_eq!(fast.status, Some(200));
+        assert_eq!(fast.res_body.as_deref(), Some("fast body"));
+        assert_eq!(slow.uri, "https://example.com/slow");
+        assert_eq!(slow.status, Some(201));
+        assert_eq!(slow.res_body.as_deref(), Some("slow body"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    async fn forward_request(handler: &mut LogHandler, uri: &str) {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("test request should be valid");
+
+        match handler.capture_request(request).await {
+            RequestOrResponse::Request(_) => {}
+            RequestOrResponse::Response(_) => panic!("test request should be forwarded"),
+        }
+    }
+
+    fn test_response(status: u16, body: &str) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .body(Body::from(body.to_string()))
+            .expect("test response should be valid")
+    }
+
+    fn received_request(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> CapturedData {
+        match rx.try_recv().expect("request should have been captured") {
+            AppEvent::NetworkRequest(data) => data,
+            AppEvent::LogMessage(_) | AppEvent::CertificateDownloadReady(_) => {
+                panic!("unexpected app event")
+            }
+        }
     }
 }

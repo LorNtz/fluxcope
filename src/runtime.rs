@@ -2,7 +2,7 @@ use crate::{
     app::{App, AppEvent},
     ca,
     logging::AppLogger,
-    proxy_handler::{CapturedData, LogHandler},
+    proxy_handler::LogHandler,
     settings::SettingsManager,
     ui::RootView,
 };
@@ -18,18 +18,14 @@ use hyper::{
     service::{make_service_fn, service_fn},
 };
 use std::{
-    collections::HashMap,
     convert::Infallible,
     error::Error,
     io,
     net::{IpAddr, SocketAddr, UdpSocket},
     path::PathBuf,
-    sync::Arc,
     time::Duration,
 };
-use tokio::sync::{Mutex, mpsc};
-
-type PendingRequests = Arc<Mutex<HashMap<uuid::Uuid, CapturedData>>>;
+use tokio::sync::mpsc;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let settings = SettingsManager::load()?;
@@ -47,13 +43,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-    let pending_requests = Arc::new(Mutex::new(HashMap::new()));
 
     init_logger(tx.clone());
     log::info!("Loaded settings from {}", settings.path().display());
     start_proxy(
         tx,
-        pending_requests,
         proxy_port,
         certificate_store_dir,
         certificate_pem_filename,
@@ -73,7 +67,6 @@ fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
 
 fn start_proxy(
     tx: mpsc::UnboundedSender<AppEvent>,
-    pending_requests: PendingRequests,
     proxy_port: u16,
     certificate_store_dir: PathBuf,
     certificate_pem_filename: String,
@@ -102,10 +95,7 @@ fn start_proxy(
         .with_addr(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
         .with_rustls_client()
         .with_ca(authority)
-        .with_http_handler(LogHandler {
-            tx,
-            pending_requests,
-        })
+        .with_http_handler(LogHandler::new(tx))
         .build();
 
     log::info!("Proxy server listening on http://127.0.0.1:{proxy_port}");
