@@ -1,4 +1,7 @@
-use crate::{proxy_handler::CapturedData, settings::{UiSettings, RequestListSettings}};
+use crate::{
+    proxy_handler::CapturedData,
+    settings::{RequestListSettings, UiSettings},
+};
 use crossterm::event::KeyCode;
 use ratatui::layout::Position;
 use tui_tree_widget::TreeState;
@@ -210,10 +213,13 @@ impl App {
         }
 
         let was_empty = self.requests.is_empty();
-        let request_index = self.requests.len();
-        let tree_entry = request_tree_entry(&req, request_index);
-        self.requests.push(req.clone());
-        log::info!("request received: {}", req.uri);
+        let tree_entry = request_tree_entry(&req);
+        let insert_pos = self
+            .requests
+            .partition_point(|existing| existing.sequence <= req.sequence);
+        let uri = req.uri.clone();
+        self.requests.insert(insert_pos, req);
+        log::info!("request received: {}", uri);
 
         if self.request_list.auto_expand {
             self.request_list.open_entry(&tree_entry);
@@ -238,8 +244,8 @@ impl App {
     }
 
     pub fn selected_request(&self) -> Option<&CapturedData> {
-        selected_request_index(self.request_list.state.selected())
-            .and_then(|index| self.requests.get(index))
+        selected_request_sequence(self.request_list.state.selected())
+            .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))
     }
 
     pub fn handle_key_press(&mut self, key_code: KeyCode) -> bool {
@@ -326,12 +332,12 @@ impl App {
 pub struct RequestTreeEntry {
     pub origin: String,
     pub segments: Vec<String>,
-    request_index: usize,
+    request_sequence: u64,
 }
 
 impl RequestTreeEntry {
     pub fn request_identifier(&self) -> String {
-        request_identifier(self.request_index)
+        request_identifier(self.request_sequence)
     }
 
     pub fn request_path(&self) -> Vec<String> {
@@ -362,7 +368,7 @@ impl RequestTreeEntry {
     }
 }
 
-pub fn request_tree_entry(req: &CapturedData, request_index: usize) -> RequestTreeEntry {
+pub fn request_tree_entry(req: &CapturedData) -> RequestTreeEntry {
     let (origin, segments) = Url::parse(&req.uri)
         .ok()
         .filter(Url::has_host)
@@ -377,11 +383,11 @@ pub fn request_tree_entry(req: &CapturedData, request_index: usize) -> RequestTr
     RequestTreeEntry {
         origin,
         segments,
-        request_index,
+        request_sequence: req.sequence,
     }
 }
 
-fn selected_request_index(path: &[String]) -> Option<usize> {
+fn selected_request_sequence(path: &[String]) -> Option<u64> {
     path.last()?
         .strip_prefix(REQUEST_IDENTIFIER_PREFIX)?
         .parse()
@@ -396,8 +402,8 @@ fn segment_identifier(segment: &str) -> String {
     format!("{SEGMENT_IDENTIFIER_PREFIX}{segment}")
 }
 
-fn request_identifier(index: usize) -> String {
-    format!("{REQUEST_IDENTIFIER_PREFIX}{index}")
+fn request_identifier(sequence: u64) -> String {
+    format!("{REQUEST_IDENTIFIER_PREFIX}{sequence}")
 }
 
 fn parent_segments(segments: &[String]) -> &[String] {
@@ -469,8 +475,13 @@ mod tests {
     }
 
     fn captured(uri: &str) -> CapturedData {
+        captured_with_sequence(0, uri)
+    }
+
+    fn captured_with_sequence(sequence: u64, uri: &str) -> CapturedData {
         CapturedData {
             id: uuid::Uuid::nil(),
+            sequence,
             method: Method::GET,
             uri: uri.to_string(),
             status: None,
@@ -483,10 +494,10 @@ mod tests {
 
     #[test]
     fn request_tree_entry_splits_absolute_url() {
-        let entry = request_tree_entry(
-            &captured("https://some.host.com/api/v1/getUserInfo?a=1&b=2"),
+        let entry = request_tree_entry(&captured_with_sequence(
             7,
-        );
+            "https://some.host.com/api/v1/getUserInfo?a=1&b=2",
+        ));
 
         assert_eq!(entry.origin, "https://some.host.com");
         assert_eq!(entry.segments, ["api", "v1", "getUserInfo?a=1&b=2"]);
@@ -503,10 +514,36 @@ mod tests {
 
     #[test]
     fn request_tree_entry_uses_host_header_for_origin_form_uri() {
-        let entry = request_tree_entry(&captured("/common/getSomeOtherInfo"), 3);
+        let entry = request_tree_entry(&captured("/common/getSomeOtherInfo"));
 
         assert_eq!(entry.origin, "https://fallback.example.com");
         assert_eq!(entry.segments, ["common", "getSomeOtherInfo"]);
+    }
+
+    #[test]
+    fn requests_are_ordered_by_capture_sequence() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(1, "https://a.com/b"));
+        app.add_request(captured_with_sequence(0, "https://a.com/a"));
+
+        let uris = app
+            .requests
+            .iter()
+            .map(|req| req.uri.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(uris, ["https://a.com/a", "https://a.com/b"]);
+
+        app.request_list.state.select(vec![
+            "origin:https://a.com".to_string(),
+            "request:1".to_string(),
+        ]);
+
+        assert_eq!(
+            app.selected_request().map(|req| req.uri.as_str()),
+            Some("https://a.com/b")
+        );
     }
 
     #[test]

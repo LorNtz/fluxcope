@@ -228,8 +228,8 @@ impl RequestTreeNode {
 fn build_request_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
     let mut roots = Vec::new();
 
-    for (index, req) in app.requests.iter().enumerate() {
-        insert_request_tree_entry(&mut roots, request_tree_entry(req, index));
+    for req in &app.requests {
+        insert_request_tree_entry(&mut roots, request_tree_entry(req));
     }
 
     roots
@@ -301,9 +301,10 @@ mod tests {
         }
     }
 
-    fn captured(uri: &str) -> CapturedData {
+    fn captured(sequence: u64, uri: &str) -> CapturedData {
         CapturedData {
             id: uuid::Uuid::nil(),
+            sequence,
             method: Method::GET,
             uri: uri.to_string(),
             status: None,
@@ -317,8 +318,8 @@ mod tests {
     #[test]
     fn request_tree_orders_branch_nodes_before_leaf_requests() {
         let mut app = App::new(ui_settings(true));
-        app.add_request(captured("https://a.com/some/api2"));
-        app.add_request(captured("https://a.com/some/path/api1"));
+        app.add_request(captured(0, "https://a.com/some/api2"));
+        app.add_request(captured(1, "https://a.com/some/path/api1"));
 
         let items = build_request_tree_items(&app);
         let origin = &items[0];
@@ -335,9 +336,9 @@ mod tests {
     #[test]
     fn request_tree_preserves_branch_incoming_order_before_leaves() {
         let mut app = App::new(ui_settings(true));
-        app.add_request(captured("https://a.com/some/api0"));
-        app.add_request(captured("https://a.com/some/b/api1"));
-        app.add_request(captured("https://a.com/some/a/api2"));
+        app.add_request(captured(0, "https://a.com/some/api0"));
+        app.add_request(captured(1, "https://a.com/some/b/api1"));
+        app.add_request(captured(2, "https://a.com/some/a/api2"));
 
         let items = build_request_tree_items(&app);
         let some = &items[0].children()[0];

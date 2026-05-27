@@ -9,12 +9,17 @@ use hudsucker::{
     },
 };
 use std::io::{self, Read};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::mpsc;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CapturedData {
     pub id: uuid::Uuid,
+    pub sequence: u64,
     pub method: Method,
     pub uri: String,
     pub status: Option<u16>,
@@ -26,6 +31,7 @@ pub struct CapturedData {
 
 pub struct LogHandler {
     tx: mpsc::UnboundedSender<AppEvent>,
+    next_sequence: Arc<AtomicU64>,
     current_request: Option<CapturedData>,
 }
 
@@ -33,6 +39,7 @@ impl LogHandler {
     pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         Self {
             tx,
+            next_sequence: Arc::new(AtomicU64::new(0)),
             current_request: None,
         }
     }
@@ -45,6 +52,7 @@ impl LogHandler {
         }
 
         let id = uuid::Uuid::new_v4();
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let (parts, body) = req.into_parts();
 
         let (req_body, req_body_bytes) = match hyper::body::to_bytes(body).await {
@@ -57,6 +65,7 @@ impl LogHandler {
 
         let data = CapturedData {
             id,
+            sequence,
             method: parts.method.clone(),
             uri: parts.uri.to_string(),
             status: None,
@@ -112,6 +121,7 @@ impl Clone for LogHandler {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
+            next_sequence: Arc::clone(&self.next_sequence),
             current_request: None,
         }
     }
@@ -256,9 +266,11 @@ mod tests {
         let fast = received_request(&mut rx);
         let slow = received_request(&mut rx);
 
+        assert_eq!(fast.sequence, 1);
         assert_eq!(fast.uri, "https://example.com/fast");
         assert_eq!(fast.status, Some(200));
         assert_eq!(fast.res_body.as_deref(), Some("fast body"));
+        assert_eq!(slow.sequence, 0);
         assert_eq!(slow.uri, "https://example.com/slow");
         assert_eq!(slow.status, Some(201));
         assert_eq!(slow.res_body.as_deref(), Some("slow body"));
