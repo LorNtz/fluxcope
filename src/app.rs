@@ -2,7 +2,7 @@ use crate::{
     proxy_handler::CapturedData,
     settings::{RequestListSettings, UiSettings},
 };
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 use std::collections::HashSet;
 use tui_tree_widget::TreeState;
@@ -11,6 +11,64 @@ use url::Url;
 const ORIGIN_IDENTIFIER_PREFIX: &str = "origin:";
 const SEGMENT_IDENTIFIER_PREFIX: &str = "segment:";
 const REQUEST_IDENTIFIER_PREFIX: &str = "request:";
+const FOCUSABLE_PANELS_WITH_LOG: [PanelFocus; 3] =
+    [PanelFocus::RequestList, PanelFocus::Detail, PanelFocus::Log];
+const FOCUSABLE_PANELS_WITHOUT_LOG: [PanelFocus; 2] = [PanelFocus::RequestList, PanelFocus::Detail];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelFocus {
+    RequestList,
+    Detail,
+    Log,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupFocus {
+    Certificate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FocusState {
+    panel: PanelFocus,
+    popup: Option<PopupFocus>,
+}
+
+impl FocusState {
+    fn new() -> Self {
+        Self {
+            panel: PanelFocus::RequestList,
+            popup: None,
+        }
+    }
+
+    fn panel(self) -> PanelFocus {
+        self.panel
+    }
+
+    fn popup(self) -> Option<PopupFocus> {
+        self.popup
+    }
+
+    fn focus_panel(&mut self, panel: PanelFocus) {
+        self.panel = panel;
+    }
+
+    fn open_popup(&mut self, popup: PopupFocus) {
+        self.popup = Some(popup);
+    }
+
+    fn close_popup(&mut self) {
+        self.popup = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusDirection {
+    Left,
+    Down,
+    Up,
+    Right,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MainDisplayTab {
@@ -135,6 +193,16 @@ impl DetailPanel {
         };
         self.scroll.reset();
     }
+
+    pub fn previous_tab(&mut self) {
+        self.active_tab = match self.active_tab {
+            MainDisplayTab::RequestHeader => MainDisplayTab::ResponseBody,
+            MainDisplayTab::RequestBody => MainDisplayTab::RequestHeader,
+            MainDisplayTab::ResponseHeader => MainDisplayTab::RequestBody,
+            MainDisplayTab::ResponseBody => MainDisplayTab::ResponseHeader,
+        };
+        self.scroll.reset();
+    }
 }
 
 pub struct LogPanel {
@@ -190,6 +258,7 @@ impl CertificatePopup {
 pub struct App {
     pub requests: Vec<CapturedData>,
     pub recording: bool,
+    focus: FocusState,
     pub request_list: RequestListPanel,
     pub detail_panel: DetailPanel,
     pub log_panel: LogPanel,
@@ -201,11 +270,37 @@ impl App {
         Self {
             requests: vec![],
             recording: true,
+            focus: FocusState::new(),
             request_list: RequestListPanel::new(ui_settings.request_list),
             detail_panel: DetailPanel::new(),
             log_panel: LogPanel::new(),
             certificate_popup: CertificatePopup::new(),
         }
+    }
+
+    pub fn focused_panel(&self) -> PanelFocus {
+        self.focus.panel()
+    }
+
+    pub fn focused_popup(&self) -> Option<PopupFocus> {
+        self.focus.popup()
+    }
+
+    pub fn is_panel_focused(&self, panel: PanelFocus) -> bool {
+        self.focus.popup().is_none() && self.focus.panel() == panel
+    }
+
+    pub fn is_popup_focused(&self, popup: PopupFocus) -> bool {
+        self.focus.popup() == Some(popup)
+    }
+
+    pub fn focus_panel(&mut self, panel: PanelFocus) {
+        let panel = if panel == PanelFocus::Log && !self.log_panel.visible {
+            PanelFocus::Detail
+        } else {
+            panel
+        };
+        self.focus.focus_panel(panel);
     }
 
     pub fn add_request(&mut self, req: CapturedData) {
@@ -293,75 +388,27 @@ impl App {
         }
     }
 
-    pub fn handle_key_press(&mut self, key_code: KeyCode) -> bool {
-        if self.certificate_popup.visible && key_code == KeyCode::Esc {
-            self.certificate_popup.close();
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        if is_plain_key(key) && key.code == KeyCode::Char('q') {
+            return true;
+        }
+
+        if let Some(popup) = self.focus.popup() {
+            self.handle_popup_key(popup, key);
             return false;
         }
 
-        match key_code {
-            KeyCode::Char('q') => true,
-            KeyCode::Tab => {
-                self.detail_panel.next_tab();
-                false
-            }
-            KeyCode::Char('J') => {
-                self.detail_panel.scroll.scroll_down();
-                false
-            }
-            KeyCode::Char('K') => {
-                self.detail_panel.scroll.scroll_up();
-                false
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.next();
-                false
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.previous();
-                false
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                let changed = self.request_list.state.key_left();
-                self.apply_request_list_change(changed);
-                false
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                let changed = self.request_list.state.key_right();
-                self.apply_request_list_change(changed);
-                false
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let changed = self.request_list.state.toggle_selected();
-                self.apply_request_list_change(changed);
-                false
-            }
-            KeyCode::PageDown => {
-                self.request_list.scroll_down();
-                false
-            }
-            KeyCode::PageUp => {
-                self.request_list.scroll_up();
-                false
-            }
-            KeyCode::Char('d') => {
-                self.delete_selected_requests();
-                false
-            }
-            KeyCode::Char('D') => {
-                self.clear_requests();
-                false
-            }
-            KeyCode::Char('@') => {
-                self.log_panel.toggle();
-                false
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') => {
-                self.certificate_popup.open();
-                false
-            }
-            _ => false,
+        if self.handle_focus_key(key) || self.handle_global_panel_key(key) {
+            return false;
         }
+
+        match self.focus.panel() {
+            PanelFocus::RequestList => self.handle_request_list_key(key),
+            PanelFocus::Detail => self.handle_detail_key(key),
+            PanelFocus::Log => self.handle_log_key(key),
+        }
+
+        false
     }
 
     pub fn handle_app_event(&mut self, event: AppEvent) {
@@ -378,6 +425,188 @@ impl App {
         if changed {
             self.detail_panel.scroll.reset();
         }
+    }
+
+    fn handle_focus_key(&mut self, key: KeyEvent) -> bool {
+        if !is_plain_key(key) && key.modifiers != KeyModifiers::CONTROL {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Tab if is_plain_key(key) => {
+                self.focus_next_panel();
+                true
+            }
+            KeyCode::BackTab if is_plain_key(key) => {
+                self.focus_previous_panel();
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Char('H') if key.modifiers == KeyModifiers::CONTROL => {
+                self.focus_in_direction(FocusDirection::Left);
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Char('J') if key.modifiers == KeyModifiers::CONTROL => {
+                self.focus_in_direction(FocusDirection::Down);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') if key.modifiers == KeyModifiers::CONTROL => {
+                self.focus_in_direction(FocusDirection::Up);
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') if key.modifiers == KeyModifiers::CONTROL => {
+                self.focus_in_direction(FocusDirection::Right);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_global_panel_key(&mut self, key: KeyEvent) -> bool {
+        if !is_plain_key(key) {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Char('@') => {
+                self.toggle_log_panel();
+                true
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.open_certificate_popup();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_popup_key(&mut self, popup: PopupFocus, key: KeyEvent) {
+        match popup {
+            PopupFocus::Certificate => {
+                if is_plain_key(key) && key.code == KeyCode::Esc {
+                    self.close_certificate_popup();
+                }
+            }
+        }
+    }
+
+    fn handle_request_list_key(&mut self, key: KeyEvent) {
+        if !is_plain_key(key) {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.next(),
+            KeyCode::Char('k') | KeyCode::Up => self.previous(),
+            KeyCode::Char('h') | KeyCode::Left => {
+                let changed = self.request_list.state.key_left();
+                self.apply_request_list_change(changed);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                let changed = self.request_list.state.key_right();
+                self.apply_request_list_change(changed);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let changed = self.request_list.state.toggle_selected();
+                self.apply_request_list_change(changed);
+            }
+            KeyCode::PageDown => {
+                self.request_list.scroll_down();
+            }
+            KeyCode::PageUp => {
+                self.request_list.scroll_up();
+            }
+            KeyCode::Char('d') => {
+                self.delete_selected_requests();
+            }
+            KeyCode::Char('D') => {
+                self.clear_requests();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        if !is_plain_key(key) {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down | KeyCode::PageDown => {
+                self.detail_panel.scroll.scroll_down();
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up | KeyCode::PageUp => {
+                self.detail_panel.scroll.scroll_up();
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.detail_panel.previous_tab();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.detail_panel.next_tab();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_log_key(&mut self, key: KeyEvent) {
+        if !is_plain_key(key) {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down | KeyCode::PageDown => {
+                self.log_panel.scroll.scroll_down();
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up | KeyCode::PageUp => {
+                self.log_panel.scroll.scroll_up();
+            }
+            _ => {}
+        }
+    }
+
+    fn focus_next_panel(&mut self) {
+        let panels = focusable_panels(self.log_panel.visible);
+        let current_index = panels
+            .iter()
+            .position(|panel| *panel == self.focus.panel())
+            .unwrap_or(0);
+        self.focus_panel(panels[(current_index + 1) % panels.len()]);
+    }
+
+    fn focus_previous_panel(&mut self) {
+        let panels = focusable_panels(self.log_panel.visible);
+        let current_index = panels
+            .iter()
+            .position(|panel| *panel == self.focus.panel())
+            .unwrap_or(0);
+        self.focus_panel(panels[(current_index + panels.len() - 1) % panels.len()]);
+    }
+
+    fn focus_in_direction(&mut self, direction: FocusDirection) {
+        if let Some(panel) = focus_neighbor(self.focus.panel(), direction, self.log_panel.visible) {
+            self.focus_panel(panel);
+        }
+    }
+
+    fn toggle_log_panel(&mut self) {
+        self.log_panel.toggle();
+        self.ensure_focusable_panel();
+    }
+
+    fn ensure_focusable_panel(&mut self) {
+        if self.focus.panel() == PanelFocus::Log && !self.log_panel.visible {
+            self.focus_panel(PanelFocus::Detail);
+        }
+    }
+
+    fn open_certificate_popup(&mut self) {
+        self.certificate_popup.open();
+        self.focus.open_popup(PopupFocus::Certificate);
+    }
+
+    fn close_certificate_popup(&mut self) {
+        self.certificate_popup.close();
+        self.focus.close_popup();
+        self.ensure_focusable_panel();
     }
 
     /// Rebuilds request-tree UI state after a delete while preserving valid opens.
@@ -421,6 +650,33 @@ impl App {
         }
         self.request_list.state.select(path_to_select);
     }
+}
+
+fn focusable_panels(log_visible: bool) -> &'static [PanelFocus] {
+    if log_visible {
+        &FOCUSABLE_PANELS_WITH_LOG
+    } else {
+        &FOCUSABLE_PANELS_WITHOUT_LOG
+    }
+}
+
+fn focus_neighbor(
+    current: PanelFocus,
+    direction: FocusDirection,
+    log_visible: bool,
+) -> Option<PanelFocus> {
+    match (current, direction) {
+        (PanelFocus::RequestList, FocusDirection::Right) => Some(PanelFocus::Detail),
+        (PanelFocus::Detail, FocusDirection::Left) => Some(PanelFocus::RequestList),
+        (PanelFocus::Detail, FocusDirection::Down) if log_visible => Some(PanelFocus::Log),
+        (PanelFocus::Log, FocusDirection::Left) => Some(PanelFocus::RequestList),
+        (PanelFocus::Log, FocusDirection::Up) => Some(PanelFocus::Detail),
+        _ => None,
+    }
+}
+
+fn is_plain_key(key: KeyEvent) -> bool {
+    key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
 }
 
 #[derive(Debug, Default)]
@@ -809,6 +1065,7 @@ fn path_segments_with_query(path: &str, query: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::{settings::RequestListSettings, ui::RootView};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use http::Method;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -843,6 +1100,14 @@ mod tests {
             .collect()
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
     fn render_app(app: &mut App) {
         let backend = TestBackend::new(100, 12);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
@@ -851,6 +1116,121 @@ mod tests {
         terminal
             .draw(|frame| ui.render(frame, app))
             .expect("request tree should render in tests");
+    }
+
+    #[test]
+    fn focus_starts_on_request_list() {
+        let app = App::new(ui_settings(true));
+
+        assert_eq!(app.focused_panel(), PanelFocus::RequestList);
+        assert_eq!(app.focused_popup(), None);
+        assert!(app.is_panel_focused(PanelFocus::RequestList));
+    }
+
+    #[test]
+    fn tab_cycles_focus_through_visible_panels() {
+        let mut app = App::new(ui_settings(true));
+
+        assert!(!app.handle_key_event(key(KeyCode::Tab)));
+        assert_eq!(app.focused_panel(), PanelFocus::Detail);
+
+        assert!(!app.handle_key_event(key(KeyCode::Tab)));
+        assert_eq!(app.focused_panel(), PanelFocus::Log);
+
+        assert!(!app.handle_key_event(key(KeyCode::Tab)));
+        assert_eq!(app.focused_panel(), PanelFocus::RequestList);
+
+        app.log_panel.visible = false;
+        assert!(!app.handle_key_event(key(KeyCode::Tab)));
+        assert_eq!(app.focused_panel(), PanelFocus::Detail);
+
+        assert!(!app.handle_key_event(key(KeyCode::Tab)));
+        assert_eq!(app.focused_panel(), PanelFocus::RequestList);
+    }
+
+    #[test]
+    fn directional_focus_uses_semantic_panel_graph() {
+        let mut app = App::new(ui_settings(true));
+
+        app.handle_key_event(ctrl_key(KeyCode::Char('l')));
+        assert_eq!(app.focused_panel(), PanelFocus::Detail);
+
+        app.handle_key_event(ctrl_key(KeyCode::Char('j')));
+        assert_eq!(app.focused_panel(), PanelFocus::Log);
+
+        app.handle_key_event(ctrl_key(KeyCode::Char('k')));
+        assert_eq!(app.focused_panel(), PanelFocus::Detail);
+
+        app.handle_key_event(ctrl_key(KeyCode::Char('h')));
+        assert_eq!(app.focused_panel(), PanelFocus::RequestList);
+    }
+
+    #[test]
+    fn hiding_focused_log_panel_moves_focus_to_detail() {
+        let mut app = App::new(ui_settings(true));
+
+        app.focus_panel(PanelFocus::Log);
+        app.handle_key_event(key(KeyCode::Char('@')));
+
+        assert!(!app.log_panel.visible);
+        assert_eq!(app.focused_panel(), PanelFocus::Detail);
+    }
+
+    #[test]
+    fn certificate_popup_takes_modal_focus_until_escape() {
+        let mut app = App::new(ui_settings(true));
+
+        app.focus_panel(PanelFocus::Log);
+        app.handle_key_event(key(KeyCode::Char('c')));
+
+        assert!(app.certificate_popup.visible);
+        assert_eq!(app.focused_popup(), Some(PopupFocus::Certificate));
+        assert!(!app.is_panel_focused(PanelFocus::Log));
+
+        app.handle_key_event(ctrl_key(KeyCode::Char('h')));
+        assert_eq!(app.focused_panel(), PanelFocus::Log);
+        assert_eq!(app.focused_popup(), Some(PopupFocus::Certificate));
+
+        app.handle_key_event(key(KeyCode::Esc));
+        assert!(!app.certificate_popup.visible);
+        assert_eq!(app.focused_popup(), None);
+        assert!(app.is_panel_focused(PanelFocus::Log));
+    }
+
+    #[test]
+    fn detail_focus_uses_h_l_to_switch_tabs() {
+        let mut app = App::new(ui_settings(true));
+
+        app.focus_panel(PanelFocus::Detail);
+        app.handle_key_event(key(KeyCode::Char('h')));
+        assert_eq!(app.detail_panel.active_tab, MainDisplayTab::ResponseBody);
+
+        app.handle_key_event(key(KeyCode::Char('l')));
+        assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestHeader);
+
+        app.handle_key_event(key(KeyCode::Char('l')));
+        assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestBody);
+    }
+
+    #[test]
+    fn panel_keys_apply_only_to_focused_panel() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+        app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
+        let selected_before = app.request_list.state.selected().to_vec();
+        app.detail_panel.scroll.max_offset = 5;
+        app.focus_panel(PanelFocus::Detail);
+
+        app.handle_key_event(key(KeyCode::Char('j')));
+
+        assert_eq!(app.request_list.state.selected(), selected_before);
+        assert_eq!(app.detail_panel.scroll.offset, 1);
+
+        app.focus_panel(PanelFocus::RequestList);
+        app.handle_key_event(key(KeyCode::Char('j')));
+
+        assert_ne!(app.request_list.state.selected(), selected_before);
     }
 
     #[test]

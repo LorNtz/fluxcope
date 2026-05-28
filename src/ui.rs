@@ -1,4 +1,6 @@
-use crate::app::{App, MainDisplayTab, RequestTreeEntry, request_tree_entry};
+use crate::app::{
+    App, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry, request_tree_entry,
+};
 use crossterm::event::{MouseEvent, MouseEventKind};
 use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
@@ -92,6 +94,10 @@ impl View for RootView {
 
 impl MouseHandler for RootView {
     fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        if app.certificate_popup.visible {
+            return true;
+        }
+
         self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
     }
 }
@@ -119,14 +125,10 @@ impl View for RequestListView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         let items = build_request_tree_items(app);
+        let focused = app.is_panel_focused(PanelFocus::RequestList);
         let tree = Tree::new(&items)
             .expect("request tree identifiers are unique")
-            .block(
-                Block::default()
-                    .title("Requests")
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded),
-            )
+            .block(panel_block("Requests", focused))
             .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray))
             .node_closed_symbol("▶ ")
             .node_open_symbol("▼ ")
@@ -147,6 +149,7 @@ impl MouseHandler for RequestListView {
         if !self.contains_mouse(mouse) {
             return false;
         }
+        app.focus_panel(PanelFocus::RequestList);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -413,7 +416,8 @@ impl View for RightPanelView {
 
 impl MouseHandler for RightPanelView {
     fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        (app.log_panel.visible && self.log.handle_mouse(mouse, app))
+        self.tabs.handle_mouse(mouse, app)
+            || (app.log_panel.visible && self.log.handle_mouse(mouse, app))
             || self.detail.handle_mouse(mouse, app)
     }
 }
@@ -440,21 +444,33 @@ impl View for TabsView {
     }
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
+        let focused = app.is_panel_focused(PanelFocus::Detail);
         let tabs = Tabs::new(vec![
             MainDisplayTab::RequestHeader.title(),
             MainDisplayTab::RequestBody.title(),
             MainDisplayTab::ResponseHeader.title(),
             MainDisplayTab::ResponseBody.title(),
         ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
-        )
+        .block(untitled_panel_block(focused))
         .divider(symbols::line::VERTICAL)
         .select(app.detail_panel.active_tab.index());
 
         frame.render_widget(tabs, self.area());
+    }
+}
+
+impl MouseHandler for TabsView {
+    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+        if !self.contains_mouse(mouse) {
+            return false;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            app.focus_panel(PanelFocus::Detail);
+            return true;
+        }
+
+        false
     }
 }
 
@@ -481,13 +497,9 @@ impl View for DetailView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         let detail_text = build_detail_text(app);
+        let focused = app.is_panel_focused(PanelFocus::Detail);
         let mut paragraph = Paragraph::new(detail_text)
-            .block(
-                Block::default()
-                    .title(app.detail_panel.active_tab.title())
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded),
-            )
+            .block(panel_block(app.detail_panel.active_tab.title(), focused))
             .wrap(Wrap { trim: false });
 
         let total_lines: u16 = paragraph
@@ -518,6 +530,7 @@ impl MouseHandler for DetailView {
         if !self.contains_mouse(mouse) {
             return false;
         }
+        app.focus_panel(PanelFocus::Detail);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -555,14 +568,10 @@ impl View for LogView {
     }
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
+        let focused = app.is_panel_focused(PanelFocus::Log);
         let mut paragraph = Paragraph::new(app.log_panel.logs.join("\n"))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Logs")
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded),
-            );
+            .block(panel_block("Logs", focused));
 
         let total_lines: u16 = paragraph
             .line_count(self.area().width)
@@ -592,6 +601,7 @@ impl MouseHandler for LogView {
         if !self.contains_mouse(mouse) {
             return false;
         }
+        app.focus_panel(PanelFocus::Log);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -622,6 +632,29 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, max_offset: u16, offset: u16)
         }),
         &mut state,
     );
+}
+
+fn panel_block(title: &'static str, focused: bool) -> Block<'static> {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    apply_focus_border(block, focused)
+}
+
+fn untitled_panel_block(focused: bool) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    apply_focus_border(block, focused)
+}
+
+fn apply_focus_border(block: Block<'static>, focused: bool) -> Block<'static> {
+    if focused {
+        block.border_style(Style::default().fg(Color::Green))
+    } else {
+        block
+    }
 }
 
 fn render_certificate_popup(frame: &mut Frame, app: &App) {
@@ -694,7 +727,12 @@ fn render_certificate_popup(frame: &mut Frame, app: &App) {
                 .title_alignment(Alignment::Center)
                 .title_bottom(Line::from("Press Esc to close").alignment(Alignment::Center))
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
+                .border_type(BorderType::Rounded)
+                .border_style(if app.is_popup_focused(PopupFocus::Certificate) {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default()
+                }),
         )
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: false });

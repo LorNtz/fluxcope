@@ -250,7 +250,7 @@ impl AppRuntime {
         }
 
         match event::read()? {
-            Event::Key(key) => Ok(self.app.handle_key_press(key.code)),
+            Event::Key(key) => Ok(self.app.handle_key_event(key)),
             Event::Mouse(mouse) => {
                 self.ui.handle_mouse(mouse, &mut self.app);
                 Ok(false)
