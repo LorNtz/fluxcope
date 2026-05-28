@@ -4,6 +4,7 @@ use crate::{
 };
 use crossterm::event::KeyCode;
 use ratatui::layout::Position;
+use std::collections::HashSet;
 use tui_tree_widget::TreeState;
 use url::Url;
 
@@ -248,6 +249,50 @@ impl App {
             .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))
     }
 
+    /// Deletes the selected request leaf or every request under the selected branch.
+    ///
+    /// Returns the number of captured requests removed. The selected tree path is
+    /// resolved against each request's stable tree path, so selecting an origin or
+    /// path segment removes the whole visible subtree represented by that node.
+    pub fn delete_selected_requests(&mut self) -> usize {
+        let selected_path = self.request_list.state.selected().to_vec();
+        if selected_path.is_empty() {
+            return 0;
+        }
+
+        let tree_before_delete = RequestPathTree::from_requests(&self.requests);
+        let len_before_deletion = self.requests.len();
+
+        // deletion
+        self.requests.retain(|req| {
+            let request_path = request_tree_entry(req).request_path();
+            !request_path.starts_with(&selected_path)
+        });
+        let removed_count = len_before_deletion - self.requests.len();
+
+        if removed_count > 0 {
+            log::info!("deleted {removed_count} request(s) from request tree");
+            self.rebuild_request_list_state_after_delete(&selected_path, &tree_before_delete);
+            self.detail_panel.scroll.reset();
+        }
+
+        removed_count
+    }
+
+    /// Removes all captured requests and resets request-tree UI state.
+    ///
+    /// Replaces the request vector with a fresh allocation so the memory used by
+    /// captured request/response bodies can be released promptly.
+    pub fn clear_requests(&mut self) {
+        let removed_count = self.requests.len();
+        self.requests = Vec::new();
+        self.request_list.state = TreeState::default();
+        self.detail_panel.scroll.reset();
+        if removed_count > 0 {
+            log::info!("cleared {removed_count} request(s) from request tree");
+        }
+    }
+
     pub fn handle_key_press(&mut self, key_code: KeyCode) -> bool {
         if self.certificate_popup.visible && key_code == KeyCode::Esc {
             self.certificate_popup.close();
@@ -299,6 +344,14 @@ impl App {
                 self.request_list.scroll_up();
                 false
             }
+            KeyCode::Char('d') => {
+                self.delete_selected_requests();
+                false
+            }
+            KeyCode::Char('D') => {
+                self.clear_requests();
+                false
+            }
             KeyCode::Char('@') => {
                 self.log_panel.toggle();
                 false
@@ -325,6 +378,296 @@ impl App {
         if changed {
             self.detail_panel.scroll.reset();
         }
+    }
+
+    /// Rebuilds request-tree UI state after a delete while preserving valid opens.
+    ///
+    /// The tree state stores paths independently from the captured request list,
+    /// so deleted paths and empty ancestors must be discarded before choosing the
+    /// next selection.
+    fn rebuild_request_list_state_after_delete(
+        &mut self,
+        deleted_path: &[String],
+        tree_before_delete: &RequestPathTree,
+    ) {
+        let tree_after_delete = RequestPathTree::from_requests(&self.requests);
+        let opened_paths_before_delete = self
+            .request_list
+            .state
+            .opened()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let preserved_opened_paths = opened_paths_before_delete
+            .iter()
+            .filter(|path| tree_after_delete.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let visible_paths = tree_after_delete.visible_paths(&preserved_opened_paths);
+        let path_to_select = DeleteSelectionContext::new(
+            deleted_path,
+            tree_before_delete,
+            &tree_after_delete,
+            &visible_paths,
+        )
+        .selected_path();
+
+        // Keep the current scroll offset; rendering will adjust it only if the
+        // newly selected row falls outside the viewport.
+        for opened_path in opened_paths_before_delete {
+            if !tree_after_delete.contains(&opened_path) {
+                self.request_list.state.close(&opened_path);
+            }
+        }
+        self.request_list.state.select(path_to_select);
+    }
+}
+
+#[derive(Debug, Default)]
+struct RequestPathTree {
+    roots: Vec<RequestTreePathNode>,
+}
+
+impl RequestPathTree {
+    /// Builds an internal path-only tree from captured requests.
+    ///
+    /// This tree mirrors the UI tree's identifier structure without depending on UI
+    /// rendering code, which lets app-state logic make selection decisions directly.
+    fn from_requests(requests: &[CapturedData]) -> Self {
+        let mut tree = Self::default();
+
+        for req in requests {
+            tree.insert_request_path(request_tree_entry(req).request_path());
+        }
+
+        tree
+    }
+
+    /// Inserts one request path into the internal request tree.
+    fn insert_request_path(&mut self, path: Vec<String>) {
+        let Some(origin_identifier) = path.first() else {
+            return;
+        };
+
+        let mut current = self.root_mut_or_insert(vec![origin_identifier.clone()]);
+        for identifier in path.iter().skip(1).take(path.len().saturating_sub(2)) {
+            let mut branch_path = current.path.clone();
+            branch_path.push(identifier.clone());
+            current = current.branch_child_mut_or_insert(branch_path);
+        }
+
+        if let Some(request_identifier) = path.last() {
+            let mut request_path = current.path.clone();
+            request_path.push(request_identifier.clone());
+            current
+                .children
+                .push(RequestTreePathNode::new(request_path));
+        }
+    }
+
+    /// Returns an existing root node or appends a new one in capture order.
+    fn root_mut_or_insert(&mut self, path: Vec<String>) -> &mut RequestTreePathNode {
+        if let Some(index) = self.roots.iter().position(|root| root.path == path) {
+            return &mut self.roots[index];
+        }
+
+        self.roots.push(RequestTreePathNode::new(path));
+        self.roots
+            .last_mut()
+            .expect("root was inserted immediately before access")
+    }
+
+    /// Returns the tree paths that are currently visible for the preserved open paths.
+    ///
+    /// Folded branches are included as visible rows, while their descendants are not.
+    fn visible_paths(&self, opened_paths: &[Vec<String>]) -> Vec<Vec<String>> {
+        let opened_paths = opened_paths.iter().cloned().collect::<HashSet<_>>();
+        let mut visible_paths = Vec::new();
+        RequestTreePathNode::collect_visible_paths(&self.roots, &opened_paths, &mut visible_paths);
+        visible_paths
+    }
+
+    /// Returns true when the exact tree path exists in the internal tree.
+    fn contains(&self, path: &[String]) -> bool {
+        self.find(path).is_some()
+    }
+
+    /// Finds a node by following its full identifier path from the tree roots.
+    fn find(&self, path: &[String]) -> Option<&RequestTreePathNode> {
+        RequestTreePathNode::find_in(&self.roots, path)
+    }
+
+    /// Returns the previous and next siblings of a path in the internal tree.
+    fn neighboring_paths(&self, path: &[String]) -> (Option<Vec<String>>, Option<Vec<String>>) {
+        if path.is_empty() {
+            return (None, None);
+        }
+
+        let siblings = if path.len() == 1 {
+            self.roots.as_slice()
+        } else {
+            self.find(&path[..path.len() - 1])
+                .map(|parent| parent.children.as_slice())
+                .unwrap_or(&[])
+        };
+
+        let Some(index) = siblings.iter().position(|sibling| sibling.path == path) else {
+            return (None, None);
+        };
+
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| siblings.get(index))
+            .map(|sibling| sibling.path.clone());
+        let next = siblings.get(index + 1).map(|sibling| sibling.path.clone());
+
+        (previous, next)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RequestTreePathNode {
+    path: Vec<String>,
+    children: Vec<RequestTreePathNode>,
+}
+
+impl RequestTreePathNode {
+    /// Creates an internal request-tree node identified by its full tree path.
+    fn new(path: Vec<String>) -> Self {
+        Self {
+            path,
+            children: Vec::new(),
+        }
+    }
+
+    /// Returns an existing branch child or inserts it before any request leaves.
+    ///
+    /// This mirrors the UI tree ordering where path branches are grouped before
+    /// leaf requests that live directly under the same parent.
+    fn branch_child_mut_or_insert(&mut self, path: Vec<String>) -> &mut Self {
+        if let Some(index) = self.children.iter().position(|child| child.path == path) {
+            return &mut self.children[index];
+        }
+
+        let insert_index = self
+            .children
+            .iter()
+            .position(RequestTreePathNode::is_request_leaf)
+            .unwrap_or(self.children.len());
+        self.children.insert(insert_index, Self::new(path));
+        &mut self.children[insert_index]
+    }
+
+    /// Returns true when this node represents a captured request leaf.
+    fn is_request_leaf(&self) -> bool {
+        self.path
+            .last()
+            .is_some_and(|identifier| identifier.starts_with(REQUEST_IDENTIFIER_PREFIX))
+    }
+
+    /// Walks the internal tree in UI order and collects rows visible under open branches.
+    fn collect_visible_paths(
+        nodes: &[Self],
+        opened_paths: &HashSet<Vec<String>>,
+        visible_paths: &mut Vec<Vec<String>>,
+    ) {
+        for node in nodes {
+            visible_paths.push(node.path.clone());
+            if opened_paths.contains(&node.path) {
+                Self::collect_visible_paths(&node.children, opened_paths, visible_paths);
+            }
+        }
+    }
+
+    /// Finds a node by following its full identifier path from the given nodes.
+    fn find_in<'a>(nodes: &'a [Self], path: &[String]) -> Option<&'a Self> {
+        let (identifier, rest) = path.split_first()?;
+        let node = nodes
+            .iter()
+            .find(|node| node.path.last() == Some(identifier))?;
+
+        if rest.is_empty() {
+            Some(node)
+        } else {
+            Self::find_in(&node.children, rest)
+        }
+    }
+}
+
+struct DeleteSelectionContext<'a> {
+    deleted_path: &'a [String],
+    tree_before_delete: &'a RequestPathTree,
+    tree_after_delete: &'a RequestPathTree,
+    visible_paths: &'a [Vec<String>],
+}
+
+impl<'a> DeleteSelectionContext<'a> {
+    /// Creates a chooser for the next selected row after a delete operation.
+    fn new(
+        deleted_path: &'a [String],
+        tree_before_delete: &'a RequestPathTree,
+        tree_after_delete: &'a RequestPathTree,
+        visible_paths: &'a [Vec<String>],
+    ) -> Self {
+        Self {
+            deleted_path,
+            tree_before_delete,
+            tree_after_delete,
+            visible_paths,
+        }
+    }
+
+    /// Picks the row that should be selected after the currently selected path is deleted.
+    ///
+    /// Preference is given to the previous sibling's deepest visible descendant,
+    /// then the next visible sibling, then the first visible row. This keeps the
+    /// selection anchored near the user's deletion point and respects folded nodes.
+    fn selected_path(&self) -> Vec<String> {
+        if let Some(deleted_start_path) = self.first_removed_prefix() {
+            let (previous_sibling, next_sibling) = self
+                .tree_before_delete
+                .neighboring_paths(&deleted_start_path);
+
+            if let Some(previous_sibling) =
+                previous_sibling.filter(|path| self.tree_after_delete.contains(path))
+            {
+                if let Some(visible_descendant) = self.deepest_visible_descendant(&previous_sibling)
+                {
+                    return visible_descendant;
+                }
+            }
+
+            if let Some(next_sibling) =
+                next_sibling.filter(|path| self.tree_after_delete.contains(path))
+            {
+                if self.visible_paths.contains(&next_sibling) {
+                    return next_sibling;
+                }
+            }
+        }
+
+        self.visible_paths.first().cloned().unwrap_or_default()
+    }
+
+    /// Finds the shallowest selected prefix that disappeared as a result of deletion.
+    ///
+    /// Deleting a branch can remove empty ancestors too; this identifies the start
+    /// node whose previous/next siblings should drive the replacement selection.
+    fn first_removed_prefix(&self) -> Option<Vec<String>> {
+        (1..=self.deleted_path.len())
+            .map(|len| self.deleted_path[..len].to_vec())
+            .find(|prefix| {
+                self.tree_before_delete.contains(prefix) && !self.tree_after_delete.contains(prefix)
+            })
+    }
+
+    /// Returns the deepest visible row under the given path.
+    fn deepest_visible_descendant(&self, path: &[String]) -> Option<Vec<String>> {
+        self.visible_paths
+            .iter()
+            .rev()
+            .find(|visible_path| visible_path.starts_with(path))
+            .cloned()
     }
 }
 
@@ -465,8 +808,9 @@ fn path_segments_with_query(path: &str, query: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::RequestListSettings;
+    use crate::{settings::RequestListSettings, ui::RootView};
     use http::Method;
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn ui_settings(auto_expand: bool) -> UiSettings {
         UiSettings {
@@ -490,6 +834,23 @@ mod tests {
             req_body: None,
             res_body: None,
         }
+    }
+
+    fn tree_path(identifiers: &[&str]) -> Vec<String> {
+        identifiers
+            .iter()
+            .map(|identifier| (*identifier).to_string())
+            .collect()
+    }
+
+    fn render_app(app: &mut App) {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut ui = RootView::new();
+
+        terminal
+            .draw(|frame| ui.render(frame, app))
+            .expect("request tree should render in tests");
     }
 
     #[test]
@@ -614,5 +975,217 @@ mod tests {
                 .opened()
                 .contains(&vec![origin, api, v1])
         );
+    }
+
+    #[test]
+    fn delete_selected_requests_removes_leaf_request() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+        app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
+        app.request_list.state.select(vec![
+            "origin:https://some.host.com".to_string(),
+            "segment:api".to_string(),
+            "request:0".to_string(),
+        ]);
+
+        assert_eq!(app.delete_selected_requests(), 1);
+
+        assert_eq!(app.requests.len(), 1);
+        assert_eq!(app.requests[0].uri, "https://some.host.com/api/b");
+        assert_eq!(
+            app.request_list.state.selected(),
+            [
+                "origin:https://some.host.com".to_string(),
+                "segment:api".to_string(),
+                "request:1".to_string()
+            ]
+        );
+        assert_eq!(
+            app.selected_request().map(|req| req.uri.as_str()),
+            Some("https://some.host.com/api/b")
+        );
+    }
+
+    #[test]
+    fn delete_selected_requests_removes_subtree_requests() {
+        let mut app = App::new(ui_settings(true));
+        let origin = "origin:https://some.host.com".to_string();
+        let api = "segment:api".to_string();
+        let v1 = "segment:v1".to_string();
+
+        app.add_request(captured_with_sequence(0, "https://some.host.com/api/v1/a"));
+        app.add_request(captured_with_sequence(1, "https://some.host.com/api/v1/b"));
+        app.add_request(captured_with_sequence(2, "https://some.host.com/api/v2/c"));
+        app.request_list
+            .state
+            .select(vec![origin.clone(), api.clone(), v1.clone()]);
+
+        assert_eq!(app.delete_selected_requests(), 2);
+
+        assert_eq!(app.requests.len(), 1);
+        assert_eq!(app.requests[0].uri, "https://some.host.com/api/v2/c");
+        assert_eq!(
+            app.request_list.state.selected(),
+            [origin.clone(), api.clone(), "segment:v2".to_string()]
+        );
+        assert!(
+            app.request_list
+                .state
+                .opened()
+                .contains(&vec![origin.clone(), api.clone()])
+        );
+        assert!(
+            !app.request_list
+                .state
+                .opened()
+                .contains(&vec![origin, api, v1])
+        );
+    }
+
+    #[test]
+    fn delete_selected_requests_selects_previous_leaf_sibling() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+        app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
+        app.add_request(captured_with_sequence(2, "https://some.host.com/api/c"));
+        app.request_list.state.select(tree_path(&[
+            "origin:https://some.host.com",
+            "segment:api",
+            "request:1",
+        ]));
+
+        assert_eq!(app.delete_selected_requests(), 1);
+
+        assert_eq!(
+            app.request_list.state.selected(),
+            tree_path(&["origin:https://some.host.com", "segment:api", "request:0"])
+        );
+        assert_eq!(
+            app.selected_request().map(|req| req.uri.as_str()),
+            Some("https://some.host.com/api/a")
+        );
+    }
+
+    #[test]
+    fn delete_selected_requests_selects_next_root_when_first_branch_disappears() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://a.com/some/path/api1"));
+        app.add_request(captured_with_sequence(1, "https://a.com/some/path/api2"));
+        app.add_request(captured_with_sequence(2, "https://b.com/api4"));
+        app.request_list
+            .state
+            .select(tree_path(&["origin:https://a.com", "segment:some"]));
+
+        assert_eq!(app.delete_selected_requests(), 2);
+
+        assert_eq!(
+            app.request_list.state.selected(),
+            tree_path(&["origin:https://b.com"])
+        );
+        assert_eq!(app.requests.len(), 1);
+        assert_eq!(app.requests[0].uri, "https://b.com/api4");
+    }
+
+    #[test]
+    fn delete_selected_requests_selects_deepest_visible_node_in_previous_root() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://a.com/some/path/api1"));
+        app.add_request(captured_with_sequence(1, "https://a.com/some/path/api2"));
+        app.add_request(captured_with_sequence(2, "https://a.com/some/path/api3"));
+        app.add_request(captured_with_sequence(3, "https://b.com/api4"));
+        app.request_list
+            .state
+            .select(tree_path(&["origin:https://b.com", "request:3"]));
+
+        assert_eq!(app.delete_selected_requests(), 1);
+
+        assert_eq!(
+            app.request_list.state.selected(),
+            tree_path(&[
+                "origin:https://a.com",
+                "segment:some",
+                "segment:path",
+                "request:2"
+            ])
+        );
+        assert_eq!(
+            app.selected_request().map(|req| req.uri.as_str()),
+            Some("https://a.com/some/path/api3")
+        );
+    }
+
+    #[test]
+    fn delete_selected_requests_selects_folded_previous_branch_node() {
+        let mut app = App::new(ui_settings(true));
+        let some_path = tree_path(&["origin:https://a.com", "segment:some"]);
+
+        app.add_request(captured_with_sequence(0, "https://a.com/some/path/api1"));
+        app.add_request(captured_with_sequence(1, "https://a.com/some/path/api2"));
+        app.add_request(captured_with_sequence(2, "https://a.com/some/path/api3"));
+        app.add_request(captured_with_sequence(3, "https://b.com/api4"));
+        app.request_list.state.close(&some_path);
+        app.request_list
+            .state
+            .select(tree_path(&["origin:https://b.com", "request:3"]));
+
+        assert_eq!(app.delete_selected_requests(), 1);
+
+        assert_eq!(app.request_list.state.selected(), some_path);
+        assert!(app.selected_request().is_none());
+    }
+
+    #[test]
+    fn delete_selected_requests_preserves_scroll_when_new_selection_is_visible() {
+        let mut app = App::new(ui_settings(true));
+
+        for sequence in 0..30 {
+            app.add_request(captured_with_sequence(
+                sequence,
+                &format!("https://some.host.com/api/item{sequence}"),
+            ));
+        }
+
+        render_app(&mut app);
+        for _ in 0..8 {
+            app.request_list.scroll_down();
+        }
+        render_app(&mut app);
+        let offset_before_delete = app.request_list.state.get_offset();
+        app.request_list.state.select(tree_path(&[
+            "origin:https://some.host.com",
+            "segment:api",
+            "request:10",
+        ]));
+
+        assert_eq!(app.delete_selected_requests(), 1);
+        render_app(&mut app);
+
+        assert_eq!(app.request_list.state.get_offset(), offset_before_delete);
+        assert_eq!(
+            app.request_list.state.selected(),
+            tree_path(&["origin:https://some.host.com", "segment:api", "request:9"])
+        );
+    }
+
+    #[test]
+    fn clear_requests_drops_records_and_resets_tree_state() {
+        let mut app = App::new(ui_settings(true));
+
+        app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+        app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
+        app.detail_panel.scroll.offset = 1;
+        assert!(app.requests.capacity() > 0);
+
+        app.clear_requests();
+
+        assert!(app.requests.is_empty());
+        assert_eq!(app.requests.capacity(), 0);
+        assert!(app.request_list.state.selected().is_empty());
+        assert!(app.request_list.state.opened().is_empty());
+        assert_eq!(app.detail_panel.scroll.offset, 0);
     }
 }
