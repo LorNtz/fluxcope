@@ -147,7 +147,6 @@ impl MouseHandler for RequestListView {
         if !self.contains_mouse(mouse) {
             return false;
         }
-        app.focus_panel(PanelFocus::RequestList);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -159,6 +158,7 @@ impl MouseHandler for RequestListView {
                 true
             }
             MouseEventKind::Down(_) => {
+                app.focus_panel(PanelFocus::RequestList);
                 let changed = app
                     .request_list
                     .click_at(Position::new(mouse.column, mouse.row));
@@ -294,6 +294,7 @@ mod tests {
     use super::*;
     use crate::proxy_handler::CapturedData;
     use crate::settings::{RequestListSettings, UiSettings};
+    use crossterm::event::{KeyModifiers, MouseButton};
     use http::Method;
 
     fn ui_settings(auto_expand: bool) -> UiSettings {
@@ -314,6 +315,30 @@ mod tests {
             req_body: None,
             res_body: None,
         }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn laid_out_ui(app: &App) -> RootView {
+        let mut ui = RootView::new();
+        View::layout(&mut ui, Rect::new(0, 0, 100, 12), app);
+
+        ui
+    }
+
+    fn mouse_inside(kind: MouseEventKind, area: Rect) -> MouseEvent {
+        mouse(kind, area.x.saturating_add(1), area.y.saturating_add(1))
+    }
+
+    fn mouse_down_inside(area: Rect) -> MouseEvent {
+        mouse_inside(MouseEventKind::Down(MouseButton::Left), area)
     }
 
     #[test]
@@ -350,6 +375,39 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(child_identifiers, ["segment:b", "segment:a", "request:0"]);
+    }
+
+    #[test]
+    fn mouse_movement_and_scroll_do_not_move_panel_focus() {
+        let mut app = App::new(ui_settings(true));
+        let ui = laid_out_ui(&app);
+
+        ui.handle_mouse(
+            mouse_inside(MouseEventKind::Moved, ui.right_panel.detail.area()),
+            &mut app,
+        );
+        assert!(app.is_panel_focused(PanelFocus::RequestList));
+
+        ui.handle_mouse(
+            mouse_inside(MouseEventKind::ScrollDown, ui.right_panel.log.area()),
+            &mut app,
+        );
+        assert!(app.is_panel_focused(PanelFocus::RequestList));
+    }
+
+    #[test]
+    fn mouse_click_focuses_clicked_panel() {
+        let mut app = App::new(ui_settings(true));
+        let ui = laid_out_ui(&app);
+
+        ui.handle_mouse(mouse_down_inside(ui.right_panel.detail.area()), &mut app);
+        assert!(app.is_panel_focused(PanelFocus::Detail));
+
+        ui.handle_mouse(mouse_down_inside(ui.right_panel.log.area()), &mut app);
+        assert!(app.is_panel_focused(PanelFocus::Log));
+
+        ui.handle_mouse(mouse_down_inside(ui.request_list.area()), &mut app);
+        assert!(app.is_panel_focused(PanelFocus::RequestList));
     }
 }
 
@@ -528,7 +586,6 @@ impl MouseHandler for DetailView {
         if !self.contains_mouse(mouse) {
             return false;
         }
-        app.focus_panel(PanelFocus::Detail);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -537,6 +594,10 @@ impl MouseHandler for DetailView {
             }
             MouseEventKind::ScrollUp => {
                 app.detail_panel.scroll.scroll_up();
+                true
+            }
+            MouseEventKind::Down(_) => {
+                app.focus_panel(PanelFocus::Detail);
                 true
             }
             _ => false,
@@ -599,7 +660,6 @@ impl MouseHandler for LogView {
         if !self.contains_mouse(mouse) {
             return false;
         }
-        app.focus_panel(PanelFocus::Log);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -608,6 +668,10 @@ impl MouseHandler for LogView {
             }
             MouseEventKind::ScrollUp => {
                 app.log_panel.scroll.scroll_up();
+                true
+            }
+            MouseEventKind::Down(_) => {
+                app.focus_panel(PanelFocus::Log);
                 true
             }
             _ => false,
