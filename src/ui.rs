@@ -1,6 +1,4 @@
-use crate::app::{
-    App, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry, request_tree_entry,
-};
+use crate::app::{App, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry};
 use crossterm::event::{MouseEvent, MouseEventKind};
 use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
@@ -232,7 +230,7 @@ fn build_request_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
     let mut roots = Vec::new();
 
     for req in &app.requests {
-        insert_request_tree_entry(&mut roots, request_tree_entry(req));
+        insert_request_tree_entry(&mut roots, RequestTreeEntry::from(req));
     }
 
     roots
