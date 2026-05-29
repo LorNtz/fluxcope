@@ -5,8 +5,8 @@ use std::{
 };
 
 const DEFAULT_PROXY_PORT: u16 = 8989;
-const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.proxy-tui/certificate/";
-const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "proxy-ca.pem";
+const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.wirelens/certificate/";
+const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "wirelens-ca.pem";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -170,7 +170,7 @@ impl SettingsManager {
 }
 
 fn default_config_path() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".proxy-tui/config.yml"))
+    Ok(home_dir()?.join(".wirelens/config.yml"))
 }
 
 fn expand_home_path(path: &str) -> io::Result<PathBuf> {
@@ -244,7 +244,7 @@ mod tests {
 
         assert_eq!(9010, manager.server_port());
         assert_eq!(
-            home_dir()?.join(".proxy-tui/certificate/"),
+            home_dir()?.join(".wirelens/certificate/"),
             manager.certificate_store_dir()?
         );
         assert_eq!(
@@ -288,9 +288,9 @@ mod tests {
     }
 
     #[test]
-    fn default_config_path_uses_proxy_tui_home_dir() -> io::Result<()> {
+    fn default_config_path_uses_wirelens_home_dir() -> io::Result<()> {
         assert_eq!(
-            home_dir()?.join(".proxy-tui/config.yml"),
+            home_dir()?.join(".wirelens/config.yml"),
             default_config_path()?
         );
         Ok(())
@@ -302,6 +302,6 @@ mod tests {
             .unwrap()
             .as_nanos();
 
-        env::temp_dir().join(format!("proxy-tui-settings-{nanos}/config.yml"))
+        env::temp_dir().join(format!("wirelens-settings-{nanos}/config.yml"))
     }
 }

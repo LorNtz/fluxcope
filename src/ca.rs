@@ -111,7 +111,7 @@ fn create_ca() -> Certificate {
     params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "Proxy TUI CA");
+        .push(rcgen::DnType::CommonName, "Wirelens CA");
     params.key_usages = vec![
         KeyUsagePurpose::KeyCertSign,
         KeyUsagePurpose::DigitalSignature,
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn test_certificate_persistence() {
         let cert_dir = temp_cert_dir();
-        let pem_filename = "proxy-ca.pem";
+        let pem_filename = "wirelens-ca.pem";
 
         // Clean up before test
         let _ = fs::remove_dir_all(&cert_dir);
@@ -176,6 +176,6 @@ mod tests {
             .unwrap()
             .as_nanos();
 
-        std::env::temp_dir().join(format!("proxy-tui-ca-{nanos}"))
+        std::env::temp_dir().join(format!("wirelens-ca-{nanos}"))
     }
 }

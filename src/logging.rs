@@ -33,7 +33,7 @@ impl AppLogger {
 
 impl log::Log for AppLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        let is_crate_log = metadata.target().starts_with("proxy_tui");
+        let is_crate_log = metadata.target().starts_with("wirelens");
         if is_crate_log {
             metadata.level() <= Level::Info
         } else {
