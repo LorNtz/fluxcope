@@ -1,14 +1,15 @@
 // src/proxy_handler.rs
-use crate::app::AppEvent;
+use crate::{app::AppEvent, mapping::MappingStore};
 use hudsucker::{
     HttpContext, HttpHandler, RequestOrResponse,
     async_trait::async_trait,
     hyper::{
-        Body, Method, Request, Response,
-        header::{CONTENT_ENCODING, HeaderMap},
+        Body, Method, Request, Response, StatusCode,
+        header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
     },
 };
 use std::io::{self, Read};
+use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -22,6 +23,8 @@ pub struct CapturedData {
     pub sequence: u64,
     pub method: Method,
     pub uri: String,
+    pub mapped_uri: Option<String>,
+    pub local_path: Option<String>,
     pub status: Option<u16>,
     pub req_headers: Vec<(String, String)>,
     pub res_headers: Vec<(String, String)>,
@@ -32,14 +35,16 @@ pub struct CapturedData {
 pub struct LogHandler {
     tx: mpsc::UnboundedSender<AppEvent>,
     next_sequence: Arc<AtomicU64>,
+    mapping_store: MappingStore,
     current_request: Option<CapturedData>,
 }
 
 impl LogHandler {
-    pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<AppEvent>, mapping_store: MappingStore) -> Self {
         Self {
             tx,
             next_sequence: Arc::new(AtomicU64::new(0)),
+            mapping_store,
             current_request: None,
         }
     }
@@ -53,7 +58,7 @@ impl LogHandler {
 
         let id = uuid::Uuid::new_v4();
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        let (parts, body) = req.into_parts();
+        let (mut parts, body) = req.into_parts();
 
         let (req_body, req_body_bytes) = match hyper::body::to_bytes(body).await {
             Ok(bytes) => (body_for_display(&bytes, &parts.headers), bytes),
@@ -68,6 +73,8 @@ impl LogHandler {
             sequence,
             method: parts.method.clone(),
             uri: parts.uri.to_string(),
+            mapped_uri: None,
+            local_path: None,
             status: None,
             req_headers: parts
                 .headers
@@ -79,9 +86,29 @@ impl LogHandler {
             res_body: None,
         };
 
+        let mapping = self.mapping_store.current();
+        let decision = mapping.map_request(&parts.uri);
+        let original_uri = data.uri.clone();
+        let mut data = data;
+
+        if let Some(mapped_uri) = decision.mapped_uri {
+            log::info!("map remote: {} -> {}", original_uri, mapped_uri);
+            data.mapped_uri = Some(mapped_uri.to_string());
+            parts.uri = mapped_uri;
+        }
+
         let reconstructed_req = Request::from_parts(parts, Body::from(req_body_bytes));
 
         self.current_request = Some(data);
+
+        if let Some(local_path) = decision.local_path {
+            if let Some(data) = &mut self.current_request {
+                data.local_path = Some(local_path.display().to_string());
+            }
+            log::info!("map local: {} -> {}", original_uri, local_path.display());
+            let response = local_file_response(&local_path).await;
+            return RequestOrResponse::Response(self.capture_response(response).await);
+        }
 
         RequestOrResponse::Request(reconstructed_req)
     }
@@ -122,6 +149,7 @@ impl Clone for LogHandler {
         Self {
             tx: self.tx.clone(),
             next_sequence: Arc::clone(&self.next_sequence),
+            mapping_store: self.mapping_store.clone(),
             current_request: None,
         }
     }
@@ -212,12 +240,64 @@ fn read_all(mut reader: impl Read) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
+async fn local_file_response(path: &Path) -> Response<Body> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, content_type_for_path(path))
+            .header(CONTENT_LENGTH, bytes.len().to_string())
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+        Err(error) => {
+            let body = format!(
+                "Failed to read mapped local file {}: {error}",
+                path.display()
+            );
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(CONTENT_LENGTH, body.len().to_string())
+                .body(Body::from(body))
+                .unwrap_or_else(|_| Response::new(Body::empty()))
+        }
+    }
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("json") => "application/json",
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") | Some("mjs") => "application/javascript",
+        Some("txt") | Some("text") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        mapping::MappingEngine,
+        settings::{
+            ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule, ProxyMapRemoteSettings,
+            ProxyPresetSettings, ProxySettings,
+        },
+    };
     use flate2::{Compression, write::GzEncoder};
     use hudsucker::hyper::header::HeaderValue;
-    use std::io::Write;
+    use std::{
+        fs,
+        io::Write,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn decodes_gzip_body_for_display() {
@@ -249,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn cloned_handlers_capture_concurrent_requests_independently() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let base_handler = LogHandler::new(tx);
+        let base_handler = LogHandler::new(tx, MappingStore::default());
         let mut slow_handler = base_handler.clone();
         let mut fast_handler = base_handler.clone();
 
@@ -275,6 +355,122 @@ mod tests {
         assert_eq!(slow.status, Some(201));
         assert_eq!(slow.res_body.as_deref(), Some("slow body"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_mapping_rewrites_forwarded_uri_but_captures_original_uri() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = LogHandler::new(
+            tx,
+            mapping_store(
+                vec![remote_rule("https://a.com", "http://b.test.com")],
+                vec![],
+            ),
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://a.com/some/api?x=1")
+            .body(Body::empty())
+            .expect("test request should be valid");
+
+        let forwarded = match handler.capture_request(request).await {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(_) => panic!("remote mapping should forward request"),
+        };
+
+        assert_eq!(
+            forwarded.uri().to_string(),
+            "http://b.test.com/some/api?x=1"
+        );
+
+        handler.capture_response(test_response(200, "ok")).await;
+
+        let captured = received_request(&mut rx);
+        assert_eq!(captured.uri, "https://a.com/some/api?x=1");
+        assert_eq!(
+            captured.mapped_uri.as_deref(),
+            Some("http://b.test.com/some/api?x=1")
+        );
+        assert_eq!(captured.local_path, None);
+        assert_eq!(captured.status, Some(200));
+    }
+
+    #[tokio::test]
+    async fn local_mapping_returns_file_response_and_records_capture() {
+        let path = temp_file_path("api1.json");
+        fs::write(&path, r#"{"ok":true}"#).expect("test file should be written");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = LogHandler::new(
+            tx,
+            mapping_store(
+                vec![],
+                vec![local_rule(
+                    "https://a.com/some/api1",
+                    &path.to_string_lossy(),
+                )],
+            ),
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://a.com/some/api1?x=1")
+            .body(Body::empty())
+            .expect("test request should be valid");
+
+        let response = match handler.capture_request(request).await {
+            RequestOrResponse::Request(_) => panic!("local mapping should return response"),
+            RequestOrResponse::Response(response) => response,
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("test response body should read");
+        assert_eq!(body.as_ref(), br#"{"ok":true}"#);
+
+        let captured = received_request(&mut rx);
+        assert_eq!(captured.uri, "https://a.com/some/api1?x=1");
+        assert_eq!(captured.status, Some(200));
+        assert_eq!(captured.res_body.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(
+            captured.local_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn missing_local_file_returns_bad_gateway_and_records_error_body() {
+        let path = temp_file_path("missing.json");
+        let _ = fs::remove_file(&path);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = LogHandler::new(
+            tx,
+            mapping_store(
+                vec![],
+                vec![local_rule("https://a.com/missing", &path.to_string_lossy())],
+            ),
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://a.com/missing")
+            .body(Body::empty())
+            .expect("test request should be valid");
+
+        let response = match handler.capture_request(request).await {
+            RequestOrResponse::Request(_) => panic!("local mapping should return response"),
+            RequestOrResponse::Response(response) => response,
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let captured = received_request(&mut rx);
+        assert_eq!(captured.status, Some(502));
+        assert!(
+            captured
+                .res_body
+                .as_deref()
+                .is_some_and(|body| body.contains("Failed to read mapped local file"))
+        );
     }
 
     async fn forward_request(handler: &mut LogHandler, uri: &str) {
@@ -304,5 +500,52 @@ mod tests {
                 panic!("unexpected app event")
             }
         }
+    }
+
+    fn mapping_store(
+        remote_rules: Vec<ProxyMapRemoteRule>,
+        local_rules: Vec<ProxyMapLocalRule>,
+    ) -> MappingStore {
+        let proxy = ProxySettings {
+            enable: true,
+            active_preset: Some("dev".to_string()),
+            presets: vec![ProxyPresetSettings {
+                name: "dev".to_string(),
+                map_remote: ProxyMapRemoteSettings {
+                    enable: true,
+                    rules: remote_rules,
+                },
+                map_local: ProxyMapLocalSettings {
+                    enable: true,
+                    rules: local_rules,
+                },
+            }],
+        };
+
+        MappingStore::new(MappingEngine::compile(Some(&proxy)))
+    }
+
+    fn remote_rule(from: &str, to: &str) -> ProxyMapRemoteRule {
+        ProxyMapRemoteRule {
+            from: from.to_string(),
+            to: to.to_string(),
+            enable: true,
+        }
+    }
+
+    fn local_rule(from: &str, to: &str) -> ProxyMapLocalRule {
+        ProxyMapLocalRule {
+            from: from.to_string(),
+            to: to.to_string(),
+            enable: true,
+        }
+    }
+
+    fn temp_file_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("wirelens-{nanos}-{name}"))
     }
 }

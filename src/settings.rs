@@ -14,6 +14,8 @@ pub struct AppSettings {
     pub server: ServerSettings,
     pub certificate: CertificateSettings,
     pub ui: UiSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxySettings>,
 }
 
 impl Default for AppSettings {
@@ -22,6 +24,7 @@ impl Default for AppSettings {
             server: ServerSettings::default(),
             certificate: CertificateSettings::default(),
             ui: UiSettings::default(),
+            proxy: None,
         }
     }
 }
@@ -82,6 +85,124 @@ impl Default for RequestListSettings {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub presets: Vec<ProxyPresetSettings>,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            active_preset: None,
+            presets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxyPresetSettings {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "ProxyMapRemoteSettings::is_default")]
+    pub map_remote: ProxyMapRemoteSettings,
+    #[serde(default, skip_serializing_if = "ProxyMapLocalSettings::is_default")]
+    pub map_local: ProxyMapLocalSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxyMapRemoteSettings {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ProxyMapRemoteRule>,
+}
+
+impl ProxyMapRemoteSettings {
+    fn is_default(settings: &Self) -> bool {
+        settings == &Self::default()
+    }
+}
+
+impl Default for ProxyMapRemoteSettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxyMapLocalSettings {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ProxyMapLocalRule>,
+}
+
+impl ProxyMapLocalSettings {
+    fn is_default(settings: &Self) -> bool {
+        settings == &Self::default()
+    }
+}
+
+impl Default for ProxyMapLocalSettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxyMapRemoteRule {
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+}
+
+impl Default for ProxyMapRemoteRule {
+    fn default() -> Self {
+        Self {
+            from: String::new(),
+            to: String::new(),
+            enable: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ProxyMapLocalRule {
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+}
+
+impl Default for ProxyMapLocalRule {
+    fn default() -> Self {
+        Self {
+            from: String::new(),
+            to: String::new(),
+            enable: true,
+        }
+    }
+}
+
 pub struct SettingsManager {
     path: PathBuf,
     settings: AppSettings,
@@ -134,6 +255,10 @@ impl SettingsManager {
 
     pub fn ui_settings(&self) -> &UiSettings {
         &self.settings.ui
+    }
+
+    pub fn proxy_settings(&self) -> Option<&ProxySettings> {
+        self.settings.proxy.as_ref()
     }
 
     #[allow(dead_code)]
@@ -200,6 +325,14 @@ fn yaml_error(error: serde_yaml::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +357,8 @@ mod tests {
             saved.certificate.pem_filename
         );
         assert!(!saved.ui.request_list.auto_expand);
+        assert!(saved.proxy.is_none());
+        assert!(!fs::read_to_string(&path)?.contains("proxy:"));
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -262,6 +397,8 @@ mod tests {
             saved.certificate.pem_filename
         );
         assert!(!saved.ui.request_list.auto_expand);
+        assert!(saved.proxy.is_none());
+        assert!(!fs::read_to_string(&path)?.contains("proxy:"));
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -282,6 +419,47 @@ mod tests {
         let saved: AppSettings =
             serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
         assert!(saved.ui.request_list.auto_expand);
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_optional_proxy_settings_without_filling_empty_sections() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+proxy:
+  active_preset: dev
+  presets:
+    - name: dev
+      map_remote:
+        rules:
+          - from: "https://a.com"
+            to: "http://b.test.com"
+"#,
+        )?;
+
+        let manager = SettingsManager::load_from_path(&path)?;
+        let proxy = manager
+            .proxy_settings()
+            .expect("proxy settings should deserialize");
+
+        assert!(proxy.enable);
+        assert_eq!(proxy.active_preset.as_deref(), Some("dev"));
+        assert_eq!(proxy.presets.len(), 1);
+        assert!(proxy.presets[0].map_remote.enable);
+        assert_eq!(proxy.presets[0].map_remote.rules.len(), 1);
+        assert!(proxy.presets[0].map_remote.rules[0].enable);
+        assert!(proxy.presets[0].map_local.rules.is_empty());
+
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.contains("proxy:"));
+        assert!(!saved.contains("map_local:"));
 
         let _ = fs::remove_file(path);
         Ok(())

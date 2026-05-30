@@ -309,6 +309,8 @@ mod tests {
             sequence,
             method: Method::GET,
             uri: uri.to_string(),
+            mapped_uri: None,
+            local_path: None,
             status: None,
             req_headers: vec![],
             res_headers: vec![],
@@ -943,12 +945,7 @@ fn build_detail_text(app: &App) -> String {
     };
 
     match app.detail_panel.active_tab {
-        MainDisplayTab::RequestHeader => format!(
-            "Method: {}\nURI: {}\n\nHeaders:\n{}",
-            req.method,
-            req.uri,
-            join_headers(&req.req_headers)
-        ),
+        MainDisplayTab::RequestHeader => format_request_header(req),
         MainDisplayTab::RequestBody => {
             format_request_body(req.req_body.as_deref(), &req.req_headers)
         }
@@ -960,6 +957,23 @@ fn build_detail_text(app: &App) -> String {
         ),
         MainDisplayTab::ResponseBody => format_response_body(req.res_body.as_deref()),
     }
+}
+
+fn format_request_header(req: &crate::proxy_handler::CapturedData) -> String {
+    let mut lines = vec![
+        format!("Method: {}", req.method),
+        format!("URI: {}", req.uri),
+    ];
+    if let Some(mapped_uri) = &req.mapped_uri {
+        lines.push(format!("Mapped URI: {mapped_uri}"));
+    }
+    if let Some(local_path) = &req.local_path {
+        lines.push(format!("Map Local File: {local_path}"));
+    }
+    lines.push(String::new());
+    lines.push("Headers:".to_string());
+    lines.push(join_headers(&req.req_headers));
+    lines.join("\n")
 }
 
 fn join_headers(headers: &[(String, String)]) -> String {

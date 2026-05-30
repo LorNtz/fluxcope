@@ -1,6 +1,7 @@
 mod app;
 mod ca;
 mod logging;
+mod mapping;
 mod proxy_handler;
 mod runtime;
 mod settings;

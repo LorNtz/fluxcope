@@ -24,12 +24,20 @@ fn captured_with_sequence(sequence: u64, uri: &str) -> CapturedData {
         sequence,
         method: Method::GET,
         uri: uri.to_string(),
+        mapped_uri: None,
+        local_path: None,
         status: None,
         req_headers: vec![("host".to_string(), "fallback.example.com".to_string())],
         res_headers: vec![],
         req_body: None,
         res_body: None,
     }
+}
+
+fn mapped_captured_with_sequence(sequence: u64, uri: &str, mapped_uri: &str) -> CapturedData {
+    let mut captured = captured_with_sequence(sequence, uri);
+    captured.mapped_uri = Some(mapped_uri.to_string());
+    captured
 }
 
 fn tree_path(identifiers: &[&str]) -> Vec<String> {
@@ -188,6 +196,22 @@ fn request_tree_entry_from_captured_request_splits_absolute_url() {
             "segment:v1",
             "request:7"
         ]
+    );
+}
+
+#[test]
+fn request_tree_entry_uses_mapped_uri_for_display_path() {
+    let entry = RequestTreeEntry::from(&mapped_captured_with_sequence(
+        7,
+        "https://a.com/original/path?a=1",
+        "http://b.test.com/mapped/path?a=1",
+    ));
+
+    assert_eq!(entry.origin, "http://b.test.com");
+    assert_eq!(entry.segments, ["mapped", "path?a=1"]);
+    assert_eq!(
+        entry.request_path(),
+        ["origin:http://b.test.com", "segment:mapped", "request:7"]
     );
 }
 

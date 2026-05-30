@@ -296,7 +296,8 @@ impl RequestTreeEntry {
 
 impl From<&CapturedData> for RequestTreeEntry {
     fn from(req: &CapturedData) -> Self {
-        let (origin, segments) = Url::parse(&req.uri)
+        let display_uri = request_display_uri(req);
+        let (origin, segments) = Url::parse(display_uri)
             .ok()
             .filter(Url::has_host)
             .map(|url| {
@@ -348,16 +349,18 @@ fn absolute_url_origin(url: &Url) -> String {
     }
 }
 
+fn request_display_uri(req: &CapturedData) -> &str {
+    req.mapped_uri.as_deref().unwrap_or(&req.uri)
+}
+
 fn fallback_origin_and_segments(req: &CapturedData) -> (String, Vec<String>) {
     let origin = request_header(req, "host")
         .map(|host| format!("https://{host}"))
         .unwrap_or_else(|| "(unknown host)".to_string());
-    let (path, query) = req
-        .uri
+    let display_uri = request_display_uri(req);
+    let (path, query) = display_uri
         .split_once('?')
-        .map_or((req.uri.as_str(), None), |(path, query)| {
-            (path, Some(query))
-        });
+        .map_or((display_uri, None), |(path, query)| (path, Some(query)));
 
     (origin, path_segments_with_query(path, query))
 }

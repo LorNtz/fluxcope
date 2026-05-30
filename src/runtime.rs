@@ -2,6 +2,7 @@ use crate::{
     app::{App, AppEvent},
     ca,
     logging::AppLogger,
+    mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
     settings::SettingsManager,
     ui::RootView,
@@ -46,11 +47,17 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     init_logger(tx.clone());
     log::info!("Loaded settings from {}", settings.path().display());
+    let mapping_engine = MappingEngine::compile(settings.proxy_settings());
+    for diagnostic in mapping_engine.diagnostics() {
+        log::warn!("{}", diagnostic.message);
+    }
+    let mapping_store = MappingStore::new(mapping_engine);
     start_proxy(
         tx,
         proxy_port,
         certificate_store_dir,
         certificate_pem_filename,
+        mapping_store,
     );
 
     let tui = Tui::enter()?;
@@ -70,6 +77,7 @@ fn start_proxy(
     proxy_port: u16,
     certificate_store_dir: PathBuf,
     certificate_pem_filename: String,
+    mapping_store: MappingStore,
 ) {
     let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename);
     log::info!(
@@ -95,7 +103,7 @@ fn start_proxy(
         .with_addr(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
         .with_rustls_client()
         .with_ca(authority)
-        .with_http_handler(LogHandler::new(tx))
+        .with_http_handler(LogHandler::new(tx, mapping_store))
         .build();
 
     log::info!("Proxy server listening on http://127.0.0.1:{proxy_port}");
