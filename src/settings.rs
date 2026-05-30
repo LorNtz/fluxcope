@@ -13,6 +13,7 @@ const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "wirelens-ca.pem";
 pub struct AppSettings {
     pub server: ServerSettings,
     pub certificate: CertificateSettings,
+    pub recording: RecordingSettings,
     pub ui: UiSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxySettings>,
@@ -23,6 +24,7 @@ impl Default for AppSettings {
         Self {
             server: ServerSettings::default(),
             certificate: CertificateSettings::default(),
+            recording: RecordingSettings::default(),
             ui: UiSettings::default(),
             proxy: None,
         }
@@ -55,6 +57,20 @@ impl Default for CertificateSettings {
         Self {
             store_dir: DEFAULT_CERTIFICATE_STORE_DIR.to_string(),
             pem_filename: DEFAULT_CERTIFICATE_PEM_FILENAME.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RecordingSettings {
+    pub start_record_on_launch: bool,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self {
+            start_record_on_launch: true,
         }
     }
 }
@@ -253,6 +269,10 @@ impl SettingsManager {
         &self.settings.certificate.pem_filename
     }
 
+    pub fn recording_settings(&self) -> &RecordingSettings {
+        &self.settings.recording
+    }
+
     pub fn ui_settings(&self) -> &UiSettings {
         &self.settings.ui
     }
@@ -356,6 +376,8 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             saved.certificate.pem_filename
         );
+        assert!(manager.recording_settings().start_record_on_launch);
+        assert!(saved.recording.start_record_on_launch);
         assert!(!saved.ui.request_list.auto_expand);
         assert!(saved.proxy.is_none());
         assert!(!fs::read_to_string(&path)?.contains("proxy:"));
@@ -386,6 +408,7 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             manager.certificate_pem_filename()
         );
+        assert!(manager.recording_settings().start_record_on_launch);
         assert!(!manager.ui_settings().request_list.auto_expand);
 
         let saved: AppSettings =
@@ -396,6 +419,7 @@ mod tests {
             DEFAULT_CERTIFICATE_PEM_FILENAME,
             saved.certificate.pem_filename
         );
+        assert!(saved.recording.start_record_on_launch);
         assert!(!saved.ui.request_list.auto_expand);
         assert!(saved.proxy.is_none());
         assert!(!fs::read_to_string(&path)?.contains("proxy:"));
@@ -419,6 +443,26 @@ mod tests {
         let saved: AppSettings =
             serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
         assert!(saved.ui.request_list.auto_expand);
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_start_record_on_launch_setting() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, "recording:\n  start_record_on_launch: false\n")?;
+
+        let manager = SettingsManager::load_from_path(&path)?;
+
+        assert!(!manager.recording_settings().start_record_on_launch);
+
+        let saved: AppSettings =
+            serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        assert!(!saved.recording.start_record_on_launch);
 
         let _ = fs::remove_file(path);
         Ok(())

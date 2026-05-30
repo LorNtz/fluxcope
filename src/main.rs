@@ -3,6 +3,7 @@ mod ca;
 mod logging;
 mod mapping;
 mod proxy_handler;
+mod recording;
 mod runtime;
 mod settings;
 mod ui;

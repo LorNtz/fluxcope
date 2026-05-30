@@ -69,6 +69,10 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('r') => {
+                self.toggle_recording();
+                true
+            }
             KeyCode::Char('@') => {
                 self.toggle_log_panel();
                 true

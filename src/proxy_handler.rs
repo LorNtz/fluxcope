@@ -1,5 +1,5 @@
 // src/proxy_handler.rs
-use crate::{app::AppEvent, mapping::MappingStore};
+use crate::{app::AppEvent, mapping::MappingStore, recording::RecordingState};
 use hudsucker::{
     HttpContext, HttpHandler, RequestOrResponse,
     async_trait::async_trait,
@@ -36,15 +36,21 @@ pub struct LogHandler {
     tx: mpsc::UnboundedSender<AppEvent>,
     next_sequence: Arc<AtomicU64>,
     mapping_store: MappingStore,
+    recording: RecordingState,
     current_request: Option<CapturedData>,
 }
 
 impl LogHandler {
-    pub fn new(tx: mpsc::UnboundedSender<AppEvent>, mapping_store: MappingStore) -> Self {
+    pub fn new(
+        tx: mpsc::UnboundedSender<AppEvent>,
+        mapping_store: MappingStore,
+        recording: RecordingState,
+    ) -> Self {
         Self {
             tx,
             next_sequence: Arc::new(AtomicU64::new(0)),
             mapping_store,
+            recording,
             current_request: None,
         }
     }
@@ -54,6 +60,10 @@ impl LogHandler {
         // and not actual application requests we want to display
         if req.method() == Method::CONNECT {
             return RequestOrResponse::Request(req);
+        }
+
+        if !self.recording.is_enabled() {
+            return self.forward_uncaptured_request(req).await;
         }
 
         let id = uuid::Uuid::new_v4();
@@ -113,7 +123,29 @@ impl LogHandler {
         RequestOrResponse::Request(reconstructed_req)
     }
 
+    async fn forward_uncaptured_request(&self, req: Request<Body>) -> RequestOrResponse {
+        let (mut parts, body) = req.into_parts();
+        let original_uri = parts.uri.to_string();
+        let mapping = self.mapping_store.current();
+        let decision = mapping.map_request(&parts.uri);
+
+        if let Some(mapped_uri) = decision.mapped_uri {
+            log::info!("map remote: {} -> {}", original_uri, mapped_uri);
+            parts.uri = mapped_uri;
+        }
+
+        if let Some(local_path) = decision.local_path {
+            log::info!("map local: {} -> {}", original_uri, local_path.display());
+            return RequestOrResponse::Response(local_file_response(&local_path).await);
+        }
+
+        RequestOrResponse::Request(Request::from_parts(parts, body))
+    }
+
     async fn capture_response(&mut self, res: Response<Body>) -> Response<Body> {
+        let Some(mut data) = self.current_request.take() else {
+            return res;
+        };
         let (parts, body) = res.into_parts();
 
         let (res_body, res_body_bytes) = match hyper::body::to_bytes(body).await {
@@ -133,12 +165,10 @@ impl LogHandler {
 
         let reconstructed_res = Response::from_parts(parts, Body::from(res_body_bytes));
 
-        if let Some(mut data) = self.current_request.take() {
-            data.status = Some(status);
-            data.res_headers = res_headers;
-            data.res_body = res_body;
-            let _ = self.tx.send(AppEvent::NetworkRequest(data));
-        }
+        data.status = Some(status);
+        data.res_headers = res_headers;
+        data.res_body = res_body;
+        let _ = self.tx.send(AppEvent::NetworkRequest(data));
 
         reconstructed_res
     }
@@ -150,6 +180,7 @@ impl Clone for LogHandler {
             tx: self.tx.clone(),
             next_sequence: Arc::clone(&self.next_sequence),
             mapping_store: self.mapping_store.clone(),
+            recording: self.recording.clone(),
             current_request: None,
         }
     }
@@ -285,6 +316,7 @@ mod tests {
     use super::*;
     use crate::{
         mapping::MappingEngine,
+        recording::RecordingState,
         settings::{
             ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule, ProxyMapRemoteSettings,
             ProxyPresetSettings, ProxySettings,
@@ -329,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn cloned_handlers_capture_concurrent_requests_independently() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let base_handler = LogHandler::new(tx, MappingStore::default());
+        let base_handler = LogHandler::new(tx, MappingStore::default(), RecordingState::default());
         let mut slow_handler = base_handler.clone();
         let mut fast_handler = base_handler.clone();
 
@@ -366,6 +398,7 @@ mod tests {
                 vec![remote_rule("https://a.com", "http://b.test.com")],
                 vec![],
             ),
+            RecordingState::default(),
         );
         let request = Request::builder()
             .method(Method::GET)
@@ -396,6 +429,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_off_forwards_mapped_request_without_capture() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = LogHandler::new(
+            tx,
+            mapping_store(
+                vec![remote_rule("https://a.com", "http://b.test.com")],
+                vec![],
+            ),
+            RecordingState::new(false),
+        );
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("https://a.com/some/api?x=1")
+            .header("x-keep", "1")
+            .body(Body::from("payload"))
+            .expect("test request should be valid");
+
+        let forwarded = match handler.capture_request(request).await {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(_) => panic!("remote mapping should forward request"),
+        };
+
+        assert_eq!(
+            forwarded.uri().to_string(),
+            "http://b.test.com/some/api?x=1"
+        );
+        assert_eq!(forwarded.headers()["x-keep"], "1");
+        let body = hyper::body::to_bytes(forwarded.into_body())
+            .await
+            .expect("forwarded body should read");
+        assert_eq!(body.as_ref(), b"payload");
+
+        handler.capture_response(test_response(200, "ok")).await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn recording_off_returns_local_mapping_response_without_capture() {
+        let path = temp_file_path("api-recording-off.json");
+        fs::write(&path, r#"{"mock":true}"#).expect("test file should be written");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = LogHandler::new(
+            tx,
+            mapping_store(
+                vec![],
+                vec![local_rule(
+                    "https://a.com/some/api1",
+                    &path.to_string_lossy(),
+                )],
+            ),
+            RecordingState::new(false),
+        );
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("https://a.com/some/api1?x=1")
+            .body(Body::empty())
+            .expect("test request should be valid");
+
+        let response = match handler.capture_request(request).await {
+            RequestOrResponse::Request(_) => panic!("local mapping should return response"),
+            RequestOrResponse::Response(response) => response,
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("test response body should read");
+        assert_eq!(body.as_ref(), br#"{"mock":true}"#);
+        assert!(rx.try_recv().is_err());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn local_mapping_returns_file_response_and_records_capture() {
         let path = temp_file_path("api1.json");
         fs::write(&path, r#"{"ok":true}"#).expect("test file should be written");
@@ -409,6 +517,7 @@ mod tests {
                     &path.to_string_lossy(),
                 )],
             ),
+            RecordingState::default(),
         );
         let request = Request::builder()
             .method(Method::GET)
@@ -450,6 +559,7 @@ mod tests {
                 vec![],
                 vec![local_rule("https://a.com/missing", &path.to_string_lossy())],
             ),
+            RecordingState::default(),
         );
         let request = Request::builder()
             .method(Method::GET)

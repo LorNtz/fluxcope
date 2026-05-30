@@ -4,6 +4,7 @@ use crate::{
     logging::AppLogger,
     mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
+    recording::RecordingState,
     settings::SettingsManager,
     ui::RootView,
 };
@@ -52,16 +53,18 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         log::warn!("{}", diagnostic.message);
     }
     let mapping_store = MappingStore::new(mapping_engine);
+    let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
     start_proxy(
         tx,
         proxy_port,
         certificate_store_dir,
         certificate_pem_filename,
         mapping_store,
+        recording.clone(),
     );
 
     let tui = Tui::enter()?;
-    let app = App::new(settings.ui_settings().clone());
+    let app = App::with_recording(settings.ui_settings().clone(), recording);
     AppRuntime::new(app, rx, tui, settings).run()
 }
 
@@ -78,6 +81,7 @@ fn start_proxy(
     certificate_store_dir: PathBuf,
     certificate_pem_filename: String,
     mapping_store: MappingStore,
+    recording: RecordingState,
 ) {
     let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename);
     log::info!(
@@ -103,7 +107,7 @@ fn start_proxy(
         .with_addr(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
         .with_rustls_client()
         .with_ca(authority)
-        .with_http_handler(LogHandler::new(tx, mapping_store))
+        .with_http_handler(LogHandler::new(tx, mapping_store, recording))
         .build();
 
     log::info!("Proxy server listening on http://127.0.0.1:{proxy_port}");

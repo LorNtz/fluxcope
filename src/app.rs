@@ -8,7 +8,7 @@ mod requests;
 #[cfg(test)]
 mod tests;
 
-use crate::{proxy_handler::CapturedData, settings::UiSettings};
+use crate::{proxy_handler::CapturedData, recording::RecordingState, settings::UiSettings};
 use focus::FocusState;
 
 pub use event::AppEvent;
@@ -18,7 +18,7 @@ pub use request_tree::RequestTreeEntry;
 
 pub struct App {
     pub requests: Vec<CapturedData>,
-    pub recording: bool,
+    pub recording: RecordingState,
     focus: FocusState,
     pub request_list: RequestListPanel,
     pub detail_panel: DetailPanel,
@@ -28,14 +28,31 @@ pub struct App {
 
 impl App {
     pub fn new(ui_settings: UiSettings) -> Self {
+        Self::with_recording(ui_settings, RecordingState::default())
+    }
+
+    pub fn with_recording(ui_settings: UiSettings, recording: RecordingState) -> Self {
         Self {
             requests: vec![],
-            recording: true,
+            recording,
             focus: FocusState::new(),
             request_list: RequestListPanel::new(ui_settings.request_list),
             detail_panel: DetailPanel::new(),
             log_panel: LogPanel::new(),
             certificate_popup: CertificatePopup::new(),
+        }
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_enabled()
+    }
+
+    pub fn toggle_recording(&mut self) {
+        let enabled = self.recording.toggle();
+        if enabled {
+            log::info!("recording enabled");
+        } else {
+            log::info!("recording disabled");
         }
     }
 

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     proxy_handler::CapturedData,
+    recording::RecordingState,
     settings::{RequestListSettings, UiSettings},
     ui::RootView,
 };
@@ -71,6 +72,26 @@ fn focus_starts_on_request_list() {
 
     assert!(app.is_panel_focused(PanelFocus::RequestList));
     assert!(!app.is_popup_focused(PopupFocus::Certificate));
+}
+
+#[test]
+fn recording_state_can_start_disabled() {
+    let app = App::with_recording(ui_settings(true), RecordingState::new(false));
+
+    assert!(!app.is_recording());
+}
+
+#[test]
+fn r_toggles_recording_as_global_key() {
+    let mut app = App::new(ui_settings(true));
+
+    app.focus_panel(PanelFocus::Detail);
+    app.handle_key_event(key(KeyCode::Char('r')));
+    assert!(!app.is_recording());
+    assert!(app.is_panel_focused(PanelFocus::Detail));
+
+    app.handle_key_event(key(KeyCode::Char('r')));
+    assert!(app.is_recording());
 }
 
 #[test]

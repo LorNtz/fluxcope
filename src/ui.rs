@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Style},
     symbols,
-    text::Line,
+    text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Tabs, Wrap,
@@ -36,6 +36,7 @@ trait MouseHandler: View {
 
 pub struct RootView {
     area: Rect,
+    status: StatusView,
     request_list: RequestListView,
     right_panel: RightPanelView,
 }
@@ -44,6 +45,7 @@ impl RootView {
     pub fn new() -> Self {
         Self {
             area: Rect::default(),
+            status: StatusView::new(),
             request_list: RequestListView::new(),
             right_panel: RightPanelView::new(),
         }
@@ -69,6 +71,7 @@ impl View for RootView {
     }
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
+        self.status.render(frame, app);
         self.request_list.render(frame, app);
         self.right_panel.render(frame, app);
 
@@ -80,11 +83,17 @@ impl View for RootView {
     fn layout(&mut self, area: Rect, app: &App) {
         self.set_area(area);
 
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(area);
+            .split(root_chunks[1]);
 
+        self.status.layout(root_chunks[0], app);
         self.request_list.layout(chunks[0], app);
         self.right_panel.layout(chunks[1], app);
     }
@@ -97,6 +106,47 @@ impl MouseHandler for RootView {
         }
 
         self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
+    }
+}
+
+struct StatusView {
+    area: Rect,
+}
+
+impl StatusView {
+    fn new() -> Self {
+        Self {
+            area: Rect::default(),
+        }
+    }
+}
+
+impl View for StatusView {
+    fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    fn render(&self, frame: &mut Frame, app: &mut App) {
+        let (icon, label, style) = if app.is_recording() {
+            ("●", "Recording ON", Style::default().fg(Color::Red))
+        } else {
+            ("○", "Recording OFF", Style::default().fg(Color::DarkGray))
+        };
+        let status = Line::from(vec![
+            Span::styled(icon, style),
+            Span::raw(format!(" {label}")),
+        ]);
+
+        frame.render_widget(
+            Paragraph::new(status)
+                .block(panel_block("Status", false))
+                .alignment(Alignment::Left),
+            self.area(),
+        );
     }
 }
 
@@ -409,6 +459,16 @@ mod tests {
         assert!(app.is_panel_focused(PanelFocus::Log));
 
         ui.handle_mouse(mouse_down_inside(ui.request_list.area()), &mut app);
+        assert!(app.is_panel_focused(PanelFocus::RequestList));
+    }
+
+    #[test]
+    fn status_panel_does_not_take_focus() {
+        let mut app = App::new(ui_settings(true));
+        let ui = laid_out_ui(&app);
+
+        ui.handle_mouse(mouse_down_inside(ui.status.area()), &mut app);
+
         assert!(app.is_panel_focused(PanelFocus::RequestList));
     }
 }

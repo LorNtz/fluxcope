@@ -11,10 +11,6 @@ use crate::proxy_handler::CapturedData;
 
 impl App {
     pub fn add_request(&mut self, req: CapturedData) {
-        if !self.recording {
-            return;
-        }
-
         let was_empty = self.requests.is_empty();
         let tree_entry = RequestTreeEntry::from(&req);
         let insert_pos = self
