@@ -369,6 +369,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn map_local_response_body_preserves_raw_text() {
+        let raw_body = "{\n  \"z\": 1,\n  \"a\": 2\n}\n";
+        let mut req = captured(0, "https://a.com/api");
+        req.local_path = Some("/tmp/api.json".to_string());
+        req.res_body = Some(raw_body.to_string());
+
+        assert_eq!(format_response_body(&req), raw_body);
+    }
+
+    #[test]
+    fn non_local_response_body_keeps_json_formatting() {
+        let raw_body = r#"{"z":1,"a":2}"#;
+        let mut req = captured(0, "https://a.com/api");
+        req.res_body = Some(raw_body.to_string());
+
+        assert_ne!(format_response_body(&req), raw_body);
+    }
+
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -1015,7 +1034,7 @@ fn build_detail_text(app: &App) -> String {
                 .map_or("N/A".to_string(), |status| status.to_string()),
             join_headers(&req.res_headers)
         ),
-        MainDisplayTab::ResponseBody => format_response_body(req.res_body.as_deref()),
+        MainDisplayTab::ResponseBody => format_response_body(req),
     }
 }
 
@@ -1053,8 +1072,10 @@ fn format_request_body(body: Option<&str>, headers: &[(String, String)]) -> Stri
     }
 }
 
-fn format_response_body(body: Option<&str>) -> String {
-    match body {
+fn format_response_body(req: &crate::proxy_handler::CapturedData) -> String {
+    match req.res_body.as_deref() {
+        Some(body) if req.local_path.is_some() => body.to_string(),
+        None if req.local_path.is_some() => String::new(), // empty local file
         Some("") => "(Empty body)".to_string(),
         Some(body) => format_json_body(body),
         None => "(No body)".to_string(),
