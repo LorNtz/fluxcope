@@ -388,6 +388,7 @@ fn preserve_semantic_noop_entries(
             *value = candidate;
         }
     }
+    reorder_mappings_like_previous(value, previous);
 
     Ok(())
 }
@@ -477,6 +478,33 @@ fn insert_config_entry(
             sequence.insert(*index, entry);
             true
         }
+    }
+}
+
+fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serde_yaml::Value) {
+    match (value, previous) {
+        (serde_yaml::Value::Mapping(current), serde_yaml::Value::Mapping(previous)) => {
+            let mut ordered = serde_yaml::Mapping::new();
+
+            for (key, previous_child) in previous {
+                let Some(mut current_child) = current.remove(key) else {
+                    continue;
+                };
+                reorder_mappings_like_previous(&mut current_child, previous_child);
+                ordered.insert(key.clone(), current_child);
+            }
+
+            for (key, child) in std::mem::take(current) {
+                ordered.insert(key, child);
+            }
+            *current = ordered;
+        }
+        (serde_yaml::Value::Sequence(current), serde_yaml::Value::Sequence(previous)) => {
+            for (current_child, previous_child) in current.iter_mut().zip(previous) {
+                reorder_mappings_like_previous(current_child, previous_child);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -698,10 +726,77 @@ proxy:
             sequence_entry(map_remote, "rules").expect("remote rules should be serialized");
         assert_eq!(bool_entry(&remote_rules[0], "enable"), Some(true));
         let map_local = mapping_entry(preset, "map_local").expect("map_local should be serialized");
+        assert_eq!(mapping_keys(map_local), vec!["enable", "rules"]);
         assert_eq!(bool_entry(map_local, "enable"), Some(true));
         let local_rules =
             sequence_entry(map_local, "rules").expect("local rules should be serialized");
         assert_eq!(bool_entry(&local_rules[0], "enable"), Some(true));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_existing_mapping_order_at_all_config_levels() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+proxy:
+  presets:
+    - map_local:
+        enable: true
+        rules:
+          - to: "~/api.json"
+            enable: true
+            from: "http://b.test.com"
+      map_remote:
+        rules:
+          - enable: true
+            to: "http://b.test.com"
+            from: "https://a.com"
+        enable: true
+      name: dev
+  active_preset: dev
+  enable: true
+server:
+  port: 9000
+"#,
+        )?;
+
+        SettingsManager::load_from_path(&path)?;
+
+        let saved = yaml_from_path(&path)?;
+        let root_keys = mapping_keys(&saved);
+        assert!(root_keys.starts_with(&["proxy", "server"]));
+        assert!(root_keys.contains(&"certificate"));
+        assert!(root_keys.contains(&"recording"));
+        assert!(root_keys.contains(&"ui"));
+        let proxy = mapping_entry(&saved, "proxy").expect("proxy should be serialized");
+        assert_eq!(
+            mapping_keys(proxy),
+            vec!["presets", "active_preset", "enable"]
+        );
+        let presets = sequence_entry(proxy, "presets").expect("presets should be serialized");
+        let preset = presets.first().expect("preset should be serialized");
+        assert_eq!(
+            mapping_keys(preset),
+            vec!["map_local", "map_remote", "name"]
+        );
+
+        let map_local = mapping_entry(preset, "map_local").expect("map_local should be serialized");
+        assert_eq!(mapping_keys(map_local), vec!["enable", "rules"]);
+        let local_rules = sequence_entry(map_local, "rules").expect("local rule should exist");
+        assert_eq!(mapping_keys(&local_rules[0]), vec!["to", "enable", "from"]);
+
+        let map_remote =
+            mapping_entry(preset, "map_remote").expect("map_remote should be serialized");
+        assert_eq!(mapping_keys(map_remote), vec!["rules", "enable"]);
+        let remote_rules = sequence_entry(map_remote, "rules").expect("remote rule should exist");
+        assert_eq!(mapping_keys(&remote_rules[0]), vec!["enable", "to", "from"]);
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -828,5 +923,18 @@ proxy:
             return None;
         };
         Some(field)
+    }
+
+    fn mapping_keys(value: &serde_yaml::Value) -> Vec<&str> {
+        let serde_yaml::Value::Mapping(mapping) = value else {
+            return Vec::new();
+        };
+        mapping
+            .keys()
+            .filter_map(|key| match key {
+                serde_yaml::Value::String(key) => Some(key.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 }
