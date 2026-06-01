@@ -8,7 +8,7 @@ const DEFAULT_PROXY_PORT: u16 = 8989;
 const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.wirelens/certificate/";
 const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "wirelens-ca.pem";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub server: ServerSettings,
@@ -31,7 +31,7 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ServerSettings {
     pub port: u16,
@@ -45,7 +45,7 @@ impl Default for ServerSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct CertificateSettings {
     pub store_dir: String,
@@ -61,7 +61,7 @@ impl Default for CertificateSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct RecordingSettings {
     pub start_record_on_launch: bool,
@@ -75,7 +75,7 @@ impl Default for RecordingSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct UiSettings {
     pub request_list: RequestListSettings,
@@ -89,7 +89,7 @@ impl Default for UiSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct RequestListSettings {
     pub auto_expand: bool,
@@ -309,7 +309,12 @@ impl SettingsManager {
             fs::create_dir_all(parent)?;
         }
 
-        let content = serde_yaml::to_string(settings).map_err(yaml_error)?;
+        let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
+        if let Some(previous) = read_yaml_value(&self.path)? {
+            preserve_semantic_noop_entries(&mut value, &previous, settings)?;
+        }
+
+        let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
         fs::write(&self.path, content)
     }
 }
@@ -353,10 +358,143 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+fn read_yaml_value(path: &Path) -> io::Result<Option<serde_yaml::Value>> {
+    match fs::read_to_string(path) {
+        Ok(content) if content.trim().is_empty() => Ok(None),
+        Ok(content) => serde_yaml::from_str(&content).map(Some).map_err(yaml_error),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn preserve_semantic_noop_entries(
+    value: &mut serde_yaml::Value,
+    previous: &serde_yaml::Value,
+    settings: &AppSettings,
+) -> io::Result<()> {
+    // Preserve explicit default entries without teaching each setting type how to track presence.
+    let mut missing = Vec::new();
+    collect_missing_entries(Some(value), previous, &mut Vec::new(), &mut missing);
+
+    for entry in missing {
+        let mut candidate = value.clone();
+        if !insert_config_entry(&mut candidate, &entry.path, entry.value) {
+            continue;
+        }
+
+        let candidate_settings: AppSettings =
+            serde_yaml::from_value(candidate.clone()).map_err(yaml_error)?;
+        if candidate_settings == *settings {
+            *value = candidate;
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_missing_entries(
+    current: Option<&serde_yaml::Value>,
+    previous: &serde_yaml::Value,
+    path: &mut Vec<ConfigPathSegment>,
+    missing: &mut Vec<MissingConfigEntry>,
+) {
+    let Some(current) = current else {
+        missing.push(MissingConfigEntry {
+            path: path.clone(),
+            value: previous.clone(),
+        });
+        return;
+    };
+
+    match (current, previous) {
+        (serde_yaml::Value::Mapping(current), serde_yaml::Value::Mapping(previous)) => {
+            for (key, previous_child) in previous {
+                path.push(ConfigPathSegment::Key(key.clone()));
+                collect_missing_entries(current.get(key), previous_child, path, missing);
+                path.pop();
+            }
+        }
+        (serde_yaml::Value::Sequence(current), serde_yaml::Value::Sequence(previous)) => {
+            for (index, previous_child) in previous.iter().enumerate().take(current.len()) {
+                path.push(ConfigPathSegment::Index(index));
+                collect_missing_entries(Some(&current[index]), previous_child, path, missing);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn insert_config_entry(
+    value: &mut serde_yaml::Value,
+    path: &[ConfigPathSegment],
+    entry: serde_yaml::Value,
+) -> bool {
+    if path.is_empty() {
+        *value = entry;
+        return true;
+    }
+
+    let mut current = value;
+    for segment in &path[..path.len() - 1] {
+        match segment {
+            ConfigPathSegment::Key(key) => {
+                let serde_yaml::Value::Mapping(mapping) = current else {
+                    return false;
+                };
+                let Some(next) = mapping.get_mut(key) else {
+                    return false;
+                };
+                current = next;
+            }
+            ConfigPathSegment::Index(index) => {
+                let serde_yaml::Value::Sequence(sequence) = current else {
+                    return false;
+                };
+                let Some(next) = sequence.get_mut(*index) else {
+                    return false;
+                };
+                current = next;
+            }
+        }
+    }
+
+    match path.last().expect("path is not empty") {
+        ConfigPathSegment::Key(key) => {
+            let serde_yaml::Value::Mapping(mapping) = current else {
+                return false;
+            };
+            mapping.insert(key.clone(), entry);
+            true
+        }
+        ConfigPathSegment::Index(index) => {
+            let serde_yaml::Value::Sequence(sequence) = current else {
+                return false;
+            };
+            if *index > sequence.len() {
+                return false;
+            }
+            sequence.insert(*index, entry);
+            true
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MissingConfigEntry {
+    path: Vec<ConfigPathSegment>,
+    value: serde_yaml::Value,
+}
+
+#[derive(Clone)]
+enum ConfigPathSegment {
+    Key(serde_yaml::Value),
+    Index(usize),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn creates_default_config_when_missing() -> io::Result<()> {
@@ -501,9 +639,141 @@ proxy:
         assert!(proxy.presets[0].map_remote.rules[0].enable);
         assert!(proxy.presets[0].map_local.rules.is_empty());
 
-        let saved = fs::read_to_string(&path)?;
-        assert!(saved.contains("proxy:"));
-        assert!(!saved.contains("map_local:"));
+        let saved = yaml_from_path(&path)?;
+        let proxy = mapping_entry(&saved, "proxy").expect("proxy should be serialized");
+        assert!(mapping_entry(proxy, "enable").is_none());
+        let presets = sequence_entry(proxy, "presets").expect("presets should be serialized");
+        let preset = presets.first().expect("preset should be serialized");
+        let map_remote =
+            mapping_entry(preset, "map_remote").expect("map_remote should be serialized");
+        assert!(mapping_entry(map_remote, "enable").is_none());
+        let rules = sequence_entry(map_remote, "rules").expect("rules should be serialized");
+        assert!(mapping_entry(&rules[0], "enable").is_none());
+        assert!(mapping_entry(preset, "map_local").is_none());
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_explicit_default_true_proxy_enable_fields() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+proxy:
+  enable: true
+  active_preset: dev
+  presets:
+    - name: dev
+      map_remote:
+        enable: true
+        rules:
+          - from: "https://a.com"
+            to: "http://b.test.com"
+            enable: true
+      map_local:
+        enable: true
+        rules:
+          - from: "http://b.test.com"
+            to: "~/api.json"
+            enable: true
+"#,
+        )?;
+
+        SettingsManager::load_from_path(&path)?;
+
+        let saved = yaml_from_path(&path)?;
+        let proxy = mapping_entry(&saved, "proxy").expect("proxy should be serialized");
+        assert_eq!(bool_entry(proxy, "enable"), Some(true));
+        let presets = sequence_entry(proxy, "presets").expect("presets should be serialized");
+        let preset = presets.first().expect("preset should be serialized");
+        let map_remote =
+            mapping_entry(preset, "map_remote").expect("map_remote should be serialized");
+        assert_eq!(bool_entry(map_remote, "enable"), Some(true));
+        let remote_rules =
+            sequence_entry(map_remote, "rules").expect("remote rules should be serialized");
+        assert_eq!(bool_entry(&remote_rules[0], "enable"), Some(true));
+        let map_local = mapping_entry(preset, "map_local").expect("map_local should be serialized");
+        assert_eq!(bool_entry(map_local, "enable"), Some(true));
+        let local_rules =
+            sequence_entry(map_local, "rules").expect("local rules should be serialized");
+        assert_eq!(bool_entry(&local_rules[0], "enable"), Some(true));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_present_default_proxy_fields_across_value_types() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+proxy:
+  enable: true
+  active_preset: null
+  presets:
+    - name: ""
+      map_remote:
+        enable: true
+        rules: []
+      map_local: {}
+"#,
+        )?;
+
+        SettingsManager::load_from_path(&path)?;
+
+        let saved = yaml_from_path(&path)?;
+        let proxy = mapping_entry(&saved, "proxy").expect("proxy should be serialized");
+        assert_eq!(bool_entry(proxy, "enable"), Some(true));
+        assert!(matches!(
+            mapping_entry(proxy, "active_preset"),
+            Some(serde_yaml::Value::Null)
+        ));
+        let presets = sequence_entry(proxy, "presets").expect("presets should be serialized");
+        let preset = presets.first().expect("preset should be serialized");
+        assert_eq!(string_entry(preset, "name"), Some(""));
+        let map_remote =
+            mapping_entry(preset, "map_remote").expect("map_remote should be serialized");
+        assert_eq!(bool_entry(map_remote, "enable"), Some(true));
+        assert_eq!(sequence_entry(map_remote, "rules").map(Vec::len), Some(0));
+        let map_local = mapping_entry(preset, "map_local").expect("map_local should be preserved");
+        assert!(matches!(map_local, serde_yaml::Value::Mapping(mapping) if mapping.is_empty()));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_restore_previous_config_that_changes_settings() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+proxy:
+  active_preset: dev
+  presets:
+    - name: dev
+"#,
+        )?;
+
+        let mut manager = SettingsManager::load_from_path(&path)?;
+        manager.update(|settings| {
+            settings.proxy = None;
+        })?;
+
+        let saved = yaml_from_path(&path)?;
+        assert!(mapping_entry(&saved, "proxy").is_none());
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -519,11 +789,44 @@ proxy:
     }
 
     fn temp_config_path() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        env::temp_dir().join(format!(
+            "wirelens-settings-{}/config.yml",
+            uuid::Uuid::new_v4()
+        ))
+    }
 
-        env::temp_dir().join(format!("wirelens-settings-{nanos}/config.yml"))
+    fn yaml_from_path(path: &Path) -> io::Result<serde_yaml::Value> {
+        serde_yaml::from_str(&fs::read_to_string(path)?).map_err(yaml_error)
+    }
+
+    fn mapping_entry<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
+        let serde_yaml::Value::Mapping(mapping) = value else {
+            return None;
+        };
+        mapping.get(&serde_yaml::Value::String(key.to_string()))
+    }
+
+    fn sequence_entry<'a>(
+        value: &'a serde_yaml::Value,
+        key: &str,
+    ) -> Option<&'a Vec<serde_yaml::Value>> {
+        let serde_yaml::Value::Sequence(sequence) = mapping_entry(value, key)? else {
+            return None;
+        };
+        Some(sequence)
+    }
+
+    fn bool_entry(value: &serde_yaml::Value, key: &str) -> Option<bool> {
+        let serde_yaml::Value::Bool(field) = mapping_entry(value, key)? else {
+            return None;
+        };
+        Some(*field)
+    }
+
+    fn string_entry<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a str> {
+        let serde_yaml::Value::String(field) = mapping_entry(value, key)? else {
+            return None;
+        };
+        Some(field)
     }
 }
