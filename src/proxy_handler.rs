@@ -116,8 +116,8 @@ impl LogHandler {
                 data.local_path = Some(local_path.display().to_string());
             }
             log::info!("map local: {} -> {}", original_uri, local_path.display());
-            let response = local_file_response(&local_path).await;
-            return RequestOrResponse::Response(self.capture_response(response).await);
+            let mock_response = local_file_response(&local_path).await;
+            return RequestOrResponse::Response(self.capture_response(mock_response).await);
         }
 
         RequestOrResponse::Request(reconstructed_req)

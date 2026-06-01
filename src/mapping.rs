@@ -145,7 +145,7 @@ impl<T> CompiledRules<T> {
         let rules = self.by_origin.get(&request.origin)?;
         rules
             .path_rules
-            .get(&request.path)
+            .get(&request.path) // rules matching the whole path will have higher priority
             .or(rules.host_rule.as_ref())
     }
 }

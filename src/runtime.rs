@@ -48,6 +48,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     init_logger(tx.clone());
     log::info!("Loaded settings from {}", settings.path().display());
+
     let mapping_engine = MappingEngine::compile(settings.proxy_settings());
     for diagnostic in mapping_engine.diagnostics() {
         log::warn!("{}", diagnostic.message);
@@ -245,13 +246,16 @@ impl AppRuntime {
     }
 
     fn run(mut self) -> Result<(), Box<dyn Error>> {
+        // event loop
         loop {
             self.tui.draw(&mut self.ui, &mut self.app)?;
 
+            // respond to user interaction
             if self.handle_terminal_events()? {
                 return Ok(());
             }
 
+            // handle events one by one from the queue
             self.handle_app_events();
         }
     }
