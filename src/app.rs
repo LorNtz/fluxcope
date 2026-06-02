@@ -65,10 +65,10 @@ impl App {
     }
 
     pub fn focus_panel(&mut self, panel: PanelFocus) {
-        let panel = if panel == PanelFocus::Log && !self.log_panel.visible {
-            PanelFocus::Detail
-        } else {
-            panel
+        let panel = match (panel, self.log_panel.visible) {
+            (PanelFocus::Log, false) => PanelFocus::Detail,
+            (PanelFocus::RequestList | PanelFocus::Detail, true) => PanelFocus::Log,
+            _ => panel,
         };
         self.focus.focus_panel(panel);
     }

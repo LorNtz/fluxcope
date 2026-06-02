@@ -195,11 +195,17 @@ impl App {
 
     fn toggle_log_panel(&mut self) {
         self.log_panel.toggle();
-        self.ensure_focusable_panel();
+        if self.log_panel.visible {
+            self.focus_panel(PanelFocus::Log);
+        } else {
+            self.ensure_focusable_panel();
+        }
     }
 
     fn ensure_focusable_panel(&mut self) {
-        if self.focus.panel() == PanelFocus::Log && !self.log_panel.visible {
+        if self.log_panel.visible {
+            self.focus_panel(PanelFocus::Log);
+        } else if self.focus.panel() == PanelFocus::Log {
             self.focus_panel(PanelFocus::Detail);
         }
     }

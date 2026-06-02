@@ -1,5 +1,4 @@
-const FOCUSABLE_PANELS_WITH_LOG: [PanelFocus; 3] =
-    [PanelFocus::RequestList, PanelFocus::Detail, PanelFocus::Log];
+const FOCUSABLE_PANELS_WITH_LOG: [PanelFocus; 1] = [PanelFocus::Log];
 const FOCUSABLE_PANELS_WITHOUT_LOG: [PanelFocus; 2] = [PanelFocus::RequestList, PanelFocus::Detail];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,12 +69,13 @@ pub(in crate::app) fn focus_neighbor(
     direction: FocusDirection,
     log_visible: bool,
 ) -> Option<PanelFocus> {
+    if log_visible {
+        return None;
+    }
+
     match (current, direction) {
         (PanelFocus::RequestList, FocusDirection::Right) => Some(PanelFocus::Detail),
         (PanelFocus::Detail, FocusDirection::Left) => Some(PanelFocus::RequestList),
-        (PanelFocus::Detail, FocusDirection::Down) if log_visible => Some(PanelFocus::Log),
-        (PanelFocus::Log, FocusDirection::Left) => Some(PanelFocus::RequestList),
-        (PanelFocus::Log, FocusDirection::Up) => Some(PanelFocus::Detail),
         _ => None,
     }
 }

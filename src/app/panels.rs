@@ -157,7 +157,7 @@ impl LogPanel {
         Self {
             logs: vec![],
             scroll: ScrollState::new(),
-            visible: true,
+            visible: false,
         }
     }
 

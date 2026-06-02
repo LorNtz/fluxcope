@@ -82,6 +82,13 @@ fn recording_state_can_start_disabled() {
 }
 
 #[test]
+fn log_panel_starts_hidden() {
+    let app = App::new(ui_settings(true));
+
+    assert!(!app.log_panel.visible);
+}
+
+#[test]
 fn r_toggles_recording_as_global_key() {
     let mut app = App::new(ui_settings(true));
 
@@ -102,15 +109,18 @@ fn tab_cycles_focus_through_visible_panels() {
     assert!(app.is_panel_focused(PanelFocus::Detail));
 
     assert!(!app.handle_key_event(key(KeyCode::Tab)));
+    assert!(app.is_panel_focused(PanelFocus::RequestList));
+
+    app.handle_key_event(key(KeyCode::Char('@')));
+    assert!(app.log_panel.visible);
     assert!(app.is_panel_focused(PanelFocus::Log));
 
     assert!(!app.handle_key_event(key(KeyCode::Tab)));
-    assert!(app.is_panel_focused(PanelFocus::RequestList));
+    assert!(app.is_panel_focused(PanelFocus::Log));
 
-    app.log_panel.visible = false;
-    assert!(!app.handle_key_event(key(KeyCode::Tab)));
+    app.handle_key_event(key(KeyCode::Char('@')));
+    assert!(!app.log_panel.visible);
     assert!(app.is_panel_focused(PanelFocus::Detail));
-
     assert!(!app.handle_key_event(key(KeyCode::Tab)));
     assert!(app.is_panel_focused(PanelFocus::RequestList));
 }
@@ -123,20 +133,23 @@ fn directional_focus_uses_semantic_panel_graph() {
     assert!(app.is_panel_focused(PanelFocus::Detail));
 
     app.handle_key_event(ctrl_key(KeyCode::Char('j')));
-    assert!(app.is_panel_focused(PanelFocus::Log));
-
-    app.handle_key_event(ctrl_key(KeyCode::Char('k')));
     assert!(app.is_panel_focused(PanelFocus::Detail));
 
+    app.handle_key_event(key(KeyCode::Char('@')));
+    assert!(app.is_panel_focused(PanelFocus::Log));
+
     app.handle_key_event(ctrl_key(KeyCode::Char('h')));
-    assert!(app.is_panel_focused(PanelFocus::RequestList));
+    assert!(app.is_panel_focused(PanelFocus::Log));
 }
 
 #[test]
 fn hiding_focused_log_panel_moves_focus_to_detail() {
     let mut app = App::new(ui_settings(true));
 
-    app.focus_panel(PanelFocus::Log);
+    app.handle_key_event(key(KeyCode::Char('@')));
+    assert!(app.log_panel.visible);
+    assert!(app.is_panel_focused(PanelFocus::Log));
+
     app.handle_key_event(key(KeyCode::Char('@')));
 
     assert!(!app.log_panel.visible);
@@ -147,7 +160,7 @@ fn hiding_focused_log_panel_moves_focus_to_detail() {
 fn certificate_popup_takes_modal_focus_until_escape() {
     let mut app = App::new(ui_settings(true));
 
-    app.focus_panel(PanelFocus::Log);
+    app.handle_key_event(key(KeyCode::Char('@')));
     app.handle_key_event(key(KeyCode::Char('c')));
 
     assert!(app.certificate_popup.visible);

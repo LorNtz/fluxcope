@@ -39,6 +39,7 @@ pub struct RootView {
     status: StatusView,
     request_list: RequestListView,
     right_panel: RightPanelView,
+    log: LogView,
 }
 
 impl RootView {
@@ -48,6 +49,7 @@ impl RootView {
             status: StatusView::new(),
             request_list: RequestListView::new(),
             right_panel: RightPanelView::new(),
+            log: LogView::new(),
         }
     }
 
@@ -72,8 +74,12 @@ impl View for RootView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         self.status.render(frame, app);
-        self.request_list.render(frame, app);
-        self.right_panel.render(frame, app);
+        if app.log_panel.visible {
+            self.log.render(frame, app);
+        } else {
+            self.request_list.render(frame, app);
+            self.right_panel.render(frame, app);
+        }
 
         if app.certificate_popup.visible {
             render_certificate_popup(frame, app);
@@ -88,14 +94,21 @@ impl View for RootView {
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area);
 
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(root_chunks[1]);
-
         self.status.layout(root_chunks[0], app);
-        self.request_list.layout(chunks[0], app);
-        self.right_panel.layout(chunks[1], app);
+        if app.log_panel.visible {
+            self.request_list.layout(Rect::default(), app);
+            self.right_panel.layout(Rect::default(), app);
+            self.log.layout(root_chunks[1], app);
+        } else {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                .split(root_chunks[1]);
+
+            self.request_list.layout(chunks[0], app);
+            self.right_panel.layout(chunks[1], app);
+            self.log.layout(Rect::default(), app);
+        }
     }
 }
 
@@ -105,7 +118,11 @@ impl MouseHandler for RootView {
             return true;
         }
 
-        self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
+        if app.log_panel.visible {
+            self.log.handle_mouse(mouse, app)
+        } else {
+            self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
+        }
     }
 }
 
@@ -504,11 +521,14 @@ mod tests {
         );
         assert!(app.is_panel_focused(PanelFocus::RequestList));
 
+        app.log_panel.visible = true;
+        app.focus_panel(PanelFocus::Log);
+        let ui = laid_out_ui(&app);
         ui.handle_mouse(
-            mouse_inside(MouseEventKind::ScrollDown, ui.right_panel.log.area()),
+            mouse_inside(MouseEventKind::ScrollDown, ui.log.area()),
             &mut app,
         );
-        assert!(app.is_panel_focused(PanelFocus::RequestList));
+        assert!(app.is_panel_focused(PanelFocus::Log));
     }
 
     #[test]
@@ -519,11 +539,13 @@ mod tests {
         ui.handle_mouse(mouse_down_inside(ui.right_panel.detail.area()), &mut app);
         assert!(app.is_panel_focused(PanelFocus::Detail));
 
-        ui.handle_mouse(mouse_down_inside(ui.right_panel.log.area()), &mut app);
-        assert!(app.is_panel_focused(PanelFocus::Log));
-
         ui.handle_mouse(mouse_down_inside(ui.request_list.area()), &mut app);
         assert!(app.is_panel_focused(PanelFocus::RequestList));
+
+        app.log_panel.visible = true;
+        let ui = laid_out_ui(&app);
+        ui.handle_mouse(mouse_down_inside(ui.log.area()), &mut app);
+        assert!(app.is_panel_focused(PanelFocus::Log));
     }
 
     #[test]
@@ -534,6 +556,28 @@ mod tests {
         ui.handle_mouse(mouse_down_inside(ui.status.area()), &mut app);
 
         assert!(app.is_panel_focused(PanelFocus::RequestList));
+    }
+
+    #[test]
+    fn hidden_log_panel_leaves_detail_on_right_panel() {
+        let app = App::new(ui_settings(true));
+        let ui = laid_out_ui(&app);
+
+        assert_eq!(ui.right_panel.detail.area(), ui.right_panel.area());
+        assert_eq!(ui.log.area(), Rect::default());
+    }
+
+    #[test]
+    fn visible_log_panel_uses_workspace_below_status() {
+        let mut app = App::new(ui_settings(true));
+        app.log_panel.visible = true;
+        let ui = laid_out_ui(&app);
+
+        assert_eq!(ui.status.area(), Rect::new(0, 0, 100, 3));
+        assert_eq!(ui.log.area(), Rect::new(0, 3, 100, 9));
+        assert_eq!(ui.request_list.area(), Rect::default());
+        assert_eq!(ui.right_panel.area(), Rect::default());
+        assert_eq!(ui.right_panel.detail.area(), Rect::default());
     }
 
     #[test]
@@ -594,7 +638,6 @@ mod tests {
 struct RightPanelView {
     area: Rect,
     detail: DetailView,
-    log: LogView,
 }
 
 impl RightPanelView {
@@ -602,7 +645,6 @@ impl RightPanelView {
         Self {
             area: Rect::default(),
             detail: DetailView::new(),
-            log: LogView::new(),
         }
     }
 }
@@ -618,33 +660,17 @@ impl View for RightPanelView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         self.detail.render(frame, app);
-
-        if app.log_panel.visible {
-            self.log.render(frame, app);
-        }
     }
 
     fn layout(&mut self, area: Rect, app: &App) {
         self.set_area(area);
-
-        let content_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(if app.log_panel.visible {
-                [Constraint::Percentage(50), Constraint::Percentage(50)]
-            } else {
-                [Constraint::Percentage(100), Constraint::Percentage(0)]
-            })
-            .split(area);
-
-        self.detail.layout(content_chunks[0], app);
-        self.log.layout(content_chunks[1], app);
+        self.detail.layout(area, app);
     }
 }
 
 impl MouseHandler for RightPanelView {
     fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        (app.log_panel.visible && self.log.handle_mouse(mouse, app))
-            || self.detail.handle_mouse(mouse, app)
+        self.detail.handle_mouse(mouse, app)
     }
 }
 
