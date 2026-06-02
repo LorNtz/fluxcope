@@ -4,7 +4,7 @@ use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
     widgets::{
@@ -346,6 +346,7 @@ mod tests {
     use crate::settings::{RequestListSettings, UiSettings};
     use crossterm::event::{KeyModifiers, MouseButton};
     use http::Method;
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     fn ui_settings(auto_expand: bool) -> UiSettings {
         UiSettings {
@@ -402,6 +403,50 @@ mod tests {
         View::layout(&mut ui, Rect::new(0, 0, 100, 12), app);
 
         ui
+    }
+
+    fn render_to_buffer(app: &mut App) -> (RootView, Buffer) {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut ui = RootView::new();
+
+        terminal
+            .draw(|frame| RootView::render(&mut ui, frame, app))
+            .expect("UI should render in tests");
+
+        (ui, terminal.backend_mut().buffer().clone())
+    }
+
+    fn render_detail_top_row(app: &mut App) -> (RootView, String) {
+        let (ui, buffer) = render_to_buffer(app);
+        let detail_area = ui.right_panel.detail.area();
+        let detail_top_row = buffer_row(&buffer, detail_area.y, detail_area.x, detail_area.width);
+
+        (ui, detail_top_row)
+    }
+
+    fn buffer_row(buffer: &Buffer, y: u16, x: u16, width: u16) -> String {
+        let mut row = String::new();
+        for column in x..x.saturating_add(width) {
+            row.push_str(buffer[(column, y)].symbol());
+        }
+
+        row
+    }
+
+    fn tab_click_position(area: Rect, target: MainDisplayTab) -> Position {
+        let mut column = area.x.saturating_add(1);
+        for (index, tab) in MainDisplayTab::all().iter().copied().enumerate() {
+            if index > 0 {
+                column = column.saturating_add(1);
+            }
+            if tab == target {
+                return Position::new(column.saturating_add(1), area.y);
+            }
+            column = column.saturating_add(text_width(tab.title()).saturating_add(2));
+        }
+
+        panic!("target tab should exist")
     }
 
     fn mouse_inside(kind: MouseEventKind, area: Rect) -> MouseEvent {
@@ -490,11 +535,64 @@ mod tests {
 
         assert!(app.is_panel_focused(PanelFocus::RequestList));
     }
+
+    #[test]
+    fn detail_tabs_render_on_panel_border_without_tabs_box() {
+        let mut app = App::new(ui_settings(true));
+        let (ui, detail_top_row) = render_detail_top_row(&mut app);
+        let detail_area = ui.right_panel.detail.area();
+
+        assert_eq!(detail_area.y, ui.right_panel.area().y);
+        assert!(
+            detail_top_row.contains("Request Header"),
+            "{detail_top_row:?}"
+        );
+        assert!(
+            detail_top_row.contains("Response Body"),
+            "{detail_top_row:?}"
+        );
+    }
+
+    #[test]
+    fn focused_detail_panel_keeps_unselected_tabs_default_color() {
+        let mut app = App::new(ui_settings(true));
+        app.focus_panel(PanelFocus::Detail);
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let detail_area = ui.right_panel.detail.area();
+        let selected_tab = tab_click_position(detail_area, MainDisplayTab::RequestHeader);
+        let unselected_tab = tab_click_position(detail_area, MainDisplayTab::RequestBody);
+
+        assert_eq!(buffer[selected_tab].fg, Color::Green);
+        assert!(buffer[selected_tab].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[unselected_tab].fg, Color::Reset);
+        assert!(!buffer[unselected_tab].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn mouse_click_selects_detail_tab_on_panel_border() {
+        let mut app = App::new(ui_settings(true));
+        app.detail_panel.scroll.offset = 3;
+        let ui = laid_out_ui(&app);
+        let position =
+            tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                position.x,
+                position.y,
+            ),
+            &mut app,
+        );
+
+        assert_eq!(app.detail_panel.active_tab, MainDisplayTab::ResponseHeader);
+        assert_eq!(app.detail_panel.scroll.offset, 0);
+        assert!(app.is_panel_focused(PanelFocus::Detail));
+    }
 }
 
 struct RightPanelView {
     area: Rect,
-    tabs: TabsView,
     detail: DetailView,
     log: LogView,
 }
@@ -503,7 +601,6 @@ impl RightPanelView {
     fn new() -> Self {
         Self {
             area: Rect::default(),
-            tabs: TabsView::new(),
             detail: DetailView::new(),
             log: LogView::new(),
         }
@@ -520,7 +617,6 @@ impl View for RightPanelView {
     }
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
-        self.tabs.render(frame, app);
         self.detail.render(frame, app);
 
         if app.log_panel.visible {
@@ -531,11 +627,6 @@ impl View for RightPanelView {
     fn layout(&mut self, area: Rect, app: &App) {
         self.set_area(area);
 
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
-            .split(area);
-
         let content_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(if app.log_panel.visible {
@@ -543,9 +634,8 @@ impl View for RightPanelView {
             } else {
                 [Constraint::Percentage(100), Constraint::Percentage(0)]
             })
-            .split(main_chunks[1]);
+            .split(area);
 
-        self.tabs.layout(main_chunks[0], app);
         self.detail.layout(content_chunks[0], app);
         self.log.layout(content_chunks[1], app);
     }
@@ -553,61 +643,8 @@ impl View for RightPanelView {
 
 impl MouseHandler for RightPanelView {
     fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        self.tabs.handle_mouse(mouse, app)
-            || (app.log_panel.visible && self.log.handle_mouse(mouse, app))
+        (app.log_panel.visible && self.log.handle_mouse(mouse, app))
             || self.detail.handle_mouse(mouse, app)
-    }
-}
-
-struct TabsView {
-    area: Rect,
-}
-
-impl TabsView {
-    fn new() -> Self {
-        Self {
-            area: Rect::default(),
-        }
-    }
-}
-
-impl View for TabsView {
-    fn area(&self) -> Rect {
-        self.area
-    }
-
-    fn set_area(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    fn render(&self, frame: &mut Frame, app: &mut App) {
-        let focused = app.is_panel_focused(PanelFocus::Detail);
-        let tabs = Tabs::new(vec![
-            MainDisplayTab::RequestHeader.title(),
-            MainDisplayTab::RequestBody.title(),
-            MainDisplayTab::ResponseHeader.title(),
-            MainDisplayTab::ResponseBody.title(),
-        ])
-        .block(untitled_panel_block(focused))
-        .divider(symbols::line::VERTICAL)
-        .select(app.detail_panel.active_tab.index());
-
-        frame.render_widget(tabs, self.area());
-    }
-}
-
-impl MouseHandler for TabsView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        if !self.contains_mouse(mouse) {
-            return false;
-        }
-
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            app.focus_panel(PanelFocus::Detail);
-            return true;
-        }
-
-        false
     }
 }
 
@@ -636,7 +673,7 @@ impl View for DetailView {
         let detail_text = build_detail_text(app);
         let focused = app.is_panel_focused(PanelFocus::Detail);
         let mut paragraph = Paragraph::new(detail_text)
-            .block(panel_block(app.detail_panel.active_tab.title(), focused))
+            .block(detail_panel_block(focused))
             .wrap(Wrap { trim: false });
 
         let total_lines: u16 = paragraph
@@ -653,6 +690,10 @@ impl View for DetailView {
         ));
 
         frame.render_widget(paragraph, self.area());
+        frame.render_widget(
+            detail_tabs(app.detail_panel.active_tab),
+            detail_tabs_area(self.area()),
+        );
         render_scrollbar(
             frame,
             self.area(),
@@ -679,6 +720,11 @@ impl MouseHandler for DetailView {
             }
             MouseEventKind::Down(_) => {
                 app.focus_panel(PanelFocus::Detail);
+                if let Some(tab) =
+                    detail_tab_at_position(self.area(), Position::new(mouse.column, mouse.row))
+                {
+                    app.detail_panel.select_tab(tab);
+                }
                 true
             }
             _ => false,
@@ -778,18 +824,74 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, max_offset: u16, offset: u16)
 }
 
 fn panel_block(title: &'static str, focused: bool) -> Block<'static> {
+    base_panel_block(focused).title(title)
+}
+
+fn detail_panel_block(focused: bool) -> Block<'static> {
+    base_panel_block(focused)
+}
+
+fn base_panel_block(focused: bool) -> Block<'static> {
     let block = Block::default()
-        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
     apply_focus_border(block, focused)
 }
 
-fn untitled_panel_block(focused: bool) -> Block<'static> {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
-    apply_focus_border(block, focused)
+fn detail_tabs(active_tab: MainDisplayTab) -> Tabs<'static> {
+    let titles = MainDisplayTab::all()
+        .iter()
+        .map(|tab| tab.title())
+        .collect::<Vec<_>>();
+
+    Tabs::new(titles)
+        .style(Style::default().fg(Color::Reset))
+        .divider(symbols::line::VERTICAL)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+        .select(active_tab.index())
+}
+
+fn detail_tabs_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: u16::from(area.height > 0 && area.width > 2),
+    }
+}
+
+fn detail_tab_at_position(area: Rect, position: Position) -> Option<MainDisplayTab> {
+    let tabs_area = detail_tabs_area(area);
+    if tabs_area.is_empty() || position.y != tabs_area.y {
+        return None;
+    }
+
+    if position.x < tabs_area.x || position.x >= tabs_area.right() {
+        return None;
+    }
+
+    let mut cursor = tabs_area.x;
+    for (index, tab) in MainDisplayTab::all().iter().copied().enumerate() {
+        if index > 0 {
+            cursor = cursor.saturating_add(1);
+        }
+        if cursor >= tabs_area.right() {
+            return None;
+        }
+
+        let width = text_width(tab.title()).saturating_add(2);
+        let tab_end = cursor.saturating_add(width).min(tabs_area.right());
+        if position.x >= cursor && position.x < tab_end {
+            return Some(tab);
+        }
+        cursor = cursor.saturating_add(width);
+    }
+
+    None
 }
 
 fn apply_focus_border(block: Block<'static>, focused: bool) -> Block<'static> {

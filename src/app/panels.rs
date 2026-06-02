@@ -13,6 +13,17 @@ pub enum MainDisplayTab {
 }
 
 impl MainDisplayTab {
+    const ALL: [Self; 4] = [
+        Self::RequestHeader,
+        Self::RequestBody,
+        Self::ResponseHeader,
+        Self::ResponseBody,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             MainDisplayTab::RequestHeader => "Request Header",
@@ -23,12 +34,10 @@ impl MainDisplayTab {
     }
 
     pub fn index(self) -> usize {
-        match self {
-            MainDisplayTab::RequestHeader => 0,
-            MainDisplayTab::RequestBody => 1,
-            MainDisplayTab::ResponseHeader => 2,
-            MainDisplayTab::ResponseBody => 3,
-        }
+        Self::ALL
+            .iter()
+            .position(|tab| *tab == self)
+            .unwrap_or_default()
     }
 }
 
@@ -112,23 +121,28 @@ impl DetailPanel {
     }
 
     pub fn next_tab(&mut self) {
-        self.active_tab = match self.active_tab {
+        self.select_tab(match self.active_tab {
             MainDisplayTab::RequestHeader => MainDisplayTab::RequestBody,
             MainDisplayTab::RequestBody => MainDisplayTab::ResponseHeader,
             MainDisplayTab::ResponseHeader => MainDisplayTab::ResponseBody,
             MainDisplayTab::ResponseBody => MainDisplayTab::RequestHeader,
-        };
-        self.scroll.reset();
+        });
     }
 
     pub fn previous_tab(&mut self) {
-        self.active_tab = match self.active_tab {
+        self.select_tab(match self.active_tab {
             MainDisplayTab::RequestHeader => MainDisplayTab::ResponseBody,
             MainDisplayTab::RequestBody => MainDisplayTab::RequestHeader,
             MainDisplayTab::ResponseHeader => MainDisplayTab::RequestBody,
             MainDisplayTab::ResponseBody => MainDisplayTab::ResponseHeader,
-        };
-        self.scroll.reset();
+        });
+    }
+
+    pub fn select_tab(&mut self, tab: MainDisplayTab) {
+        if self.active_tab != tab {
+            self.active_tab = tab;
+            self.scroll.reset();
+        }
     }
 }
 
