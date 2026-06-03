@@ -315,7 +315,11 @@ fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTre
         return;
     };
 
-    let current = root_mut_or_insert(roots, origin_identifier.clone(), entry.origin.clone());
+    let current = root_mut_or_insert(
+        roots,
+        origin_identifier.clone(),
+        subtree_label(&entry.origin),
+    );
     let parent_segments = entry
         .segments
         .split_last()
@@ -328,7 +332,7 @@ fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTre
         &[]
     };
     for (identifier, label) in parent_identifiers.iter().zip(parent_segments) {
-        current = current.branch_child_mut_or_insert(identifier.clone(), label.clone());
+        current = current.branch_child_mut_or_insert(identifier.clone(), subtree_label(label));
     }
 
     let leaf_label = entry
@@ -339,6 +343,14 @@ fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTre
     current
         .children
         .push(RequestTreeNode::new(request_identifier.clone(), leaf_label));
+}
+
+fn subtree_label(label: &str) -> String {
+    if label.ends_with('/') {
+        label.to_string()
+    } else {
+        format!("{label}/")
+    }
 }
 
 fn root_mut_or_insert(
@@ -522,6 +534,24 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(child_identifiers, ["segment:b", "segment:a", "request:0"]);
+    }
+
+    #[test]
+    fn request_tree_displays_subtree_nodes_with_trailing_slashes() {
+        let mut app = App::new(ui_settings(true));
+        app.add_request(captured(0, "https://a.com/path/to/api"));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let request_area = ui.request_list.area();
+        let rendered_rows = (request_area.y..request_area.bottom())
+            .map(|row| buffer_row(&buffer, row, request_area.x, request_area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered_rows.contains("https://a.com/"), "{rendered_rows}");
+        assert!(rendered_rows.contains("path/"), "{rendered_rows}");
+        assert!(rendered_rows.contains("to/"), "{rendered_rows}");
+        assert!(rendered_rows.contains("api"), "{rendered_rows}");
+        assert!(!rendered_rows.contains("api/"), "{rendered_rows}");
     }
 
     #[test]
