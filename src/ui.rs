@@ -406,6 +406,20 @@ mod tests {
         assert_ne!(format_response_body(&req), raw_body);
     }
 
+    #[test]
+    fn form_request_body_decodes_percent_encoded_utf8_text() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let body = "name=%E4%B8%AD%E6%96%87&city=%E5%8C%97%E4%BA%AC";
+
+        assert_eq!(
+            format_request_body(Some(body), &headers),
+            "name: 中文\ncity: 北京"
+        );
+    }
+
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -1243,36 +1257,30 @@ fn format_json_body(body: &str) -> String {
 }
 
 fn decode_url_component(input: &str) -> String {
-    let mut result = String::new();
-    let mut bytes = input.as_bytes().iter();
+    let input_bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(input_bytes.len());
+    let mut cursor = 0;
 
-    while let Some(&byte) = bytes.next() {
-        if byte == b'%' {
-            let hex1 = bytes.next();
-            let hex2 = bytes.next();
-
-            if let (Some(&h1), Some(&h2)) = (hex1, hex2) {
+    while cursor < input_bytes.len() {
+        match input_bytes[cursor] {
+            b'%' if cursor + 2 < input_bytes.len() => {
+                let h1 = input_bytes[cursor + 1];
+                let h2 = input_bytes[cursor + 2];
                 if let (Some(hi), Some(lo)) = (hex_to_nibble(h1), hex_to_nibble(h2)) {
-                    result.push((hi * 16 + lo) as char);
-                } else {
-                    result.push(byte as char);
-                    result.push(h1 as char);
-                    result.push(h2 as char);
+                    decoded.push(hi * 16 + lo);
+                    cursor += 3;
+                    continue;
                 }
-            } else {
-                result.push(byte as char);
-                if let Some(&h1) = hex1 {
-                    result.push(h1 as char);
-                }
+                decoded.push(input_bytes[cursor]);
             }
-        } else if byte == b'+' {
-            result.push(' ');
-        } else {
-            result.push(byte as char);
+            b'+' => decoded.push(b' '),
+            byte => decoded.push(byte),
         }
+        cursor += 1;
     }
 
-    result
+    String::from_utf8(decoded)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 fn hex_to_nibble(byte: u8) -> Option<u8> {
