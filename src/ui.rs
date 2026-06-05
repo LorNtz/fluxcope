@@ -242,6 +242,7 @@ impl MouseHandler for RequestListView {
 struct RequestTreeNode {
     identifier: String,
     label: String,
+    leaf_count: usize,
     children: Vec<RequestTreeNode>,
 }
 
@@ -250,6 +251,7 @@ impl RequestTreeNode {
         Self {
             identifier,
             label,
+            leaf_count: 0,
             children: Vec::new(),
         }
     }
@@ -278,13 +280,20 @@ impl RequestTreeNode {
     }
 
     fn into_tree_item(self) -> TreeItem<'static, String> {
-        if self.children.is_empty() {
-            TreeItem::new_leaf(self.identifier, self.label)
+        let Self {
+            identifier,
+            label,
+            leaf_count,
+            children,
+        } = self;
+
+        if children.is_empty() {
+            TreeItem::new_leaf(identifier, label)
         } else {
             TreeItem::new(
-                self.identifier,
-                self.label,
-                self.children
+                identifier,
+                subtree_label_with_count(label, leaf_count),
+                children
                     .into_iter()
                     .map(RequestTreeNode::into_tree_item)
                     .collect(),
@@ -321,6 +330,7 @@ fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTre
         origin_identifier.clone(),
         subtree_label(&entry.origin),
     );
+    current.leaf_count += 1;
     let parent_segments = entry
         .segments
         .split_last()
@@ -334,6 +344,7 @@ fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTre
     };
     for (identifier, label) in parent_identifiers.iter().zip(parent_segments) {
         current = current.branch_child_mut_or_insert(identifier.clone(), subtree_label(label));
+        current.leaf_count += 1;
     }
 
     let leaf_label = entry
@@ -352,6 +363,16 @@ fn subtree_label(label: &str) -> String {
     } else {
         format!("{label}/")
     }
+}
+
+fn subtree_label_with_count(label: String, leaf_count: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(label),
+        Span::styled(
+            format!(" {leaf_count}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
 }
 
 fn root_mut_or_insert(
@@ -492,6 +513,29 @@ mod tests {
         row
     }
 
+    fn find_buffer_text(buffer: &Buffer, area: Rect, text: &str) -> Option<Position> {
+        let symbols = text
+            .chars()
+            .map(|symbol| symbol.to_string())
+            .collect::<Vec<_>>();
+        let symbol_count = u16::try_from(symbols.len()).ok()?;
+        if symbol_count == 0 || area.width < symbol_count {
+            return None;
+        }
+
+        for y in area.y..area.bottom() {
+            for x in area.x..=area.right().saturating_sub(symbol_count) {
+                if symbols.iter().enumerate().all(|(offset, symbol)| {
+                    buffer[(x + u16::try_from(offset).unwrap_or(u16::MAX), y)].symbol() == symbol
+                }) {
+                    return Some(Position::new(x, y));
+                }
+            }
+        }
+
+        None
+    }
+
     fn tab_click_position(area: Rect, target: MainDisplayTab) -> Position {
         let mut column = area.x.saturating_add(1);
         for (index, tab) in MainDisplayTab::all().iter().copied().enumerate() {
@@ -567,6 +611,24 @@ mod tests {
         assert!(rendered_rows.contains("to/"), "{rendered_rows}");
         assert!(rendered_rows.contains("api"), "{rendered_rows}");
         assert!(!rendered_rows.contains("api/"), "{rendered_rows}");
+    }
+
+    #[test]
+    fn request_tree_displays_subtree_leaf_counts_with_muted_style() {
+        let mut app = App::new(ui_settings(true));
+        app.add_request(captured(0, "https://a.com/path/one"));
+        app.add_request(captured(1, "https://a.com/path/two"));
+        app.add_request(captured(2, "https://a.com/other"));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let request_area = ui.request_list.area();
+
+        assert!(find_buffer_text(&buffer, request_area, "https://a.com/ 3").is_some());
+        let path_count = find_buffer_text(&buffer, request_area, "path/ 2")
+            .expect("path subtree count should render");
+        let count_column = path_count.x + text_width("path/ ");
+
+        assert_eq!(buffer[(count_column, path_count.y)].fg, Color::DarkGray);
+        assert!(find_buffer_text(&buffer, request_area, "other 1").is_none());
     }
 
     #[test]
