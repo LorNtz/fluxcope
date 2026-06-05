@@ -110,6 +110,7 @@ impl RequestListPanel {
 pub struct DetailPanel {
     pub active_tab: MainDisplayTab,
     pub scroll: ScrollState,
+    pub selected_header_row: Option<usize>,
 }
 
 impl DetailPanel {
@@ -117,6 +118,7 @@ impl DetailPanel {
         Self {
             active_tab: MainDisplayTab::RequestHeader,
             scroll: ScrollState::new(),
+            selected_header_row: None,
         }
     }
 
@@ -141,8 +143,13 @@ impl DetailPanel {
     pub fn select_tab(&mut self, tab: MainDisplayTab) {
         if self.active_tab != tab {
             self.active_tab = tab;
-            self.scroll.reset();
+            self.reset_content_position();
         }
+    }
+
+    pub fn reset_content_position(&mut self) {
+        self.scroll.reset();
+        self.selected_header_row = None;
     }
 }
 

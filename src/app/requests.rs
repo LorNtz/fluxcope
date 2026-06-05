@@ -71,7 +71,7 @@ impl App {
         if removed_count > 0 {
             log::info!("deleted {removed_count} request(s) from request tree");
             self.rebuild_request_list_state_after_delete(&selected_path, &tree_before_delete);
-            self.detail_panel.scroll.reset();
+            self.detail_panel.reset_content_position();
         }
 
         removed_count
@@ -85,7 +85,7 @@ impl App {
         let removed_count = self.requests.len();
         self.requests = Vec::new();
         self.request_list.state = TreeState::default();
-        self.detail_panel.scroll.reset();
+        self.detail_panel.reset_content_position();
         if removed_count > 0 {
             log::info!("cleared {removed_count} request(s) from request tree");
         }
@@ -103,7 +103,7 @@ impl App {
 
     pub fn apply_request_list_change(&mut self, changed: bool) {
         if changed {
-            self.detail_panel.scroll.reset();
+            self.detail_panel.reset_content_position();
         }
     }
 

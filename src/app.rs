@@ -27,6 +27,7 @@ pub struct App {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(ui_settings: UiSettings) -> Self {
         Self::with_recording(ui_settings, RecordingState::default())
     }
