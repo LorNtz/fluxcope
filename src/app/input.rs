@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{
     App, PanelFocus, PopupFocus,
@@ -7,6 +7,10 @@ use super::{
 
 impl App {
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
+        if key.kind == KeyEventKind::Release {
+            return false;
+        }
+
         if is_plain_key(key) && key.code == KeyCode::Char('q') {
             return true;
         }
@@ -107,13 +111,14 @@ impl App {
                 let changed = self.request_list.state.key_left();
                 self.apply_request_list_change(changed);
             }
-            KeyCode::Char('l') | KeyCode::Right => {
-                let changed = self.request_list.state.key_right();
-                self.apply_request_list_change(changed);
+            KeyCode::Char('l') => {
+                self.toggle_selected_request_subtree();
+            }
+            KeyCode::Right => {
+                self.open_selected_request_subtree();
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let changed = self.request_list.state.toggle_selected();
-                self.apply_request_list_change(changed);
+                self.toggle_selected_request_subtree();
             }
             KeyCode::PageDown => {
                 self.request_list.scroll_down();
@@ -126,6 +131,18 @@ impl App {
             }
             KeyCode::Char('D') => {
                 self.clear_requests();
+            }
+            KeyCode::Char('e') => {
+                self.expand_selected_request_subtree();
+            }
+            KeyCode::Char('E') => {
+                self.expand_all_request_subtrees();
+            }
+            KeyCode::Char('w') => {
+                self.collapse_selected_request_subtree_children();
+            }
+            KeyCode::Char('W') => {
+                self.collapse_all_request_subtrees();
             }
             _ => {}
         }

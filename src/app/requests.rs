@@ -42,6 +42,102 @@ impl App {
         self.apply_request_list_change(changed);
     }
 
+    pub fn toggle_selected_request_subtree(&mut self) -> bool {
+        let Some(selected_path) = self.selected_request_subtree_path() else {
+            return false;
+        };
+
+        let changed = self.request_list.state.toggle(selected_path);
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    pub fn open_selected_request_subtree(&mut self) -> bool {
+        let Some(selected_path) = self.selected_request_subtree_path() else {
+            return false;
+        };
+
+        let changed = self.request_list.state.open(selected_path);
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    pub fn expand_selected_request_subtree(&mut self) -> bool {
+        let Some(selected_path) = self.selected_request_subtree_path() else {
+            return false;
+        };
+
+        let changed =
+            self.open_matching_request_tree_branch_paths(|path| path.starts_with(&selected_path));
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    pub fn expand_all_request_subtrees(&mut self) -> bool {
+        let changed = self.open_matching_request_tree_branch_paths(|_| true);
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    pub fn collapse_all_request_subtrees(&mut self) -> bool {
+        let selected_origin = self.request_list.state.selected().first().cloned();
+        let mut changed = self.request_list.state.close_all();
+        if let Some(origin) = selected_origin {
+            changed |= self.request_list.state.select(vec![origin]);
+        }
+
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    pub fn collapse_selected_request_subtree_children(&mut self) -> bool {
+        let Some(selected_path) = self.selected_request_subtree_path() else {
+            return false;
+        };
+
+        let child_opened_paths = self
+            .request_list
+            .state
+            .opened()
+            .iter()
+            .filter(|path| path.len() > selected_path.len() && path.starts_with(&selected_path))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut changed = false;
+        for path in child_opened_paths {
+            changed |= self.request_list.state.close(&path);
+        }
+        changed |= self.request_list.state.open(selected_path);
+
+        self.apply_request_list_change(changed);
+        changed
+    }
+
+    fn open_matching_request_tree_branch_paths(
+        &mut self,
+        mut should_open: impl FnMut(&[String]) -> bool,
+    ) -> bool {
+        let mut changed = false;
+        for req in &self.requests {
+            for path in RequestTreeEntry::from(req).branch_paths() {
+                if should_open(&path) {
+                    changed |= self.request_list.state.open(path);
+                }
+            }
+        }
+        changed
+    }
+
+    fn selected_request_subtree_path(&self) -> Option<Vec<String>> {
+        let selected_path = self.request_list.state.selected();
+        if selected_path.is_empty() || selected_request_sequence(selected_path).is_some() {
+            None
+        } else {
+            Some(selected_path.to_vec())
+        }
+    }
+
     pub fn selected_request(&self) -> Option<&CapturedData> {
         selected_request_sequence(self.request_list.state.selected())
             .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))

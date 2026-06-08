@@ -5,7 +5,7 @@ use crate::{
     settings::{RequestListSettings, UiSettings},
     ui::RootView,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use http::Method;
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -56,6 +56,10 @@ fn ctrl_key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
 }
 
+fn key_with_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+    KeyEvent::new_with_kind(code, KeyModifiers::empty(), kind)
+}
+
 fn render_app(app: &mut App) {
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
@@ -98,6 +102,18 @@ fn r_toggles_recording_as_global_key() {
     assert!(app.is_panel_focused(PanelFocus::Detail));
 
     app.handle_key_event(key(KeyCode::Char('r')));
+    assert!(app.is_recording());
+}
+
+#[test]
+fn key_release_events_do_not_run_app_commands() {
+    let mut app = App::new(ui_settings(true));
+
+    assert!(!app.handle_key_event(key_with_kind(KeyCode::Char('q'), KeyEventKind::Release)));
+    assert!(app.is_recording());
+
+    app.handle_key_event(key_with_kind(KeyCode::Char('r'), KeyEventKind::Release));
+
     assert!(app.is_recording());
 }
 
@@ -351,6 +367,190 @@ fn request_list_preserves_user_opened_branches_when_auto_expand_is_disabled() {
             .opened()
             .contains(&vec![origin, api, v1])
     );
+}
+
+#[test]
+fn request_list_l_and_enter_toggle_selected_subtree() {
+    let mut app = App::new(ui_settings(false));
+    let origin = tree_path(&["origin:https://some.host.com"]);
+
+    app.add_request(captured("https://some.host.com/api/v1/getUserInfo"));
+
+    app.handle_key_event(key(KeyCode::Char('l')));
+    assert!(app.request_list.state.opened().contains(&origin));
+
+    app.handle_key_event(key(KeyCode::Char('l')));
+    assert!(!app.request_list.state.opened().contains(&origin));
+
+    app.handle_key_event(key(KeyCode::Char('l')));
+    assert!(app.request_list.state.opened().contains(&origin));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(!app.request_list.state.opened().contains(&origin));
+
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.request_list.state.opened().contains(&origin));
+}
+
+#[test]
+fn request_list_enter_release_does_not_toggle_subtree_twice() {
+    let mut app = App::new(ui_settings(false));
+    let origin = tree_path(&["origin:https://some.host.com"]);
+
+    app.add_request(captured("https://some.host.com/api/v1/getUserInfo"));
+
+    app.handle_key_event(key_with_kind(KeyCode::Enter, KeyEventKind::Press));
+    app.handle_key_event(key_with_kind(KeyCode::Enter, KeyEventKind::Release));
+
+    assert!(app.request_list.state.opened().contains(&origin));
+}
+
+#[test]
+fn request_list_e_expands_selected_subtree_only() {
+    let mut app = App::new(ui_settings(false));
+    let origin = "origin:https://some.host.com".to_string();
+    let api = "segment:api".to_string();
+
+    app.add_request(captured_with_sequence(0, "https://some.host.com/api/v1/a"));
+    app.add_request(captured_with_sequence(1, "https://some.host.com/api/v2/b"));
+    app.add_request(captured_with_sequence(2, "https://other.host.com/api/v3/c"));
+    app.request_list.state.open(vec![origin.clone()]);
+    app.request_list
+        .state
+        .select(vec![origin.clone(), api.clone()]);
+
+    app.handle_key_event(key(KeyCode::Char('e')));
+
+    assert!(
+        app.request_list
+            .state
+            .opened()
+            .contains(&vec![origin.clone(), api.clone()])
+    );
+    assert!(app.request_list.state.opened().contains(&vec![
+        origin.clone(),
+        api.clone(),
+        "segment:v1".to_string()
+    ]));
+    assert!(app.request_list.state.opened().contains(&vec![
+        origin.clone(),
+        api,
+        "segment:v2".to_string()
+    ]));
+    assert!(
+        !app.request_list
+            .state
+            .opened()
+            .contains(&vec!["origin:https://other.host.com".to_string()])
+    );
+}
+
+#[test]
+fn request_list_e_ignores_selected_request_leaf() {
+    let mut app = App::new(ui_settings(false));
+    let leaf = tree_path(&["origin:https://some.host.com", "segment:api", "request:0"]);
+
+    app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+    app.request_list.state.select(leaf);
+
+    app.handle_key_event(key(KeyCode::Char('e')));
+
+    assert!(app.request_list.state.opened().is_empty());
+}
+
+#[test]
+fn request_list_uppercase_e_expands_all_subtrees() {
+    let mut app = App::new(ui_settings(false));
+
+    app.add_request(captured_with_sequence(0, "https://a.com/api/v1/a"));
+    app.add_request(captured_with_sequence(1, "https://b.com/api/v2/b"));
+
+    app.handle_key_event(key(KeyCode::Char('E')));
+
+    assert!(
+        app.request_list
+            .state
+            .opened()
+            .contains(&tree_path(&["origin:https://a.com"]))
+    );
+    assert!(
+        app.request_list
+            .state
+            .opened()
+            .contains(&tree_path(&["origin:https://a.com", "segment:api"]))
+    );
+    assert!(
+        app.request_list
+            .state
+            .opened()
+            .contains(&tree_path(&["origin:https://b.com"]))
+    );
+    assert!(
+        app.request_list
+            .state
+            .opened()
+            .contains(&tree_path(&["origin:https://b.com", "segment:api"]))
+    );
+}
+
+#[test]
+fn request_list_uppercase_w_collapses_all_and_keeps_selection_visible() {
+    let mut app = App::new(ui_settings(true));
+
+    app.add_request(captured_with_sequence(0, "https://a.com/api/v1/a"));
+    app.request_list.state.select(tree_path(&[
+        "origin:https://a.com",
+        "segment:api",
+        "request:0",
+    ]));
+
+    app.handle_key_event(key(KeyCode::Char('W')));
+
+    assert!(app.request_list.state.opened().is_empty());
+    assert_eq!(
+        app.request_list.state.selected(),
+        tree_path(&["origin:https://a.com"])
+    );
+}
+
+#[test]
+fn request_list_w_collapses_selected_subtree_children_only() {
+    let mut app = App::new(ui_settings(false));
+    let selected = tree_path(&["origin:https://a.com", "segment:api"]);
+    let selected_child = tree_path(&["origin:https://a.com", "segment:api", "segment:v1"]);
+    let sibling = tree_path(&["origin:https://a.com", "segment:other"]);
+    let other_root = tree_path(&["origin:https://b.com"]);
+
+    app.add_request(captured_with_sequence(0, "https://a.com/api/v1/a"));
+    app.add_request(captured_with_sequence(1, "https://a.com/other/v2/b"));
+    app.add_request(captured_with_sequence(2, "https://b.com/api/v3/c"));
+    app.handle_key_event(key(KeyCode::Char('E')));
+    app.request_list.state.select(selected.clone());
+
+    app.handle_key_event(key(KeyCode::Char('w')));
+
+    assert!(app.request_list.state.opened().contains(&selected));
+    assert!(!app.request_list.state.opened().contains(&selected_child));
+    assert!(app.request_list.state.opened().contains(&sibling));
+    assert!(app.request_list.state.opened().contains(&other_root));
+}
+
+#[test]
+fn request_list_w_ignores_selected_request_leaf() {
+    let mut app = App::new(ui_settings(false));
+    let origin = tree_path(&["origin:https://some.host.com"]);
+    let api = tree_path(&["origin:https://some.host.com", "segment:api"]);
+    let leaf = tree_path(&["origin:https://some.host.com", "segment:api", "request:0"]);
+
+    app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
+    app.request_list.state.open(origin.clone());
+    app.request_list.state.open(api.clone());
+    app.request_list.state.select(leaf);
+
+    app.handle_key_event(key(KeyCode::Char('w')));
+
+    assert!(app.request_list.state.opened().contains(&origin));
+    assert!(app.request_list.state.opened().contains(&api));
 }
 
 #[test]
