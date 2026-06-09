@@ -1,8 +1,12 @@
-use crate::app::{App, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry};
+use crate::app::{
+    App, BodyViewerKey, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry, body_text_for_tab,
+};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use edtui::{EditorStatusLine, EditorTheme, EditorView};
 use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     symbols,
@@ -12,7 +16,7 @@ use ratatui::{
         ScrollbarState, Tabs, Wrap,
     },
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashSet};
 use tui_tree_widget::{Tree, TreeItem};
 
 trait View {
@@ -393,9 +397,10 @@ fn root_mut_or_insert(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{format_request_body, format_response_body};
     use crate::proxy_handler::CapturedData;
     use crate::settings::{RequestListSettings, UiSettings};
-    use crossterm::event::{KeyModifiers, MouseButton};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
     use http::Method;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -475,6 +480,10 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
     }
 
     fn laid_out_ui(app: &App) -> RootView {
@@ -801,6 +810,175 @@ mod tests {
         assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestBody);
         assert_eq!(app.detail_panel.selected_header_row, None);
     }
+
+    #[test]
+    fn entered_body_tab_renders_editor_content() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("alpha beta".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let detail_area = ui.right_panel.detail.area();
+        let text_area = body_editor_text_area(detail_area);
+
+        assert!(find_buffer_text(&buffer, text_area, "alpha beta").is_some());
+        assert!(find_buffer_text(&buffer, detail_area, "Normal").is_some());
+        assert!(app.detail_panel.body_viewer.editor_mut().is_some());
+    }
+
+    #[test]
+    fn body_viewer_jump_overlay_labels_visible_match_and_jumps() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("alpha beta".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        app.handle_key_event(key(KeyCode::Char('e')));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+        let label_position =
+            find_buffer_text(&buffer, text_area, "aeta").expect("jump label should render");
+
+        assert_eq!(buffer[label_position].bg, Color::Green);
+
+        app.handle_key_event(key(KeyCode::Char('a')));
+        let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+
+        assert_eq!(editor.cursor.row, 0);
+        assert_eq!(editor.cursor.col, 6);
+    }
+
+    #[test]
+    fn body_viewer_jump_shows_safe_labels_after_first_query_char() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("be be be be be be".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+        let label_position =
+            find_buffer_text(&buffer, text_area, "ae").expect("jump label should render");
+
+        assert_eq!(buffer[label_position].bg, Color::Green);
+    }
+
+    #[test]
+    fn body_viewer_jump_skips_possible_refinement_chars_as_labels() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("be be be be be be be be be be be be".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+
+        assert!(find_buffer_text(&buffer, text_area, "ee").is_none());
+    }
+
+    #[test]
+    fn body_viewer_jump_refines_query_when_possible_continuation_is_pressed() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("xx be yy".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        render_to_buffer(&mut app);
+
+        app.handle_key_event(key(KeyCode::Char('e')));
+        let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+        assert_eq!(editor.cursor.col, 0);
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+        let label_position =
+            find_buffer_text(&buffer, text_area, "ae").expect("refined jump label should render");
+
+        assert_eq!(buffer[label_position].bg, Color::Green);
+
+        app.handle_key_event(key(KeyCode::Char('a')));
+        let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+
+        assert_eq!(editor.cursor.row, 0);
+        assert_eq!(editor.cursor.col, 3);
+    }
+
+    #[test]
+    fn body_viewer_jump_label_h_takes_priority_over_editor_motion() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("be be be be be be".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+        let label_position =
+            find_buffer_text(&buffer, text_area, "he").expect("h jump label should render");
+
+        assert_eq!(buffer[label_position].bg, Color::Green);
+
+        app.handle_key_event(key(KeyCode::Char('h')));
+        let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+
+        assert_eq!(editor.cursor.row, 0);
+        assert_eq!(editor.cursor.col, 15);
+    }
+
+    #[test]
+    fn body_viewer_jump_query_can_refine_before_overlay_render() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("xx be yy".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.enter_current_body_viewer();
+
+        app.handle_key_event(key(KeyCode::Char('s')));
+        app.handle_key_event(key(KeyCode::Char('b')));
+        app.handle_key_event(key(KeyCode::Char('e')));
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let text_area = body_editor_text_area(ui.right_panel.detail.area());
+        let label_position =
+            find_buffer_text(&buffer, text_area, "ae").expect("refined jump label should render");
+
+        assert_eq!(buffer[label_position].bg, Color::Green);
+
+        app.handle_key_event(key(KeyCode::Char('a')));
+        let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+
+        assert_eq!(editor.cursor.row, 0);
+        assert_eq!(editor.cursor.col, 3);
+    }
 }
 
 struct RightPanelView {
@@ -846,6 +1024,12 @@ struct DetailView {
     area: Rect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JumpCandidate {
+    label: char,
+    position: Position,
+}
+
 impl DetailView {
     fn new() -> Self {
         Self {
@@ -865,26 +1049,49 @@ impl View for DetailView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         let focused = app.is_panel_focused(PanelFocus::Detail);
+        if should_render_active_body_editor(app) {
+            render_body_editor(frame, app, focused, self.area());
+            frame.render_widget(
+                detail_tabs(app.detail_panel.active_tab),
+                detail_tabs_area(self.area()),
+            );
+            return;
+        }
+
+        let mut render_detail_scrollbar = true;
         match build_detail_content(app) {
-            DetailContent::Text(detail_text) => {
-                let mut paragraph = Paragraph::new(detail_text)
-                    .block(detail_panel_block(focused))
-                    .wrap(Wrap { trim: false });
+            DetailContent::Text {
+                text: detail_text,
+                body_key,
+            } => {
+                if let Some(body_key) = body_key
+                    && app.detail_panel.body_viewer.is_active()
+                    && app.ensure_current_body_viewer_content()
+                    && app.detail_panel.body_viewer.has_content_for(body_key)
+                {
+                    render_body_editor(frame, app, focused, self.area());
+                    render_detail_scrollbar = false;
+                } else {
+                    let mut paragraph = Paragraph::new(detail_text)
+                        .block(detail_panel_block(focused))
+                        .wrap(Wrap { trim: false });
 
-                let total_lines: u16 = paragraph
-                    .line_count(self.area().width)
-                    .try_into()
-                    .unwrap_or(u16::MAX);
-                app.detail_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
-                paragraph = paragraph.scroll((
-                    app.detail_panel
-                        .scroll
-                        .offset
-                        .min(app.detail_panel.scroll.max_offset),
-                    0,
-                ));
+                    let total_lines: u16 = paragraph
+                        .line_count(self.area().width)
+                        .try_into()
+                        .unwrap_or(u16::MAX);
+                    app.detail_panel.scroll.max_offset =
+                        total_lines.saturating_sub(self.area().height);
+                    paragraph = paragraph.scroll((
+                        app.detail_panel
+                            .scroll
+                            .offset
+                            .min(app.detail_panel.scroll.max_offset),
+                        0,
+                    ));
 
-                frame.render_widget(paragraph, self.area());
+                    frame.render_widget(paragraph, self.area());
+                }
             }
             DetailContent::Table(rows) => {
                 let table_area = detail_content_area(self.area());
@@ -914,13 +1121,192 @@ impl View for DetailView {
             detail_tabs(app.detail_panel.active_tab),
             detail_tabs_area(self.area()),
         );
-        render_scrollbar(
-            frame,
-            self.area(),
-            app.detail_panel.scroll.max_offset,
-            app.detail_panel.scroll.offset,
+        if render_detail_scrollbar {
+            render_scrollbar(
+                frame,
+                self.area(),
+                app.detail_panel.scroll.max_offset,
+                app.detail_panel.scroll.offset,
+            );
+        }
+    }
+}
+
+fn should_render_active_body_editor(app: &mut App) -> bool {
+    if !app.detail_panel.body_viewer.is_active() || !app.detail_panel.active_tab.is_body() {
+        return false;
+    }
+
+    let Some(key) = app.current_body_viewer_key() else {
+        return false;
+    };
+
+    app.ensure_current_body_viewer_content() && app.detail_panel.body_viewer.has_content_for(key)
+}
+
+fn render_body_editor(frame: &mut Frame, app: &mut App, focused: bool, area: Rect) {
+    app.detail_panel.scroll.max_offset = 0;
+    app.detail_panel.scroll.offset = 0;
+
+    if let Some(editor) = app.detail_panel.body_viewer.editor_mut() {
+        frame.render_widget(
+            EditorView::new(editor)
+                .theme(body_editor_theme(focused))
+                .wrap(true)
+                .tab_width(4),
+            area,
         );
     }
+
+    render_jump_overlay(frame.buffer_mut(), app, body_editor_text_area(area));
+}
+
+fn body_editor_theme(focused: bool) -> EditorTheme<'static> {
+    EditorTheme::default()
+        .base(Style::default().fg(Color::Reset))
+        .cursor_style(Style::default().bg(Color::Green).fg(Color::Black))
+        .selection_style(Style::default().bg(Color::White).fg(Color::DarkGray))
+        .block(detail_panel_block(focused))
+        .status_line(
+            EditorStatusLine::default()
+                .style_text(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style_line(Style::default().fg(Color::Reset)),
+        )
+}
+
+fn body_editor_text_area(area: Rect) -> Rect {
+    let content_area = detail_content_area(area);
+    Rect {
+        height: content_area.height.saturating_sub(1),
+        ..content_area
+    }
+}
+
+fn render_jump_overlay(buffer: &mut Buffer, app: &mut App, area: Rect) {
+    let Some(query) = app
+        .detail_panel
+        .body_viewer
+        .jump_overlay_query(area)
+        .map(str::to_string)
+    else {
+        render_jump_targets(
+            buffer,
+            app.detail_panel.body_viewer.rendered_jump_targets(area),
+        );
+        return;
+    };
+
+    let candidates = visible_jump_candidates(buffer, area, &query);
+    render_jump_candidates(buffer, &candidates.labeled);
+    app.detail_panel.body_viewer.replace_visible_jump_targets(
+        &query,
+        area,
+        candidates
+            .labeled
+            .iter()
+            .map(|candidate| (candidate.label, candidate.position))
+            .collect(),
+        candidates.has_matches,
+    );
+}
+
+fn visible_jump_candidates(buffer: &Buffer, area: Rect, query: &str) -> VisibleJumpCandidates {
+    if area.is_empty() || query.is_empty() {
+        return VisibleJumpCandidates::default();
+    }
+
+    let query = query
+        .chars()
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let query_width = query.len();
+    if query_width == 0 || query_width > area.width as usize {
+        return VisibleJumpCandidates::default();
+    }
+
+    let mut matches = Vec::with_capacity(JUMP_LABEL_COUNT);
+    let mut ambiguous_labels = HashSet::with_capacity(JUMP_LABEL_COUNT);
+    let mut has_matches = false;
+    for y in area.y..area.bottom() {
+        let row = (area.x..area.right())
+            .map(|x| {
+                buffer[(x, y)]
+                    .symbol()
+                    .chars()
+                    .next()
+                    .unwrap_or(' ')
+                    .to_ascii_lowercase()
+            })
+            .collect::<Vec<_>>();
+
+        for column in 0..=row.len().saturating_sub(query_width) {
+            if row[column..column + query_width] != query {
+                continue;
+            }
+            has_matches = true;
+            if let Some(next_ch) = row
+                .get(column + query_width)
+                .filter(|next_ch| JUMP_LABELS.contains(**next_ch))
+            {
+                ambiguous_labels.insert(*next_ch);
+            }
+            if matches.len() >= JUMP_LABEL_COUNT {
+                continue;
+            }
+            let Ok(column) = u16::try_from(column) else {
+                continue;
+            };
+            matches.push(Position::new(area.x.saturating_add(column), y));
+        }
+    }
+
+    let labeled = JUMP_LABELS
+        .chars()
+        .filter(|label| !ambiguous_labels.contains(&label.to_ascii_lowercase()))
+        .zip(matches.iter().copied())
+        .map(|(label, position)| JumpCandidate { label, position })
+        .collect();
+
+    VisibleJumpCandidates {
+        has_matches,
+        labeled,
+    }
+}
+
+fn render_jump_candidates(buffer: &mut Buffer, candidates: &[JumpCandidate]) {
+    let style = jump_label_style();
+    for candidate in candidates {
+        render_jump_label(buffer, candidate.label, candidate.position, style);
+    }
+}
+
+fn render_jump_targets(buffer: &mut Buffer, targets: &[(char, Position)]) {
+    let style = jump_label_style();
+    for (label, position) in targets {
+        render_jump_label(buffer, *label, *position, style);
+    }
+}
+
+fn render_jump_label(buffer: &mut Buffer, label: char, position: Position, style: Style) {
+    buffer[position].set_char(label).set_style(style);
+}
+
+fn jump_label_style() -> Style {
+    Style::default().fg(Color::Black).bg(Color::Green)
+}
+
+const JUMP_LABELS: &str = "asdfghjklqwertyuiopzxcvbnm";
+const JUMP_LABEL_COUNT: usize = JUMP_LABELS.len();
+
+#[derive(Default)]
+struct VisibleJumpCandidates {
+    has_matches: bool,
+    labeled: Vec<JumpCandidate>,
 }
 
 impl MouseHandler for DetailView {
@@ -931,11 +1317,19 @@ impl MouseHandler for DetailView {
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                app.detail_panel.scroll.scroll_down();
+                if app.detail_panel.body_viewer.is_active() {
+                    app.detail_panel.body_viewer.scroll_down();
+                } else {
+                    app.detail_panel.scroll.scroll_down();
+                }
                 true
             }
             MouseEventKind::ScrollUp => {
-                app.detail_panel.scroll.scroll_up();
+                if app.detail_panel.body_viewer.is_active() {
+                    app.detail_panel.body_viewer.scroll_up();
+                } else {
+                    app.detail_panel.scroll.scroll_up();
+                }
                 true
             }
             MouseEventKind::Down(button) => {
@@ -944,6 +1338,12 @@ impl MouseHandler for DetailView {
                     detail_tab_at_position(self.area(), Position::new(mouse.column, mouse.row))
                 {
                     app.detail_panel.select_tab(tab);
+                } else if app.detail_panel.body_viewer.is_active()
+                    && button == MouseButton::Left
+                    && body_editor_text_area(self.area())
+                        .contains(Position::new(mouse.column, mouse.row))
+                {
+                    app.detail_panel.body_viewer.handle_mouse(mouse);
                 } else if button == MouseButton::Left {
                     app.detail_panel.selected_header_row = header_table_row_at_position(
                         app,
@@ -951,6 +1351,14 @@ impl MouseHandler for DetailView {
                         Position::new(mouse.column, mouse.row),
                     );
                 }
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if app.detail_panel.body_viewer.is_active()
+                    && body_editor_text_area(self.area())
+                        .contains(Position::new(mouse.column, mouse.row)) =>
+            {
+                app.detail_panel.body_viewer.handle_mouse(mouse);
                 true
             }
             _ => false,
@@ -1347,7 +1755,10 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 enum DetailContent {
-    Text(String),
+    Text {
+        text: String,
+        body_key: Option<BodyViewerKey>,
+    },
     Table(Vec<TableRow>),
 }
 
@@ -1401,17 +1812,29 @@ impl HeaderTableRowText for HeaderTableRowRef<'_> {
 
 fn build_detail_content(app: &App) -> DetailContent {
     let Some(req) = app.selected_request() else {
-        return DetailContent::Text("Select a request".to_string());
+        return DetailContent::Text {
+            text: "Select a request".to_string(),
+            body_key: None,
+        };
     };
 
     match app.detail_panel.active_tab {
         MainDisplayTab::RequestHeader => DetailContent::Table(request_header_rows(req)),
-        MainDisplayTab::RequestBody => DetailContent::Text(format_request_body(
-            req.req_body.as_deref(),
-            &req.req_headers,
-        )),
+        MainDisplayTab::RequestBody => DetailContent::Text {
+            text: body_text_for_tab(req, MainDisplayTab::RequestBody).unwrap_or_default(),
+            body_key: Some(BodyViewerKey::new(
+                req.sequence,
+                MainDisplayTab::RequestBody,
+            )),
+        },
         MainDisplayTab::ResponseHeader => DetailContent::Table(response_header_rows(req)),
-        MainDisplayTab::ResponseBody => DetailContent::Text(format_response_body(req)),
+        MainDisplayTab::ResponseBody => DetailContent::Text {
+            text: body_text_for_tab(req, MainDisplayTab::ResponseBody).unwrap_or_default(),
+            body_key: Some(BodyViewerKey::new(
+                req.sequence,
+                MainDisplayTab::ResponseBody,
+            )),
+        },
     }
 }
 
@@ -1690,92 +2113,5 @@ fn header_table_row_ref<'a>(key: &'a str, value: impl Into<Cow<'a, str>>) -> Hea
     HeaderTableRowRef {
         key,
         value: value.into(),
-    }
-}
-
-fn format_request_body(body: Option<&str>, headers: &[(String, String)]) -> String {
-    match body {
-        Some("") => "(Empty body)".to_string(),
-        Some(body) if is_form_data(headers) => format_form_body(body),
-        Some(body) => body.to_string(),
-        None => "(No body)".to_string(),
-    }
-}
-
-fn format_response_body(req: &crate::proxy_handler::CapturedData) -> String {
-    match req.res_body.as_deref() {
-        Some(body) if req.local_path.is_some() => body.to_string(),
-        None if req.local_path.is_some() => String::new(), // empty local file
-        Some("") => "(Empty body)".to_string(),
-        Some(body) => format_json_body(body),
-        None => "(No body)".to_string(),
-    }
-}
-
-fn is_form_data(headers: &[(String, String)]) -> bool {
-    headers.iter().any(|(key, value)| {
-        key.eq_ignore_ascii_case("content-type")
-            && value
-                .to_ascii_lowercase()
-                .contains("application/x-www-form-urlencoded")
-    })
-}
-
-fn format_form_body(body: &str) -> String {
-    body.split('&')
-        .filter(|pair| !pair.is_empty())
-        .map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let key = parts.next().unwrap_or("");
-            let value = parts.next().unwrap_or("");
-            format!(
-                "{}: {}",
-                decode_url_component(key),
-                decode_url_component(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_json_body(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .map(|value| serde_json::to_string_pretty(&value).unwrap_or_else(|_| body.to_string()))
-        .unwrap_or_else(|_| body.to_string())
-}
-
-fn decode_url_component(input: &str) -> String {
-    let input_bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(input_bytes.len());
-    let mut cursor = 0;
-
-    while cursor < input_bytes.len() {
-        match input_bytes[cursor] {
-            b'%' if cursor + 2 < input_bytes.len() => {
-                let h1 = input_bytes[cursor + 1];
-                let h2 = input_bytes[cursor + 2];
-                if let (Some(hi), Some(lo)) = (hex_to_nibble(h1), hex_to_nibble(h2)) {
-                    decoded.push(hi * 16 + lo);
-                    cursor += 3;
-                    continue;
-                }
-                decoded.push(input_bytes[cursor]);
-            }
-            b'+' => decoded.push(b' '),
-            byte => decoded.push(byte),
-        }
-        cursor += 1;
-    }
-
-    String::from_utf8(decoded)
-        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
-}
-
-fn hex_to_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }

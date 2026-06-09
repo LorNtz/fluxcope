@@ -1,3 +1,4 @@
+mod body_viewer;
 mod event;
 mod focus;
 mod input;
@@ -11,6 +12,10 @@ mod tests;
 use crate::{proxy_handler::CapturedData, recording::RecordingState, settings::UiSettings};
 use focus::FocusState;
 
+pub use body_viewer::BodyViewerKey;
+pub(crate) use body_viewer::body_text_for_tab;
+#[cfg(test)]
+pub(crate) use body_viewer::{format_request_body, format_response_body};
 pub use event::AppEvent;
 pub use focus::{PanelFocus, PopupFocus};
 pub use panels::{CertificatePopup, DetailPanel, LogPanel, MainDisplayTab, RequestListPanel};

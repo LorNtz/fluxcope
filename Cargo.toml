@@ -35,3 +35,4 @@ parking_lot = "0.12" # Faster Mutex/RwLock
 log = "0.4"
 uuid = "1.19.0"
 qrcode = { version = "0.14", default-features = false }
+edtui = { version = "=0.9.9", default-features = false, features = ["arboard", "mouse-support"] }

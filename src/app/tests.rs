@@ -209,6 +209,107 @@ fn detail_focus_uses_h_l_to_switch_tabs() {
 }
 
 #[test]
+fn detail_body_enter_activates_viewer_and_esc_exits() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("alpha".to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.detail_panel.body_viewer.is_active());
+    render_app(&mut app);
+    assert!(app.detail_panel.body_viewer.editor_mut().is_some());
+
+    app.handle_key_event(key(KeyCode::Esc));
+
+    assert!(!app.detail_panel.body_viewer.is_active());
+    assert!(app.detail_panel.body_viewer.editor_mut().is_none());
+}
+
+#[test]
+fn detail_body_viewer_shadows_app_keys_and_stays_read_only() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("alpha".to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.handle_key_event(key(KeyCode::Enter));
+    render_app(&mut app);
+
+    let lines_before = app
+        .detail_panel
+        .body_viewer
+        .editor_mut()
+        .unwrap()
+        .lines
+        .clone();
+
+    assert!(!app.handle_key_event(key(KeyCode::Char('q'))));
+    app.handle_key_event(key(KeyCode::Char('r')));
+    app.handle_key_event(key(KeyCode::Char('l')));
+    app.handle_key_event(key(KeyCode::Char('x')));
+
+    assert!(app.is_recording());
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestBody);
+    assert_eq!(
+        app.detail_panel.body_viewer.editor_mut().unwrap().lines,
+        lines_before
+    );
+}
+
+#[test]
+fn detail_body_viewer_search_can_move_cursor_without_editing() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("alpha beta".to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.handle_key_event(key(KeyCode::Enter));
+    render_app(&mut app);
+
+    app.handle_key_event(key(KeyCode::Char('/')));
+    app.handle_key_event(key(KeyCode::Char('b')));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+    assert_eq!(editor.cursor.row, 0);
+    assert_eq!(editor.cursor.col, 6);
+    assert_eq!(editor.lines, edtui::Lines::from("alpha beta"));
+}
+
+#[test]
+fn detail_body_viewer_resets_on_tab_change() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("alpha".to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.handle_key_event(key(KeyCode::Enter));
+
+    app.detail_panel.next_tab();
+
+    assert!(!app.detail_panel.body_viewer.is_active());
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::ResponseHeader);
+}
+
+#[test]
+fn detail_enter_does_not_activate_body_viewer_without_selected_request() {
+    let mut app = App::new(ui_settings(true));
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(!app.detail_panel.body_viewer.is_active());
+}
+
+#[test]
 fn panel_keys_apply_only_to_focused_panel() {
     let mut app = App::new(ui_settings(true));
 

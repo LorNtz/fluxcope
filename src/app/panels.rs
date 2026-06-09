@@ -2,9 +2,10 @@ use crate::settings::RequestListSettings;
 use ratatui::layout::Position;
 use tui_tree_widget::TreeState;
 
+use super::body_viewer::BodyViewer;
 use super::request_tree::{RequestTreeEntry, origin_identifier};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainDisplayTab {
     RequestHeader,
     RequestBody,
@@ -38,6 +39,10 @@ impl MainDisplayTab {
             .iter()
             .position(|tab| *tab == self)
             .unwrap_or_default()
+    }
+
+    pub fn is_body(self) -> bool {
+        matches!(self, Self::RequestBody | Self::ResponseBody)
     }
 }
 
@@ -111,6 +116,7 @@ pub struct DetailPanel {
     pub active_tab: MainDisplayTab,
     pub scroll: ScrollState,
     pub selected_header_row: Option<usize>,
+    pub body_viewer: BodyViewer,
 }
 
 impl DetailPanel {
@@ -119,6 +125,7 @@ impl DetailPanel {
             active_tab: MainDisplayTab::RequestHeader,
             scroll: ScrollState::new(),
             selected_header_row: None,
+            body_viewer: BodyViewer::new(),
         }
     }
 
@@ -150,6 +157,7 @@ impl DetailPanel {
     pub fn reset_content_position(&mut self) {
         self.scroll.reset();
         self.selected_header_row = None;
+        self.body_viewer.reset();
     }
 }
 

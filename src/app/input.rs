@@ -11,13 +11,18 @@ impl App {
             return false;
         }
 
-        if is_plain_key(key) && key.code == KeyCode::Char('q') {
-            return true;
-        }
-
         if let Some(popup) = self.focus.popup() {
             self.handle_popup_key(popup, key);
             return false;
+        }
+
+        if self.is_panel_focused(PanelFocus::Detail) && self.detail_panel.body_viewer.is_active() {
+            self.detail_panel.body_viewer.handle_key(key);
+            return false;
+        }
+
+        if is_plain_key(key) && key.code == KeyCode::Char('q') {
+            return true;
         }
 
         if self.handle_focus_key(key) || self.handle_global_panel_key(key) {
@@ -154,6 +159,11 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Enter
+                if self.detail_panel.active_tab.is_body() && self.selected_request().is_some() =>
+            {
+                self.enter_current_body_viewer();
+            }
             KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down | KeyCode::PageDown => {
                 self.detail_panel.scroll.scroll_down();
             }
