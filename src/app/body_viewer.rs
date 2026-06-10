@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use edtui::{
-    EditorEventHandler, EditorMode, EditorState, Lines,
+    EditorEventHandler, EditorMode, EditorState, Index2, Lines,
     actions::motion::{MoveToFirstRow, MoveToLastRow},
     actions::search::StartSearch,
     actions::{
-        Action, CopyLine, CopySelection, FindNext, FindPrevious, MoveBackward, MoveDown,
+        Action, CopyLine, CopySelection, Execute, FindNext, FindPrevious, MoveBackward, MoveDown,
         MoveForward, MoveHalfPageDown, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst,
         MoveToMatchinBracket, MoveToStartOfLine, MoveUp, MoveWordBackward, MoveWordForward,
         MoveWordForwardToEndOfWord, RemoveCharFromSearch, SelectInnerBetween, SelectInnerWord,
@@ -46,6 +46,57 @@ enum JumpState {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum YankState {
+    #[default]
+    Inactive,
+    Pending,
+    PendingG,
+    PendingInner,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum YankCommand {
+    CopyLine,
+    Motion {
+        movement: YankMovement,
+        selection: YankSelection,
+    },
+    TextObject(YankTextObject),
+    Continue(YankState),
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YankMovement {
+    Backward,
+    Down,
+    EndOfLine,
+    FirstRow,
+    Forward,
+    LastRow,
+    MatchingBracket,
+    StartOfLine,
+    Up,
+    WordBackward,
+    WordForward,
+    WordForwardEnd,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum YankSelection {
+    CharInclusive,
+    CharExclusiveBackward,
+    CharExclusiveForward { include_line_end: bool },
+    Linewise,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum YankTextObject {
+    Word,
+    Between { opening: char, closing: char },
+}
+
 #[derive(Clone)]
 pub struct BodyViewer {
     active: bool,
@@ -53,8 +104,9 @@ pub struct BodyViewer {
     editor: Option<EditorState>,
     event_handler: EditorEventHandler,
     jump_state: JumpState,
-    jump_targets: Vec<(char, Position)>,
-    jump_targets_area: Option<Rect>,
+    yank_state: YankState,
+    cached_jump_targets: Vec<(char, Position)>,
+    area_where_jump_targets_computed: Option<Rect>,
 }
 
 impl BodyViewer {
@@ -65,8 +117,9 @@ impl BodyViewer {
             editor: None,
             event_handler: read_only_event_handler(),
             jump_state: JumpState::Inactive,
-            jump_targets: Vec::new(),
-            jump_targets_area: None,
+            yank_state: YankState::Inactive,
+            cached_jump_targets: Vec::new(),
+            area_where_jump_targets_computed: None,
         }
     }
 
@@ -77,6 +130,7 @@ impl BodyViewer {
     fn enter(&mut self) {
         self.active = true;
         self.cancel_jump();
+        self.cancel_yank();
     }
 
     pub fn exit(&mut self) {
@@ -85,6 +139,7 @@ impl BodyViewer {
         self.editor = None;
         self.event_handler = read_only_event_handler();
         self.cancel_jump();
+        self.cancel_yank();
     }
 
     pub fn reset(&mut self) {
@@ -100,6 +155,7 @@ impl BodyViewer {
         self.editor = Some(EditorState::new(Lines::from(text.as_str())));
         self.event_handler = read_only_event_handler();
         self.cancel_jump();
+        self.cancel_yank();
     }
 
     pub fn has_content_for(&self, key: BodyViewerKey) -> bool {
@@ -113,16 +169,17 @@ impl BodyViewer {
     pub fn jump_overlay_query(&self, area: Rect) -> Option<&str> {
         match &self.jump_state {
             JumpState::AwaitRender { query } => Some(query),
-            JumpState::AwaitLabel { query } if self.jump_targets_area != Some(area) => Some(query),
+            JumpState::AwaitLabel { query } if self.area_where_jump_targets_computed != Some(area) => Some(query),
             JumpState::Inactive | JumpState::Query { .. } => None,
             JumpState::AwaitLabel { .. } => None,
         }
     }
 
     pub fn rendered_jump_targets(&self, area: Rect) -> &[(char, Position)] {
-        if matches!(self.jump_state, JumpState::AwaitLabel { .. }) && self.jump_targets_area == Some(area)
+        if matches!(self.jump_state, JumpState::AwaitLabel { .. })
+            && self.area_where_jump_targets_computed == Some(area)
         {
-            &self.jump_targets
+            &self.cached_jump_targets
         } else {
             &[]
         }
@@ -142,8 +199,8 @@ impl BodyViewer {
                     query: active_query
                 } if active_query == query
         ) {
-            self.jump_targets.clear();
-            self.jump_targets_area = None;
+            self.cached_jump_targets.clear();
+            self.area_where_jump_targets_computed = None;
             return;
         }
 
@@ -152,8 +209,8 @@ impl BodyViewer {
             return;
         }
 
-        self.jump_targets = targets;
-        self.jump_targets_area = Some(area);
+        self.cached_jump_targets = targets;
+        self.area_where_jump_targets_computed = Some(area);
         self.jump_state = JumpState::AwaitLabel {
             query: query.to_string(),
         };
@@ -164,12 +221,21 @@ impl BodyViewer {
             return false;
         }
 
+        if key.code == KeyCode::Esc && is_plain_key(key) && self.yank_state != YankState::Inactive {
+            self.cancel_yank();
+            return true;
+        }
+
         if key.code == KeyCode::Esc && is_plain_key(key) {
             self.exit();
             return true;
         }
 
         if self.handle_jump_key(key) {
+            return true;
+        }
+
+        if self.handle_yank_key(key) {
             return true;
         }
 
@@ -190,6 +256,7 @@ impl BodyViewer {
         }
 
         self.cancel_jump();
+        self.cancel_yank();
 
         let Some(editor) = self.editor.as_mut() else {
             return true;
@@ -213,6 +280,7 @@ impl BodyViewer {
         }
 
         self.cancel_jump();
+        self.cancel_yank();
 
         let Some(editor) = self.editor.as_mut() else {
             return true;
@@ -230,6 +298,7 @@ impl BodyViewer {
         match self.jump_state.clone() {
             JumpState::Inactive => {
                 if ch == 's'
+                    && self.yank_state == YankState::Inactive
                     && self
                         .editor
                         .as_ref()
@@ -238,8 +307,8 @@ impl BodyViewer {
                     self.jump_state = JumpState::Query {
                         query: String::new(),
                     };
-                    self.jump_targets.clear();
-                    self.jump_targets_area = None;
+                    self.cached_jump_targets.clear();
+                    self.area_where_jump_targets_computed = None;
                     return true;
                 }
                 false
@@ -247,8 +316,8 @@ impl BodyViewer {
             JumpState::Query { mut query } => {
                 query.push(ch);
                 self.jump_state = JumpState::AwaitRender { query };
-                self.jump_targets.clear();
-                self.jump_targets_area = None;
+                self.cached_jump_targets.clear();
+                self.area_where_jump_targets_computed = None;
                 true
             }
             JumpState::AwaitRender { query } => {
@@ -257,7 +326,7 @@ impl BodyViewer {
             }
             JumpState::AwaitLabel { query } => {
                 if let Some((_, position)) = self
-                    .jump_targets
+                    .cached_jump_targets
                     .iter()
                     .find(|(label, _)| *label == ch)
                     .copied()
@@ -275,8 +344,8 @@ impl BodyViewer {
     fn refine_jump_query(&mut self, mut query: String, ch: char) {
         query.push(ch);
         self.jump_state = JumpState::AwaitRender { query };
-        self.jump_targets.clear();
-        self.jump_targets_area = None;
+        self.cached_jump_targets.clear();
+        self.area_where_jump_targets_computed = None;
     }
 
     fn jump_to_visible_cell(&mut self, position: Position) {
@@ -297,8 +366,312 @@ impl BodyViewer {
 
     fn cancel_jump(&mut self) {
         self.jump_state = JumpState::Inactive;
-        self.jump_targets.clear();
-        self.jump_targets_area = None;
+        self.cached_jump_targets.clear();
+        self.area_where_jump_targets_computed = None;
+    }
+
+    fn handle_yank_key(&mut self, key: KeyEvent) -> bool {
+        if self.yank_state == YankState::Inactive {
+            if plain_char(key) == Some('y')
+                && self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.mode == EditorMode::Normal)
+            {
+                self.yank_state = YankState::Pending;
+                return true;
+            }
+
+            return false;
+        }
+
+        let command = match self.yank_state {
+            YankState::Inactive => return false,
+            YankState::Pending => pending_yank_command(key),
+            YankState::PendingG => pending_g_yank_command(key),
+            YankState::PendingInner => pending_inner_yank_command(key),
+        };
+
+        match command {
+            YankCommand::Continue(next_state) => {
+                self.yank_state = next_state;
+            }
+            YankCommand::Cancel => {
+                self.cancel_yank();
+            }
+            YankCommand::CopyLine => {
+                if let Some(editor) = self.editor.as_mut() {
+                    CopyLine.execute(editor);
+                }
+                self.cancel_yank();
+            }
+            YankCommand::Motion {
+                movement,
+                selection,
+            } => {
+                if let Some(editor) = self.editor.as_mut() {
+                    copy_yank_motion(editor, movement, selection);
+                }
+                self.cancel_yank();
+            }
+            YankCommand::TextObject(text_object) => {
+                if let Some(editor) = self.editor.as_mut() {
+                    copy_yank_text_object(editor, text_object);
+                }
+                self.cancel_yank();
+            }
+        }
+
+        true
+    }
+
+    fn cancel_yank(&mut self) {
+        self.yank_state = YankState::Inactive;
+    }
+}
+
+fn pending_yank_command(key: KeyEvent) -> YankCommand {
+    match editor_key_event(key) {
+        Some(EditorKeyEvent::Char('y')) | Some(EditorKeyEvent::Char('_')) => YankCommand::CopyLine,
+        Some(EditorKeyEvent::Char('h')) | Some(EditorKeyEvent::Left) => {
+            yank_motion(YankMovement::Backward, YankSelection::CharExclusiveBackward)
+        }
+        Some(EditorKeyEvent::Char('l')) | Some(EditorKeyEvent::Right) => yank_motion(
+            YankMovement::Forward,
+            YankSelection::CharExclusiveForward {
+                include_line_end: false,
+            },
+        ),
+        Some(EditorKeyEvent::Char('j')) | Some(EditorKeyEvent::Down) => {
+            yank_motion(YankMovement::Down, YankSelection::Linewise)
+        }
+        Some(EditorKeyEvent::Char('k')) | Some(EditorKeyEvent::Up) => {
+            yank_motion(YankMovement::Up, YankSelection::Linewise)
+        }
+        Some(EditorKeyEvent::Char('w')) => yank_motion(
+            YankMovement::WordForward,
+            YankSelection::CharExclusiveForward {
+                include_line_end: true,
+            },
+        ),
+        Some(EditorKeyEvent::Char('e')) => {
+            yank_motion(YankMovement::WordForwardEnd, YankSelection::CharInclusive)
+        }
+        Some(EditorKeyEvent::Char('b')) => yank_motion(
+            YankMovement::WordBackward,
+            YankSelection::CharExclusiveBackward,
+        ),
+        Some(EditorKeyEvent::Char('0')) | Some(EditorKeyEvent::Home) => yank_motion(
+            YankMovement::StartOfLine,
+            YankSelection::CharExclusiveBackward,
+        ),
+        Some(EditorKeyEvent::Char('$')) | Some(EditorKeyEvent::End) => {
+            yank_motion(YankMovement::EndOfLine, YankSelection::CharInclusive)
+        }
+        Some(EditorKeyEvent::Char('G')) => {
+            yank_motion(YankMovement::LastRow, YankSelection::Linewise)
+        }
+        Some(EditorKeyEvent::Char('%')) => {
+            yank_motion(YankMovement::MatchingBracket, YankSelection::CharInclusive)
+        }
+        Some(EditorKeyEvent::Char('g')) => YankCommand::Continue(YankState::PendingG),
+        Some(EditorKeyEvent::Char('i')) => YankCommand::Continue(YankState::PendingInner),
+        _ => YankCommand::Cancel,
+    }
+}
+
+fn pending_g_yank_command(key: KeyEvent) -> YankCommand {
+    match editor_key_event(key) {
+        Some(EditorKeyEvent::Char('g')) => {
+            yank_motion(YankMovement::FirstRow, YankSelection::Linewise)
+        }
+        _ => YankCommand::Cancel,
+    }
+}
+
+fn pending_inner_yank_command(key: KeyEvent) -> YankCommand {
+    match editor_key_event(key) {
+        Some(EditorKeyEvent::Char('w')) => YankCommand::TextObject(YankTextObject::Word),
+        Some(EditorKeyEvent::Char(ch)) => inner_between_delimiters(ch)
+            .map(|(opening, closing)| {
+                YankCommand::TextObject(YankTextObject::Between { opening, closing })
+            })
+            .unwrap_or(YankCommand::Cancel),
+        _ => YankCommand::Cancel,
+    }
+}
+
+fn yank_motion(movement: YankMovement, selection: YankSelection) -> YankCommand {
+    YankCommand::Motion {
+        movement,
+        selection,
+    }
+}
+
+fn inner_between_delimiters(ch: char) -> Option<(char, char)> {
+    match ch {
+        '"' => Some(('"', '"')),
+        '\'' => Some(('\'', '\'')),
+        '(' | ')' => Some(('(', ')')),
+        '{' | '}' => Some(('{', '}')),
+        '[' | ']' => Some(('[', ']')),
+        _ => None,
+    }
+}
+
+fn copy_yank_motion(editor: &mut EditorState, movement: YankMovement, selection: YankSelection) {
+    let saved_cursor = editor.cursor;
+    let saved_mode = editor.mode;
+    let saved_selection = editor.selection.clone();
+
+    match selection {
+        YankSelection::Linewise => SelectLine.execute(editor),
+        YankSelection::CharInclusive
+        | YankSelection::CharExclusiveBackward
+        | YankSelection::CharExclusiveForward { .. } => {
+            SwitchMode(EditorMode::Visual).execute(editor)
+        }
+    }
+
+    movement.execute(editor);
+    if adjust_yank_selection(editor, saved_cursor, movement, selection) {
+        CopySelection.execute(editor);
+    }
+
+    editor.cursor = saved_cursor;
+    editor.mode = saved_mode;
+    editor.selection = saved_selection;
+}
+
+fn copy_yank_text_object(editor: &mut EditorState, text_object: YankTextObject) {
+    let saved_cursor = editor.cursor;
+    let saved_mode = editor.mode;
+    let saved_selection = editor.selection.clone();
+
+    editor.selection = None;
+    match text_object {
+        YankTextObject::Word => SelectInnerWord.execute(editor),
+        YankTextObject::Between { opening, closing } => {
+            SelectInnerBetween::new(opening, closing).execute(editor);
+        }
+    }
+
+    if editor.selection.is_some() {
+        CopySelection.execute(editor);
+    }
+
+    editor.cursor = saved_cursor;
+    editor.mode = saved_mode;
+    editor.selection = saved_selection;
+}
+
+fn adjust_yank_selection(
+    editor: &mut EditorState,
+    origin: Index2,
+    movement: YankMovement,
+    selection: YankSelection,
+) -> bool {
+    let destination = editor.cursor;
+
+    match selection {
+        YankSelection::Linewise => true,
+        YankSelection::CharInclusive => {
+            if movement == YankMovement::MatchingBracket && destination == origin {
+                return false;
+            }
+
+            if is_virtual_line_end(editor, destination) {
+                let Some(end) = previous_position(editor, destination) else {
+                    return false;
+                };
+
+                if let Some(selection) = editor.selection.as_mut() {
+                    selection.end = end;
+                }
+            }
+
+            true
+        }
+        YankSelection::CharExclusiveForward { include_line_end } => {
+            if destination == origin {
+                return false;
+            }
+
+            if !include_line_end || !is_line_end(editor, destination) {
+                let Some(end) = previous_position(editor, destination) else {
+                    return false;
+                };
+
+                if let Some(selection) = editor.selection.as_mut() {
+                    selection.end = end;
+                }
+            }
+
+            true
+        }
+        YankSelection::CharExclusiveBackward => {
+            if destination == origin {
+                return false;
+            }
+
+            let Some(start) = previous_position(editor, origin) else {
+                return false;
+            };
+
+            if let Some(selection) = editor.selection.as_mut() {
+                selection.start = start;
+            }
+
+            true
+        }
+    }
+}
+
+fn is_line_end(editor: &EditorState, position: Index2) -> bool {
+    editor
+        .lines
+        .len_col(position.row)
+        .is_some_and(|len| position.col >= len.saturating_sub(1))
+}
+
+fn is_virtual_line_end(editor: &EditorState, position: Index2) -> bool {
+    editor
+        .lines
+        .len_col(position.row)
+        .is_some_and(|len| position.col >= len)
+}
+
+fn previous_position(editor: &EditorState, position: Index2) -> Option<Index2> {
+    if position.col > 0 {
+        return Some(Index2::new(position.row, position.col - 1));
+    }
+
+    if position.row == 0 {
+        return None;
+    }
+
+    editor
+        .lines
+        .len_col(position.row - 1)
+        .map(|len| Index2::new(position.row - 1, len.saturating_sub(1)))
+}
+
+impl YankMovement {
+    fn execute(self, editor: &mut EditorState) {
+        match self {
+            YankMovement::Backward => MoveBackward(1).execute(editor),
+            YankMovement::Down => MoveDown(1).execute(editor),
+            YankMovement::EndOfLine => MoveToEndOfLine().execute(editor),
+            YankMovement::FirstRow => MoveToFirstRow().execute(editor),
+            YankMovement::Forward => MoveForward(1).execute(editor),
+            YankMovement::LastRow => MoveToLastRow().execute(editor),
+            YankMovement::MatchingBracket => MoveToMatchinBracket().execute(editor),
+            YankMovement::StartOfLine => MoveToStartOfLine().execute(editor),
+            YankMovement::Up => MoveUp(1).execute(editor),
+            YankMovement::WordBackward => MoveWordBackward(1).execute(editor),
+            YankMovement::WordForward => MoveWordForward(1).execute(editor),
+            YankMovement::WordForwardEnd => MoveWordForwardToEndOfWord(1).execute(editor),
+        }
     }
 }
 
