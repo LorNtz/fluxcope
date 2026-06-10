@@ -122,6 +122,9 @@ impl App {
             KeyCode::Right => {
                 self.open_selected_request_subtree();
             }
+            KeyCode::Enter if self.selected_request_leaf() => {
+                self.focus_panel(PanelFocus::Detail);
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.toggle_selected_request_subtree();
             }

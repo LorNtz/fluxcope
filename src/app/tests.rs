@@ -806,9 +806,11 @@ fn request_list_l_and_enter_toggle_selected_subtree() {
 
     app.handle_key_event(key(KeyCode::Enter));
     assert!(!app.request_list.state.opened().contains(&origin));
+    assert!(app.is_panel_focused(PanelFocus::RequestList));
 
     app.handle_key_event(key(KeyCode::Enter));
     assert!(app.request_list.state.opened().contains(&origin));
+    assert!(app.is_panel_focused(PanelFocus::RequestList));
 }
 
 #[test]
@@ -822,6 +824,22 @@ fn request_list_enter_release_does_not_toggle_subtree_twice() {
     app.handle_key_event(key_with_kind(KeyCode::Enter, KeyEventKind::Release));
 
     assert!(app.request_list.state.opened().contains(&origin));
+}
+
+#[test]
+fn request_list_enter_on_selected_request_focuses_detail_panel() {
+    let mut app = App::new(ui_settings(true));
+
+    app.add_request(captured("https://some.host.com/api/v1/getUserInfo"));
+    assert!(app.selected_request().is_some());
+
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.is_panel_focused(PanelFocus::Detail));
+    assert_eq!(
+        app.selected_request().map(|req| req.uri.as_str()),
+        Some("https://some.host.com/api/v1/getUserInfo")
+    );
 }
 
 #[test]
