@@ -1,6 +1,4 @@
-use crate::app::{
-    App, BodyViewerKey, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry, body_text_for_tab,
-};
+use crate::app::{App, BodyViewerKey, MainDisplayTab, PanelFocus, PopupFocus, RequestTreeEntry};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use edtui::{EditorStatusLine, EditorTheme, EditorView};
 use qrcode::{EcLevel, QrCode, render::unicode};
@@ -10,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     symbols,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Tabs, Wrap,
@@ -456,6 +454,19 @@ mod tests {
         assert_eq!(
             format_request_body(Some(body), &headers),
             "name: 中文\ncity: 北京"
+        );
+    }
+
+    #[test]
+    fn request_body_formats_json_like_response_body() {
+        let raw_body = r#"{"z":1,"a":2}"#;
+        let headers = Vec::new();
+        let mut req = captured(0, "https://a.com/api");
+        req.res_body = Some(raw_body.to_string());
+
+        assert_eq!(
+            format_request_body(Some(raw_body), &headers),
+            format_response_body(&req)
         );
     }
 
@@ -1058,39 +1069,51 @@ impl View for DetailView {
             return;
         }
 
-        let mut render_detail_scrollbar = true;
         match build_detail_content(app) {
-            DetailContent::Text {
-                text: detail_text,
-                body_key,
-            } => {
-                if let Some(body_key) = body_key
-                    && app.detail_panel.body_viewer.is_active()
-                    && app.ensure_current_body_viewer_content()
-                    && app.detail_panel.body_viewer.has_content_for(body_key)
-                {
-                    render_body_editor(frame, app, focused, self.area());
-                    render_detail_scrollbar = false;
-                } else {
-                    let mut paragraph = Paragraph::new(detail_text)
-                        .block(detail_panel_block(focused))
-                        .wrap(Wrap { trim: false });
+            DetailContent::Text(detail_text) => {
+                let mut paragraph = detail_text_paragraph(detail_text, focused);
 
-                    let total_lines: u16 = paragraph
-                        .line_count(self.area().width)
+                let total_lines: u16 = paragraph
+                    .line_count(self.area().width)
+                    .try_into()
+                    .unwrap_or(u16::MAX);
+                app.detail_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
+                paragraph = paragraph.scroll((
+                    app.detail_panel
+                        .scroll
+                        .offset
+                        .min(app.detail_panel.scroll.max_offset),
+                    0,
+                ));
+
+                frame.render_widget(paragraph, self.area());
+            }
+            DetailContent::Body(body_key) => {
+                if app.ensure_body_text_cached(body_key) {
+                    let total_lines: u16 = app
+                        .cached_body_text(body_key)
+                        .map(|detail_text| {
+                            detail_text_paragraph(detail_text, focused)
+                                .line_count(self.area().width)
+                        })
+                        .unwrap_or_default()
                         .try_into()
                         .unwrap_or(u16::MAX);
                     app.detail_panel.scroll.max_offset =
                         total_lines.saturating_sub(self.area().height);
-                    paragraph = paragraph.scroll((
-                        app.detail_panel
-                            .scroll
-                            .offset
-                            .min(app.detail_panel.scroll.max_offset),
-                        0,
-                    ));
+                    let offset = app
+                        .detail_panel
+                        .scroll
+                        .offset
+                        .min(app.detail_panel.scroll.max_offset);
+                    app.detail_panel.scroll.offset = offset;
 
-                    frame.render_widget(paragraph, self.area());
+                    if let Some(detail_text) = app.cached_body_text(body_key) {
+                        frame.render_widget(
+                            detail_text_paragraph(detail_text, focused).scroll((offset, 0)),
+                            self.area(),
+                        );
+                    }
                 }
             }
             DetailContent::Table(rows) => {
@@ -1121,15 +1144,19 @@ impl View for DetailView {
             detail_tabs(app.detail_panel.active_tab),
             detail_tabs_area(self.area()),
         );
-        if render_detail_scrollbar {
-            render_scrollbar(
-                frame,
-                self.area(),
-                app.detail_panel.scroll.max_offset,
-                app.detail_panel.scroll.offset,
-            );
-        }
+        render_scrollbar(
+            frame,
+            self.area(),
+            app.detail_panel.scroll.max_offset,
+            app.detail_panel.scroll.offset,
+        );
     }
+}
+
+fn detail_text_paragraph<'a>(text: impl Into<Text<'a>>, focused: bool) -> Paragraph<'a> {
+    Paragraph::new(text)
+        .block(detail_panel_block(focused))
+        .wrap(Wrap { trim: false })
 }
 
 fn should_render_active_body_editor(app: &mut App) -> bool {
@@ -1755,10 +1782,8 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 enum DetailContent {
-    Text {
-        text: String,
-        body_key: Option<BodyViewerKey>,
-    },
+    Text(&'static str),
+    Body(BodyViewerKey),
     Table(Vec<TableRow>),
 }
 
@@ -1811,30 +1836,21 @@ impl HeaderTableRowText for HeaderTableRowRef<'_> {
 }
 
 fn build_detail_content(app: &App) -> DetailContent {
+    if app.detail_panel.active_tab.is_body() {
+        return app
+            .current_body_viewer_key()
+            .map(DetailContent::Body)
+            .unwrap_or(DetailContent::Text("Select a request"));
+    }
+
     let Some(req) = app.selected_request() else {
-        return DetailContent::Text {
-            text: "Select a request".to_string(),
-            body_key: None,
-        };
+        return DetailContent::Text("Select a request");
     };
 
     match app.detail_panel.active_tab {
         MainDisplayTab::RequestHeader => DetailContent::Table(request_header_rows(req)),
-        MainDisplayTab::RequestBody => DetailContent::Text {
-            text: body_text_for_tab(req, MainDisplayTab::RequestBody).unwrap_or_default(),
-            body_key: Some(BodyViewerKey::new(
-                req.sequence,
-                MainDisplayTab::RequestBody,
-            )),
-        },
         MainDisplayTab::ResponseHeader => DetailContent::Table(response_header_rows(req)),
-        MainDisplayTab::ResponseBody => DetailContent::Text {
-            text: body_text_for_tab(req, MainDisplayTab::ResponseBody).unwrap_or_default(),
-            body_key: Some(BodyViewerKey::new(
-                req.sequence,
-                MainDisplayTab::ResponseBody,
-            )),
-        },
+        MainDisplayTab::RequestBody | MainDisplayTab::ResponseBody => unreachable!(),
     }
 }
 

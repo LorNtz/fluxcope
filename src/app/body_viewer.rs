@@ -29,6 +29,10 @@ impl BodyViewerKey {
     pub fn new(sequence: u64, tab: MainDisplayTab) -> Self {
         Self { sequence, tab }
     }
+
+    pub fn tab(self) -> MainDisplayTab {
+        self.tab
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -169,7 +173,11 @@ impl BodyViewer {
     pub fn jump_overlay_query(&self, area: Rect) -> Option<&str> {
         match &self.jump_state {
             JumpState::AwaitRender { query } => Some(query),
-            JumpState::AwaitLabel { query } if self.area_where_jump_targets_computed != Some(area) => Some(query),
+            JumpState::AwaitLabel { query }
+                if self.area_where_jump_targets_computed != Some(area) =>
+            {
+                Some(query)
+            }
             JumpState::Inactive | JumpState::Query { .. } => None,
             JumpState::AwaitLabel { .. } => None,
         }
@@ -702,18 +710,50 @@ impl App {
     }
 
     pub fn current_body_viewer_key(&self) -> Option<BodyViewerKey> {
-        let req = self.selected_request()?;
+        let sequence = self.selected_request_sequence()?;
         self.detail_panel
             .active_tab
             .is_body()
-            .then(|| BodyViewerKey::new(req.sequence, self.detail_panel.active_tab))
+            .then(|| BodyViewerKey::new(sequence, self.detail_panel.active_tab))
     }
 
-    fn current_body_text(&self) -> Option<(BodyViewerKey, String)> {
-        let req = self.selected_request()?;
-        let tab = self.detail_panel.active_tab;
-        let key = BodyViewerKey::new(req.sequence, tab);
-        body_text_for_tab(req, tab).map(|text| (key, text))
+    pub(crate) fn ensure_body_text_cached(&mut self, key: BodyViewerKey) -> bool {
+        if self.detail_panel.cached_body_text(key).is_some() {
+            return true;
+        }
+
+        let text = {
+            let Some(req) = self.selected_request() else {
+                return false;
+            };
+
+            if BodyViewerKey::new(req.sequence, key.tab()) != key {
+                return false;
+            }
+
+            body_text_for_tab(req, key.tab())
+        };
+        let Some(text) = text else {
+            return false;
+        };
+
+        self.detail_panel.cache_body_text(key, text);
+        true
+    }
+
+    pub(crate) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {
+        self.detail_panel.cached_body_text(key)
+    }
+
+    fn current_body_text(&mut self) -> Option<(BodyViewerKey, String)> {
+        let key = self.current_body_viewer_key()?;
+        if !self.ensure_body_text_cached(key) {
+            return None;
+        }
+
+        self.detail_panel
+            .take_cached_body_text(key)
+            .map(|text| (key, text))
     }
 }
 
@@ -732,7 +772,7 @@ pub(crate) fn format_request_body(body: Option<&str>, headers: &[(String, String
     match body {
         Some("") => "(Empty body)".to_string(),
         Some(body) if is_form_data(headers) => format_form_body(body),
-        Some(body) => body.to_string(),
+        Some(body) => format_json_body(body),
         None => "(No body)".to_string(),
     }
 }

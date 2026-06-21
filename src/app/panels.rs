@@ -2,7 +2,7 @@ use crate::settings::RequestListSettings;
 use ratatui::layout::Position;
 use tui_tree_widget::TreeState;
 
-use super::body_viewer::BodyViewer;
+use super::body_viewer::{BodyViewer, BodyViewerKey};
 use super::request_tree::{RequestTreeEntry, origin_identifier};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +117,7 @@ pub struct DetailPanel {
     pub scroll: ScrollState,
     pub selected_header_row: Option<usize>,
     pub body_viewer: BodyViewer,
+    cached_body_text: Option<CachedBodyText>,
 }
 
 impl DetailPanel {
@@ -126,6 +127,7 @@ impl DetailPanel {
             scroll: ScrollState::new(),
             selected_header_row: None,
             body_viewer: BodyViewer::new(),
+            cached_body_text: None,
         }
     }
 
@@ -158,7 +160,36 @@ impl DetailPanel {
         self.scroll.reset();
         self.selected_header_row = None;
         self.body_viewer.reset();
+        self.cached_body_text = None;
     }
+
+    pub(in crate::app) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {
+        self.cached_body_text
+            .as_ref()
+            .filter(|cached| cached.key == key)
+            .map(|cached| cached.text.as_str())
+    }
+
+    pub(in crate::app) fn cache_body_text(&mut self, key: BodyViewerKey, text: String) {
+        self.cached_body_text = Some(CachedBodyText { key, text });
+    }
+
+    pub(in crate::app) fn take_cached_body_text(&mut self, key: BodyViewerKey) -> Option<String> {
+        if self
+            .cached_body_text
+            .as_ref()
+            .is_some_and(|cached| cached.key == key)
+        {
+            self.cached_body_text.take().map(|cached| cached.text)
+        } else {
+            None
+        }
+    }
+}
+
+struct CachedBodyText {
+    key: BodyViewerKey,
+    text: String,
 }
 
 pub struct LogPanel {

@@ -617,6 +617,55 @@ fn detail_body_viewer_resets_on_tab_change() {
 }
 
 #[test]
+fn rendering_body_tab_caches_formatted_body_text_by_key() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some(r#"{"request":true}"#.to_string());
+    req.res_body = Some(r#"{"response":true}"#.to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+
+    render_app(&mut app);
+
+    let request_key = BodyViewerKey::new(0, MainDisplayTab::RequestBody);
+    assert_eq!(
+        app.cached_body_text(request_key),
+        Some("{\n  \"request\": true\n}")
+    );
+
+    app.detail_panel.select_tab(MainDisplayTab::ResponseBody);
+    assert!(app.cached_body_text(request_key).is_none());
+
+    render_app(&mut app);
+
+    let response_key = BodyViewerKey::new(0, MainDisplayTab::ResponseBody);
+    assert_eq!(
+        app.cached_body_text(response_key),
+        Some("{\n  \"response\": true\n}")
+    );
+}
+
+#[test]
+fn entering_body_viewer_consumes_cached_body_text() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some(r#"{"request":true}"#.to_string());
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    render_app(&mut app);
+
+    let request_key = BodyViewerKey::new(0, MainDisplayTab::RequestBody);
+    assert!(app.cached_body_text(request_key).is_some());
+
+    app.handle_key_event(key(KeyCode::Enter));
+
+    assert!(app.detail_panel.body_viewer.is_active());
+    assert!(app.cached_body_text(request_key).is_none());
+}
+
+#[test]
 fn detail_enter_does_not_activate_body_viewer_without_selected_request() {
     let mut app = App::new(ui_settings(true));
     app.focus_panel(PanelFocus::Detail);

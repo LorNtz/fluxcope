@@ -139,11 +139,15 @@ impl App {
     }
 
     pub fn selected_request_leaf(&self) -> bool {
-        selected_request_sequence(self.request_list.state.selected()).is_some()
+        self.selected_request_sequence().is_some()
+    }
+
+    pub fn selected_request_sequence(&self) -> Option<u64> {
+        selected_request_sequence(self.request_list.state.selected())
     }
 
     pub fn selected_request(&self) -> Option<&CapturedData> {
-        selected_request_sequence(self.request_list.state.selected())
+        self.selected_request_sequence()
             .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))
     }
 
