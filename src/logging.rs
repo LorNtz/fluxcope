@@ -14,7 +14,6 @@ impl AppLogger {
     pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open("debug.log")
             .unwrap();
@@ -50,11 +49,12 @@ impl log::Log for AppLogger {
                 record.args()
             );
 
-            // Write to file
-            if let Ok(mut file) = self.file.lock() {
-                if let Err(e) = writeln!(file, "{}", log_msg) {
-                    eprintln!("Failed to write to log file: {}", e);
-                }
+            let file_write_result = match self.file.lock() {
+                Ok(mut file) => writeln!(file, "{}", log_msg),
+                Err(_) => Ok(()),
+            };
+            if let Err(e) = file_write_result {
+                eprintln!("Failed to write to log file: {}", e);
             }
 
             // Send to TUI

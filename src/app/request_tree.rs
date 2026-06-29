@@ -213,19 +213,16 @@ impl<'a> DeleteSelectionContext<'a> {
 
             if let Some(previous_sibling) =
                 previous_sibling.filter(|path| self.tree_after_delete.contains(path))
+                && let Some(visible_descendant) = self.deepest_visible_descendant(&previous_sibling)
             {
-                if let Some(visible_descendant) = self.deepest_visible_descendant(&previous_sibling)
-                {
-                    return visible_descendant;
-                }
+                return visible_descendant;
             }
 
             if let Some(next_sibling) =
                 next_sibling.filter(|path| self.tree_after_delete.contains(path))
+                && self.visible_paths.contains(&next_sibling)
             {
-                if self.visible_paths.contains(&next_sibling) {
-                    return next_sibling;
-                }
+                return next_sibling;
             }
         }
 

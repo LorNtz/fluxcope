@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{
-    App, PanelFocus, PopupFocus,
+    App, PanelFocus, PopupFocus, SettingsPopupAction,
     focus::{FocusDirection, focus_neighbor, focusable_panels},
 };
 
@@ -86,6 +86,10 @@ impl App {
                 self.toggle_log_panel();
                 true
             }
+            KeyCode::Char('m') => {
+                self.open_settings_popup();
+                true
+            }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 self.open_certificate_popup();
                 true
@@ -99,6 +103,14 @@ impl App {
             PopupFocus::Certificate => {
                 if is_plain_key(key) && key.code == KeyCode::Esc {
                     self.close_certificate_popup();
+                }
+            }
+            PopupFocus::Settings => {
+                let action = self.settings_popup.handle_key(key);
+                match action {
+                    SettingsPopupAction::None => {}
+                    SettingsPopupAction::Save(draft) => self.queue_settings_save(draft),
+                    SettingsPopupAction::Close => self.close_settings_popup(),
                 }
             }
         }
@@ -232,14 +244,6 @@ impl App {
         }
     }
 
-    fn ensure_focusable_panel(&mut self) {
-        if self.log_panel.visible {
-            self.focus_panel(PanelFocus::Log);
-        } else if self.focus.panel() == PanelFocus::Log {
-            self.focus_panel(PanelFocus::Detail);
-        }
-    }
-
     fn open_certificate_popup(&mut self) {
         self.certificate_popup.open();
         self.focus.open_popup(PopupFocus::Certificate);
@@ -247,8 +251,21 @@ impl App {
 
     fn close_certificate_popup(&mut self) {
         self.certificate_popup.close();
-        self.focus.close_popup();
-        self.ensure_focusable_panel();
+        self.close_popup_focus();
+    }
+
+    pub fn open_settings_popup(&mut self) {
+        self.settings_popup.open(self.settings.clone());
+        self.focus.open_popup(PopupFocus::Settings);
+    }
+
+    pub fn close_settings_popup(&mut self) {
+        self.settings_popup.close();
+        self.close_popup_focus();
+    }
+
+    fn queue_settings_save(&mut self, draft: crate::settings::AppSettings) {
+        self.pending_settings_save = Some(draft);
     }
 }
 

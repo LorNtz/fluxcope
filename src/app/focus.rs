@@ -11,6 +11,7 @@ pub enum PanelFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopupFocus {
     Certificate,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

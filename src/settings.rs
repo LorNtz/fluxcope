@@ -19,6 +19,9 @@ pub struct AppSettings {
     pub proxy: Option<ProxySettings>,
 }
 
+// Keep the top-level schema default explicit so new settings fields require
+// an intentional default choice.
+#[allow(clippy::derivable_impls)]
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -75,30 +78,16 @@ impl Default for RecordingSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct UiSettings {
     pub request_list: RequestListSettings,
 }
 
-impl Default for UiSettings {
-    fn default() -> Self {
-        Self {
-            request_list: RequestListSettings::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct RequestListSettings {
     pub auto_expand: bool,
-}
-
-impl Default for RequestListSettings {
-    fn default() -> Self {
-        Self { auto_expand: false }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -273,8 +262,13 @@ impl SettingsManager {
         &self.settings.recording
     }
 
+    #[cfg(test)]
     pub fn ui_settings(&self) -> &UiSettings {
         &self.settings.ui
+    }
+
+    pub fn settings(&self) -> &AppSettings {
+        &self.settings
     }
 
     pub fn proxy_settings(&self) -> Option<&ProxySettings> {
@@ -325,7 +319,7 @@ fn default_config_path() -> io::Result<PathBuf> {
 
 fn expand_home_path(path: &str) -> io::Result<PathBuf> {
     if path == "~" {
-        return Ok(home_dir()?);
+        return home_dir();
     }
 
     if let Some(rest) = path.strip_prefix("~/") {
@@ -589,6 +583,22 @@ mod tests {
         assert!(!saved.ui.request_list.auto_expand);
         assert!(saved.proxy.is_none());
         assert!(!fs::read_to_string(&path)?.contains("proxy:"));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn exposes_loaded_settings_snapshot() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, "server:\n  port: 9012\n")?;
+
+        let manager = SettingsManager::load_from_path(&path)?;
+
+        assert_eq!(9012, manager.settings().server.port);
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -898,7 +908,7 @@ proxy:
         let serde_yaml::Value::Mapping(mapping) = value else {
             return None;
         };
-        mapping.get(&serde_yaml::Value::String(key.to_string()))
+        mapping.get(key)
     }
 
     fn sequence_entry<'a>(

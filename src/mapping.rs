@@ -20,7 +20,6 @@ impl MappingStore {
         Arc::clone(&self.current.read())
     }
 
-    #[allow(dead_code)]
     pub fn replace(&self, engine: MappingEngine) {
         *self.current.write() = Arc::new(engine);
     }
@@ -32,21 +31,11 @@ impl Default for MappingStore {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MappingEngine {
     remote_rules: CompiledRules<RemoteTarget>,
     local_rules: CompiledRules<PathBuf>,
     diagnostics: Vec<MappingDiagnostic>,
-}
-
-impl Default for MappingEngine {
-    fn default() -> Self {
-        Self {
-            remote_rules: CompiledRules::default(),
-            local_rules: CompiledRules::default(),
-            diagnostics: Vec::new(),
-        }
-    }
 }
 
 impl MappingEngine {

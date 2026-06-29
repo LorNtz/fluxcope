@@ -5,7 +5,7 @@ use crate::{
     mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
     recording::RecordingState,
-    settings::SettingsManager,
+    settings::{AppSettings, SettingsManager},
     ui::RootView,
 };
 use crossterm::{
@@ -60,13 +60,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         proxy_port,
         certificate_store_dir,
         certificate_pem_filename,
-        mapping_store,
+        mapping_store.clone(),
         recording.clone(),
     );
 
     let tui = Tui::enter()?;
-    let app = App::with_recording(settings.ui_settings().clone(), recording);
-    AppRuntime::new(app, rx, tui, settings).run()
+    let app = App::with_settings(settings.settings().clone(), recording);
+    AppRuntime::new(app, rx, tui, settings, mapping_store).run()
 }
 
 fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
@@ -226,7 +226,8 @@ struct AppRuntime {
     ui: RootView,
     rx: mpsc::UnboundedReceiver<AppEvent>,
     tui: Tui,
-    _settings: SettingsManager,
+    settings: SettingsManager,
+    mapping_store: MappingStore,
 }
 
 impl AppRuntime {
@@ -235,13 +236,15 @@ impl AppRuntime {
         rx: mpsc::UnboundedReceiver<AppEvent>,
         tui: Tui,
         settings: SettingsManager,
+        mapping_store: MappingStore,
     ) -> Self {
         Self {
             app,
             ui: RootView::new(),
             rx,
             tui,
-            _settings: settings,
+            settings,
+            mapping_store,
         }
     }
 
@@ -254,6 +257,8 @@ impl AppRuntime {
             if self.handle_terminal_events()? {
                 return Ok(());
             }
+
+            self.handle_settings_save_request();
 
             // handle events one by one from the queue
             self.handle_app_events();
@@ -280,6 +285,36 @@ impl AppRuntime {
             self.app.handle_app_event(event);
         }
     }
+
+    fn handle_settings_save_request(&mut self) {
+        let Some(draft) = self.app.take_settings_save_request() else {
+            return;
+        };
+
+        match save_settings_draft(&mut self.settings, &self.mapping_store, draft) {
+            Ok(saved) => {
+                self.app.finish_settings_save(saved);
+                log::info!("Settings saved");
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.app.fail_settings_save(message);
+            }
+        }
+    }
+}
+
+fn save_settings_draft(
+    settings: &mut SettingsManager,
+    mapping_store: &MappingStore,
+    draft: AppSettings,
+) -> io::Result<AppSettings> {
+    settings.update(|current| {
+        *current = draft.clone();
+    })?;
+    let saved = settings.settings().clone();
+    mapping_store.replace(MappingEngine::compile(saved.proxy.as_ref()));
+    Ok(saved)
 }
 
 struct Tui {
@@ -311,5 +346,35 @@ impl Drop for Tui {
             LeaveAlternateScreen,
             DisableMouseCapture
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::AppSettings;
+    use std::fs;
+
+    #[test]
+    fn save_settings_draft_persists_and_replaces_mapping_engine() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "wirelens-runtime-settings-{}/config.yml",
+            uuid::Uuid::new_v4()
+        ));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut manager = SettingsManager::load_from_path(&path)?;
+        let store = MappingStore::default();
+        let mut draft = AppSettings::default();
+        draft.server.port = 9013;
+
+        let saved = save_settings_draft(&mut manager, &store, draft)?;
+
+        assert_eq!(9013, saved.server.port);
+        assert!(fs::read_to_string(&path)?.contains("9013"));
+
+        let _ = fs::remove_file(path);
+        Ok(())
     }
 }
