@@ -15,6 +15,7 @@ use crate::settings::UiSettings;
 use crate::{proxy_handler::CapturedData, recording::RecordingState, settings::AppSettings};
 use focus::FocusState;
 
+pub(crate) use body_viewer::BODY_TEXT_TAB_WIDTH;
 pub use body_viewer::BodyViewerKey;
 #[cfg(test)]
 pub(crate) use body_viewer::{format_request_body, format_response_body};

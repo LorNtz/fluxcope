@@ -19,6 +19,9 @@ use ratatui::layout::{Position, Rect};
 use super::{App, panels::MainDisplayTab};
 use crate::proxy_handler::CapturedData;
 
+pub(crate) const BODY_TEXT_TAB: &str = "    ";
+pub(crate) const BODY_TEXT_TAB_WIDTH: usize = BODY_TEXT_TAB.len();
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BodyViewerKey {
     sequence: u64,
@@ -718,7 +721,7 @@ impl App {
     }
 
     pub(crate) fn ensure_body_text_cached(&mut self, key: BodyViewerKey) -> bool {
-        if self.detail_panel.cached_body_text(key).is_some() {
+        if self.cached_body_text(key).is_some() {
             return true;
         }
 
@@ -743,6 +746,10 @@ impl App {
 
     pub(crate) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {
         self.detail_panel.cached_body_text(key)
+    }
+
+    pub(crate) fn cached_body_render_text(&self, key: BodyViewerKey) -> Option<&str> {
+        self.detail_panel.cached_body_render_text(key)
     }
 
     fn current_body_text(&mut self) -> Option<(BodyViewerKey, String)> {

@@ -2,7 +2,7 @@ use crate::settings::RequestListSettings;
 use ratatui::layout::Position;
 use tui_tree_widget::TreeState;
 
-use super::body_viewer::{BodyViewer, BodyViewerKey};
+use super::body_viewer::{BODY_TEXT_TAB, BodyViewer, BodyViewerKey};
 use super::request_tree::{RequestTreeEntry, origin_identifier};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,11 +167,18 @@ impl DetailPanel {
         self.cached_body_text
             .as_ref()
             .filter(|cached| cached.key == key)
-            .map(|cached| cached.text.as_str())
+            .map(|cached| cached.source_text.as_str())
+    }
+
+    pub(in crate::app) fn cached_body_render_text(&self, key: BodyViewerKey) -> Option<&str> {
+        self.cached_body_text
+            .as_ref()
+            .filter(|cached| cached.key == key)
+            .map(CachedBodyText::render_text)
     }
 
     pub(in crate::app) fn cache_body_text(&mut self, key: BodyViewerKey, text: String) {
-        self.cached_body_text = Some(CachedBodyText { key, text });
+        self.cached_body_text = Some(CachedBodyText::new(key, text));
     }
 
     pub(in crate::app) fn take_cached_body_text(&mut self, key: BodyViewerKey) -> Option<String> {
@@ -180,7 +187,9 @@ impl DetailPanel {
             .as_ref()
             .is_some_and(|cached| cached.key == key)
         {
-            self.cached_body_text.take().map(|cached| cached.text)
+            self.cached_body_text
+                .take()
+                .map(|cached| cached.source_text)
         } else {
             None
         }
@@ -189,7 +198,26 @@ impl DetailPanel {
 
 struct CachedBodyText {
     key: BodyViewerKey,
-    text: String,
+    source_text: String,
+    render_text: Option<String>,
+}
+
+impl CachedBodyText {
+    fn new(key: BodyViewerKey, source_text: String) -> Self {
+        // Literal tabs printed by Crossterm advance beyond Ratatui's tracked cell position.
+        let render_text = source_text
+            .contains('\t')
+            .then(|| source_text.replace('\t', BODY_TEXT_TAB));
+        Self {
+            key,
+            source_text,
+            render_text,
+        }
+    }
+
+    fn render_text(&self) -> &str {
+        self.render_text.as_deref().unwrap_or(&self.source_text)
+    }
 }
 
 pub struct LogPanel {

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::app::ProxyRow;
 use crate::app::{
-    ActionDialog, App, BodyViewerKey, FieldEditKind, MainDisplayTab,
+    ActionDialog, App, BODY_TEXT_TAB_WIDTH, BodyViewerKey, FieldEditKind, MainDisplayTab,
     PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus, PopupFocus, ProxyRuleTable, ProxyWidget,
     RULE_EDITOR_KEY_HINTS, RequestTreeEntry, RuleEditField, RuleEditorState, SelectTarget,
     SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsScrollRequest, SettingsSelectId,
@@ -496,6 +496,42 @@ mod tests {
         req.res_body = Some(raw_body.to_string());
 
         assert_eq!(format_response_body(&req), raw_body);
+    }
+
+    #[test]
+    fn mapped_response_body_expands_tabs_only_for_paragraph_rendering() {
+        let raw_body = "{\n\t\"route\": true\n}";
+        let mut req = captured(0, "https://a.com/api");
+        req.local_path = Some("/tmp/api.json".to_string());
+        req.res_body = Some(raw_body.to_string());
+        let mut app = App::new(ui_settings(true));
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::ResponseBody);
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\t'))
+        );
+        let key = BodyViewerKey::new(0, MainDisplayTab::ResponseBody);
+        assert_eq!(app.cached_body_text(key), Some(raw_body));
+        assert_eq!(
+            app.cached_body_render_text(key),
+            Some("{\n    \"route\": true\n}")
+        );
+        assert!(
+            find_buffer_text(&buffer, ui.right_panel.detail.area(), "\"route\": true").is_some()
+        );
+
+        assert!(app.enter_current_body_viewer());
+        assert_eq!(
+            app.detail_panel.body_viewer.editor_mut().unwrap().lines,
+            edtui::Lines::from(raw_body)
+        );
     }
 
     #[test]
@@ -2665,7 +2701,7 @@ impl View for DetailView {
             DetailContent::Body(body_key) => {
                 if app.ensure_body_text_cached(body_key) {
                     let total_lines: u16 = app
-                        .cached_body_text(body_key)
+                        .cached_body_render_text(body_key)
                         .map(|detail_text| {
                             detail_text_paragraph(detail_text, focused)
                                 .line_count(self.area().width)
@@ -2682,7 +2718,7 @@ impl View for DetailView {
                         .min(app.detail_panel.scroll.max_offset);
                     app.detail_panel.scroll.offset = offset;
 
-                    if let Some(detail_text) = app.cached_body_text(body_key) {
+                    if let Some(detail_text) = app.cached_body_render_text(body_key) {
                         frame.render_widget(
                             detail_text_paragraph(detail_text, focused).scroll((offset, 0)),
                             self.area(),
@@ -2754,7 +2790,7 @@ fn render_body_editor(frame: &mut Frame, app: &mut App, focused: bool, area: Rec
             EditorView::new(editor)
                 .theme(body_editor_theme(focused))
                 .wrap(true)
-                .tab_width(4),
+                .tab_width(BODY_TEXT_TAB_WIDTH),
             area,
         );
     }
