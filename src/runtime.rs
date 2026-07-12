@@ -23,20 +23,25 @@ use std::{
     convert::Infallible,
     error::Error,
     io,
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     time::Duration,
 };
 use tokio::sync::mpsc;
 
+fn proxy_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
+}
+
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let settings = SettingsManager::load()?;
     let proxy_port = settings.server_port();
+    let proxy_addr = proxy_bind_addr(proxy_port);
     let certificate_store_dir = settings.certificate_store_dir()?;
     let certificate_pem_filename = settings.certificate_pem_filename().to_string();
 
     // Check if port is already in use by another instance
-    if let Err(e) = std::net::TcpListener::bind(("127.0.0.1", proxy_port)) {
+    if let Err(e) = std::net::TcpListener::bind(proxy_addr) {
         return Err(format!(
             "Failed to bind to proxy port {}: {}. Is another instance running?",
             proxy_port, e
@@ -57,7 +62,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
     start_proxy(
         tx,
-        proxy_port,
+        proxy_addr,
         certificate_store_dir,
         certificate_pem_filename,
         mapping_store.clone(),
@@ -78,7 +83,7 @@ fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
 
 fn start_proxy(
     tx: mpsc::UnboundedSender<AppEvent>,
-    proxy_port: u16,
+    proxy_addr: SocketAddr,
     certificate_store_dir: PathBuf,
     certificate_pem_filename: String,
     mapping_store: MappingStore,
@@ -105,13 +110,13 @@ fn start_proxy(
     .unwrap();
 
     let proxy = ProxyBuilder::new()
-        .with_addr(SocketAddr::from(([127, 0, 0, 1], proxy_port)))
+        .with_addr(proxy_addr)
         .with_rustls_client()
         .with_ca(authority)
         .with_http_handler(LogHandler::new(tx, mapping_store, recording))
         .build();
 
-    log::info!("Proxy server listening on http://127.0.0.1:{proxy_port}");
+    log::info!("Proxy server listening on {proxy_addr}");
 
     tokio::spawn(async move {
         if let Err(error) = proxy
@@ -354,6 +359,14 @@ mod tests {
     use super::*;
     use crate::settings::AppSettings;
     use std::fs;
+
+    #[test]
+    fn proxy_bind_address_uses_ipv4_unspecified_address() {
+        assert_eq!(
+            SocketAddr::from(([0, 0, 0, 0], 8989)),
+            proxy_bind_addr(8989)
+        );
+    }
 
     #[test]
     fn save_settings_draft_persists_and_replaces_mapping_engine() -> io::Result<()> {
