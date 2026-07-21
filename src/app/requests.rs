@@ -10,14 +10,15 @@ use crate::capture::CapturedExchange;
 
 impl App {
     pub fn add_request(&mut self, req: CapturedExchange) {
-        let was_empty = self.requests.is_empty();
+        let was_empty = self.captures.is_empty();
         let tree_entry = RequestTreeEntry::from(&req);
-        let insert_pos = self
-            .requests
-            .partition_point(|existing| existing.sequence <= req.sequence);
         let uri = req.uri.clone();
-        self.requests.insert(insert_pos, req);
+        let evicted = self.captures.insert(req);
         log::info!("request received: {}", uri);
+
+        if !evicted.is_empty() {
+            self.repair_request_list_after_retention_eviction();
+        }
 
         if self.request_list.auto_expand {
             self.request_list.open_entry(&tree_entry);
@@ -118,7 +119,7 @@ impl App {
         mut should_open: impl FnMut(&[String]) -> bool,
     ) -> bool {
         let mut changed = false;
-        for req in &self.requests {
+        for req in self.captures.iter() {
             for path in RequestTreeEntry::from(req).branch_paths() {
                 if should_open(&path) {
                     changed |= self.request_list.state.open(path);
@@ -147,7 +148,7 @@ impl App {
 
     pub fn selected_request(&self) -> Option<&CapturedExchange> {
         self.selected_request_sequence()
-            .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))
+            .and_then(|sequence| self.captures.get(sequence))
     }
 
     /// Deletes the selected request leaf or every request under the selected branch.
@@ -161,15 +162,18 @@ impl App {
             return 0;
         }
 
-        let tree_before_delete = RequestPathTree::from_requests(&self.requests);
-        let len_before_deletion = self.requests.len();
-
-        // deletion
-        self.requests.retain(|req| {
-            let request_path = RequestTreeEntry::from(req).request_path();
-            !request_path.starts_with(&selected_path)
-        });
-        let removed_count = len_before_deletion - self.requests.len();
+        let tree_before_delete = RequestPathTree::from_requests(self.captures.iter());
+        let sequences = self
+            .captures
+            .iter()
+            .filter(|req| {
+                RequestTreeEntry::from(*req)
+                    .request_path()
+                    .starts_with(&selected_path)
+            })
+            .map(|req| req.sequence)
+            .collect::<Vec<_>>();
+        let removed_count = self.captures.remove_sequences(sequences);
 
         if removed_count > 0 {
             log::info!("deleted {removed_count} request(s) from request tree");
@@ -185,8 +189,7 @@ impl App {
     /// Replaces the request vector with a fresh allocation so the memory used by
     /// captured request/response bodies can be released promptly.
     pub fn clear_requests(&mut self) {
-        let removed_count = self.requests.len();
-        self.requests = Vec::new();
+        let removed_count = self.captures.clear();
         self.request_list.state = TreeState::default();
         self.detail_panel.reset_content_position();
         if removed_count > 0 {
@@ -210,7 +213,7 @@ impl App {
         deleted_path: &[String],
         tree_before_delete: &RequestPathTree,
     ) {
-        let tree_after_delete = RequestPathTree::from_requests(&self.requests);
+        let tree_after_delete = RequestPathTree::from_requests(self.captures.iter());
         let opened_paths_before_delete = self
             .request_list
             .state
@@ -240,5 +243,43 @@ impl App {
             }
         }
         self.request_list.state.select(path_to_select);
+    }
+
+    pub fn captures(&self) -> impl DoubleEndedIterator<Item = &CapturedExchange> {
+        self.captures.iter()
+    }
+
+    pub fn capture_count(&self) -> usize {
+        self.captures.len()
+    }
+
+    #[cfg(test)]
+    pub fn capture_retained_bytes(&self) -> usize {
+        self.captures.retained_bytes()
+    }
+
+    #[cfg(test)]
+    pub fn capture_at(&self, index: usize) -> Option<&CapturedExchange> {
+        self.captures.iter().nth(index)
+    }
+
+    fn repair_request_list_after_retention_eviction(&mut self) {
+        let tree = RequestPathTree::from_requests(self.captures.iter());
+        let opened = self
+            .request_list
+            .state
+            .opened()
+            .iter()
+            .filter(|path| tree.contains(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let visible = tree.visible_paths(&opened);
+        let selected = self.request_list.state.selected().to_vec();
+        if !tree.contains(&selected) {
+            self.request_list
+                .state
+                .select(visible.first().cloned().unwrap_or_default());
+            self.detail_panel.reset_content_position();
+        }
     }
 }

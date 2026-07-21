@@ -12,7 +12,7 @@ mod tests;
 #[cfg(test)]
 use crate::settings::UiSettings;
 use crate::{
-    capture::CapturedExchange,
+    capture::{CaptureRetentionPolicy, CaptureStore},
     logging::{LogRecord, LogRetentionPolicy},
     recording::RecordingState,
     settings::AppSettings,
@@ -39,7 +39,7 @@ pub(crate) use settings_popup::{
 };
 
 pub struct App {
-    pub requests: Vec<CapturedExchange>,
+    captures: CaptureStore,
     pub recording: RecordingState,
     focus: FocusState,
     pub request_list: RequestListPanel,
@@ -76,9 +76,23 @@ impl App {
         recording: RecordingState,
         log_retention: LogRetentionPolicy,
     ) -> Self {
+        Self::with_policies(
+            settings,
+            recording,
+            log_retention,
+            CaptureRetentionPolicy::default(),
+        )
+    }
+
+    fn with_policies(
+        settings: AppSettings,
+        recording: RecordingState,
+        log_retention: LogRetentionPolicy,
+        capture_retention: CaptureRetentionPolicy,
+    ) -> Self {
         let ui_settings = settings.ui.clone();
         Self {
-            requests: vec![],
+            captures: CaptureStore::new(capture_retention),
             recording,
             focus: FocusState::new(),
             request_list: RequestListPanel::new(ui_settings.request_list),

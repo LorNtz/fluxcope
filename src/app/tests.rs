@@ -753,8 +753,7 @@ fn requests_are_ordered_by_capture_sequence() {
     app.add_request(captured_with_sequence(0, "https://a.com/a"));
 
     let uris = app
-        .requests
-        .iter()
+        .captures()
         .map(|req| req.uri.as_str())
         .collect::<Vec<_>>();
 
@@ -1057,8 +1056,11 @@ fn delete_selected_requests_removes_leaf_request() {
 
     assert_eq!(app.delete_selected_requests(), 1);
 
-    assert_eq!(app.requests.len(), 1);
-    assert_eq!(app.requests[0].uri, "https://some.host.com/api/b");
+    assert_eq!(app.capture_count(), 1);
+    assert_eq!(
+        app.capture_at(0).map(|capture| capture.uri.as_str()),
+        Some("https://some.host.com/api/b")
+    );
     assert_eq!(
         app.request_list.state.selected(),
         [
@@ -1089,8 +1091,11 @@ fn delete_selected_requests_removes_subtree_requests() {
 
     assert_eq!(app.delete_selected_requests(), 2);
 
-    assert_eq!(app.requests.len(), 1);
-    assert_eq!(app.requests[0].uri, "https://some.host.com/api/v2/c");
+    assert_eq!(app.capture_count(), 1);
+    assert_eq!(
+        app.capture_at(0).map(|capture| capture.uri.as_str()),
+        Some("https://some.host.com/api/v2/c")
+    );
     assert_eq!(
         app.request_list.state.selected(),
         [origin.clone(), api.clone(), "segment:v2".to_string()]
@@ -1151,8 +1156,11 @@ fn delete_selected_requests_selects_next_root_when_first_branch_disappears() {
         app.request_list.state.selected(),
         tree_path(&["origin:https://b.com"])
     );
-    assert_eq!(app.requests.len(), 1);
-    assert_eq!(app.requests[0].uri, "https://b.com/api4");
+    assert_eq!(app.capture_count(), 1);
+    assert_eq!(
+        app.capture_at(0).map(|capture| capture.uri.as_str()),
+        Some("https://b.com/api4")
+    );
 }
 
 #[test]
@@ -1244,12 +1252,12 @@ fn clear_requests_drops_records_and_resets_tree_state() {
     app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
     app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
     app.detail_panel.scroll.offset = 1;
-    assert!(app.requests.capacity() > 0);
+    assert!(app.capture_retained_bytes() > 0);
 
     app.clear_requests();
 
-    assert!(app.requests.is_empty());
-    assert_eq!(app.requests.capacity(), 0);
+    assert_eq!(app.capture_count(), 0);
+    assert_eq!(app.capture_retained_bytes(), 0);
     assert!(app.request_list.state.selected().is_empty());
     assert!(app.request_list.state.opened().is_empty());
     assert_eq!(app.detail_panel.scroll.offset, 0);

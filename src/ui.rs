@@ -179,6 +179,10 @@ impl View for StatusView {
         let status = Line::from(vec![
             Span::styled(icon, style),
             Span::raw(format!(" {label}")),
+            Span::styled(
+                format!("  •  {} captures", app.capture_count()),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
 
         frame.render_widget(
@@ -328,7 +332,7 @@ impl RequestTreeNode {
 fn build_request_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
     let mut roots = Vec::new();
 
-    for req in &app.requests {
+    for req in app.captures() {
         insert_request_tree_entry(&mut roots, RequestTreeEntry::from(req));
     }
 

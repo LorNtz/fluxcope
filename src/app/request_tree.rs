@@ -16,7 +16,9 @@ impl RequestPathTree {
     ///
     /// This tree mirrors the UI tree's identifier structure without depending on UI
     /// rendering code, which lets app-state logic make selection decisions directly.
-    pub(in crate::app) fn from_requests(requests: &[CapturedExchange]) -> Self {
+    pub(in crate::app) fn from_requests<'a>(
+        requests: impl IntoIterator<Item = &'a CapturedExchange>,
+    ) -> Self {
         let mut tree = Self::default();
 
         for req in requests {
