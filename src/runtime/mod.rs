@@ -22,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     app::App,
     ca,
-    capture::CapturedExchange,
+    capture::{
+        BodyTaskTracker, CapturePublisher, CaptureRecord, CaptureRetentionPolicy,
+        start_decode_service,
+    },
     logging::AppLogger,
     mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
@@ -62,7 +65,13 @@ pub async fn run() -> Result<()> {
     }
     let mapping_store = MappingStore::new(mapping_engine);
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
-    let (capture_tx, capture_rx) = mpsc::channel::<CapturedExchange>(256);
+    let (capture_tx, capture_rx) =
+        mpsc::channel::<std::sync::Arc<CaptureRecord>>(policy.capture.queue_capacity);
+    let capture_publisher = CapturePublisher::new(capture_tx, policy.capture.clone());
+    let capture_metrics = capture_publisher.metrics();
+    let capture_dirty = capture_publisher.dirty_signal();
+    let body_tasks = BodyTaskTracker::new(shutdown.child_token());
+    let decode = start_decode_service(policy.decode.clone(), shutdown.child_token());
 
     let certificate_store_dir = settings
         .certificate_store_dir()
@@ -97,15 +106,24 @@ pub async fn run() -> Result<()> {
     let proxy_task = start_proxy(
         proxy_addr,
         ca,
-        capture_tx,
+        capture_publisher,
+        body_tasks.clone(),
         mapping_store.clone(),
         recording.clone(),
         shutdown.child_token(),
     )?;
 
     let tui = Tui::enter().context("failed to initialize terminal UI")?;
-    let mut app =
-        App::with_settings_and_log_retention(settings.settings().clone(), recording, log_retention);
+    let mut app = App::with_runtime_policies(
+        settings.settings().clone(),
+        recording,
+        log_retention,
+        CaptureRetentionPolicy {
+            max_records: policy.capture.retained_records,
+            max_bytes: policy.capture.total_retained_bytes,
+        },
+    );
+    app.set_decode_client(decode.client);
     if let Some(service) = certificate_download.as_ref() {
         app.set_certificate_download_url(service.url.clone());
     }
@@ -116,6 +134,11 @@ pub async fn run() -> Result<()> {
         services.track_result(ServiceKind::CertificateDownload, service.task);
     }
     services.track_infallible(ServiceKind::Logger, logging.task);
+    services.track_result(
+        ServiceKind::BodyPumps,
+        tokio::spawn(body_tasks.wait_for_shutdown(policy.render.shutdown_grace)),
+    );
+    services.track_result(ServiceKind::Decoder, decode.task);
 
     AppRuntime::new(
         app,
@@ -123,6 +146,10 @@ pub async fn run() -> Result<()> {
         logging.records,
         logging.statuses,
         logging.metrics,
+        capture_dirty,
+        capture_metrics,
+        decode.results,
+        decode.metrics,
         tui,
         settings,
         mapping_store,
@@ -145,7 +172,8 @@ fn verify_proxy_port_available(proxy_addr: SocketAddr) -> Result<()> {
 fn start_proxy(
     proxy_addr: SocketAddr,
     ca: ca::CaData,
-    capture_tx: mpsc::Sender<CapturedExchange>,
+    capture_publisher: CapturePublisher,
+    body_tasks: BodyTaskTracker,
     mapping_store: MappingStore,
     recording: RecordingState,
     shutdown: CancellationToken,
@@ -161,7 +189,12 @@ fn start_proxy(
         .with_addr(proxy_addr)
         .with_rustls_client()
         .with_ca(authority)
-        .with_http_handler(LogHandler::new(capture_tx, mapping_store, recording))
+        .with_http_handler(LogHandler::new(
+            capture_publisher,
+            body_tasks,
+            mapping_store,
+            recording,
+        ))
         .build();
 
     log::info!("Proxy server listening on {proxy_addr}");
@@ -277,7 +310,10 @@ fn save_settings_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     #[test]
     fn proxy_bind_address_uses_ipv4_unspecified_address() {
@@ -289,9 +325,11 @@ mod tests {
 
     #[test]
     fn save_settings_draft_persists_and_replaces_mapping_engine() -> io::Result<()> {
+        static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "wirelens-runtime-settings-{}/config.yml",
-            uuid::Uuid::new_v4()
+            "wirelens-runtime-settings-{}-{unique}/config.yml",
+            std::process::id()
         ));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;

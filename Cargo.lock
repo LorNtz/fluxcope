@@ -2692,6 +2692,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -3367,13 +3368,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "tui-scrollview",
  "tui-textarea",
  "tui-tree-widget",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
  "url",
- "uuid",
  "zstd",
 ]
 

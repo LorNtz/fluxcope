@@ -7,6 +7,8 @@ pub(super) enum ServiceKind {
     Proxy,
     CertificateDownload,
     Logger,
+    BodyPumps,
+    Decoder,
 }
 
 #[derive(Debug)]

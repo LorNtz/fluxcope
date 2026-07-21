@@ -1,11 +1,14 @@
-use crate::select::{SelectCommit, SelectItem, SelectItemRole, SelectOutcome, SelectState};
 use crate::settings::{
     AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings, ProxySettings,
 };
+use crate::{
+    mapping::validate_proxy_settings,
+    select::{SelectCommit, SelectItem, SelectItemRole, SelectOutcome, SelectState},
+};
 use crossterm::event::{KeyCode, KeyEvent};
-use std::collections::HashSet;
 use tui_scrollview::ScrollViewState;
-use url::Url;
+
+use super::settings_draft::SettingsDraft;
 
 pub(crate) const PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS: usize = 6;
 
@@ -160,6 +163,73 @@ impl ProxyRuleTable {
         match self {
             Self::Remote => "Edit Map Remote Rule",
             Self::Local => "Edit Map Local Rule",
+        }
+    }
+}
+
+enum EditableRulesMut<'a> {
+    Remote(&'a mut Vec<ProxyMapRemoteRule>),
+    Local(&'a mut Vec<ProxyMapLocalRule>),
+}
+
+impl EditableRulesMut<'_> {
+    fn insert_default(&mut self, index: usize) {
+        match self {
+            Self::Remote(rules) => rules.insert(
+                index.min(rules.len()),
+                ProxyMapRemoteRule {
+                    from: "https://example.com".to_string(),
+                    to: "http://localhost:3000".to_string(),
+                    enable: true,
+                },
+            ),
+            Self::Local(rules) => rules.insert(
+                index.min(rules.len()),
+                ProxyMapLocalRule {
+                    from: "https://example.com".to_string(),
+                    to: "~/mock-response.json".to_string(),
+                    enable: true,
+                },
+            ),
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        match self {
+            Self::Remote(rules) if index < rules.len() => {
+                rules.remove(index);
+            }
+            Self::Local(rules) if index < rules.len() => {
+                rules.remove(index);
+            }
+            Self::Remote(_) | Self::Local(_) => {}
+        }
+    }
+
+    fn swap(&mut self, first: usize, second: usize) {
+        match self {
+            Self::Remote(rules) if first < rules.len() && second < rules.len() => {
+                rules.swap(first, second);
+            }
+            Self::Local(rules) if first < rules.len() && second < rules.len() => {
+                rules.swap(first, second);
+            }
+            Self::Remote(_) | Self::Local(_) => {}
+        }
+    }
+
+    fn toggle(&mut self, index: usize) {
+        match self {
+            Self::Remote(rules) => {
+                if let Some(rule) = rules.get_mut(index) {
+                    rule.enable = !rule.enable;
+                }
+            }
+            Self::Local(rules) => {
+                if let Some(rule) = rules.get_mut(index) {
+                    rule.enable = !rule.enable;
+                }
+            }
         }
     }
 }
@@ -583,11 +653,8 @@ pub struct SettingsPopup {
     pub topic: SettingsTopic,
     pub selected_row: usize,
     pub scroll: ScrollViewState,
-    original: AppSettings,
-    draft: AppSettings,
-    dirty: bool,
+    draft: SettingsDraft,
     mode: EditMode,
-    error: Option<String>,
     field_hint: Option<FieldEditHint>,
     scroll_request: Option<SettingsScrollRequest>,
     remote_rule_table: SettingsTableState,
@@ -603,11 +670,8 @@ impl SettingsPopup {
             topic: SettingsTopic::Server,
             selected_row: 0,
             scroll: ScrollViewState::default(),
-            original: settings.clone(),
-            draft: settings,
-            dirty: false,
+            draft: SettingsDraft::new(settings),
             mode: EditMode::Browse,
-            error: None,
             field_hint: None,
             scroll_request: None,
             remote_rule_table: SettingsTableState::default(),
@@ -621,11 +685,8 @@ impl SettingsPopup {
         self.topic = SettingsTopic::Server;
         self.selected_row = 0;
         self.scroll = ScrollViewState::default();
-        self.original = settings.clone();
-        self.draft = settings;
-        self.dirty = false;
+        self.draft.replace(settings);
         self.mode = EditMode::Browse;
-        self.error = None;
         self.field_hint = None;
         self.scroll_request = None;
         self.reset_rule_table_scrolls();
@@ -633,11 +694,8 @@ impl SettingsPopup {
 
     pub fn close(&mut self) {
         self.visible = false;
-        self.original = AppSettings::default();
-        self.draft = AppSettings::default();
-        self.dirty = false;
+        self.draft.reset();
         self.mode = EditMode::Browse;
-        self.error = None;
         self.field_hint = None;
         self.scroll_request = None;
         self.reset_rule_table_scrolls();
@@ -648,7 +706,7 @@ impl SettingsPopup {
     }
 
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.draft.error()
     }
 
     pub(crate) fn field_hint(&self, kind: FieldEditKind) -> Option<&str> {
@@ -659,11 +717,7 @@ impl SettingsPopup {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    fn refresh_dirty(&mut self) {
-        self.dirty = self.draft != self.original;
+        self.draft.is_dirty()
     }
 
     pub fn is_confirming_unsaved(&self) -> bool {
@@ -695,7 +749,7 @@ impl SettingsPopup {
 
     pub fn mark_save_failed(&mut self, message: String) {
         self.mode = EditMode::Browse;
-        self.error = Some(message);
+        self.draft.set_error(message);
         self.visible = true;
     }
 
@@ -977,10 +1031,10 @@ impl SettingsPopup {
 
     fn save_action(&mut self) -> SettingsPopupAction {
         match self.validate() {
-            Ok(()) => SettingsPopupAction::Save(self.draft.clone()),
+            Ok(()) => SettingsPopupAction::Save(self.draft.snapshot()),
             Err(error) => {
                 self.mode = EditMode::Browse;
-                self.error = Some(error);
+                self.draft.set_error(error);
                 SettingsPopupAction::None
             }
         }
@@ -1026,7 +1080,7 @@ impl SettingsPopup {
         self.scroll_request = None;
         self.reset_rule_table_scrolls();
         self.mode = EditMode::Browse;
-        self.error = None;
+        self.draft.clear_error();
         self.field_hint = None;
         self.clamp_selected_row();
     }
@@ -1311,28 +1365,28 @@ impl SettingsPopup {
             FieldEditKind::ServerPort => match value.parse::<u16>() {
                 Ok(port) if port > 0 => {
                     self.draft.server.port = port;
-                    self.error = None;
+                    self.draft.clear_error();
                     self.clear_field_hint(kind);
                 }
                 _ => {
-                    self.error = Some("server.port must be between 1 and 65535".to_string());
+                    self.draft
+                        .set_error("server.port must be between 1 and 65535");
                 }
             },
             FieldEditKind::CertificateStoreDir => {
                 self.draft.certificate.store_dir = value;
-                self.error = None;
+                self.draft.clear_error();
                 self.clear_field_hint(kind);
             }
             FieldEditKind::CertificatePemFilename => {
                 self.draft.certificate.pem_filename = value;
-                self.error = None;
+                self.draft.clear_error();
                 self.clear_field_hint(kind);
             }
             FieldEditKind::ProxyPresetName => {
                 return self.apply_proxy_preset_name(value);
             }
         }
-        self.refresh_dirty();
         FieldApplyOutcome::CloseEditor
     }
 
@@ -1425,7 +1479,7 @@ impl SettingsPopup {
                 SettingsSelectId::ProxyPreset(_),
                 SelectItemRole::Action,
             ) => {
-                self.error = None;
+                self.draft.clear_error();
                 SelectCommitEffect::KeepOpen
             }
         }
@@ -1452,9 +1506,8 @@ impl SettingsPopup {
             && let Some(name) = proxy.presets.get(index).map(|preset| preset.name.clone())
         {
             proxy.active_preset = Some(name);
-            self.error = None;
+            self.draft.clear_error();
             self.field_hint = None;
-            self.refresh_dirty();
             self.reset_rule_table_scrolls();
             self.clamp_selected_row();
         }
@@ -1593,7 +1646,7 @@ impl SettingsPopup {
                 {
                     rule.from = from;
                     rule.to = to;
-                    self.error = None;
+                    self.draft.clear_error();
                 }
             }
             ProxyRuleTable::Local => {
@@ -1603,11 +1656,10 @@ impl SettingsPopup {
                 {
                     rule.from = from;
                     rule.to = to;
-                    self.error = None;
+                    self.draft.clear_error();
                 }
             }
         }
-        self.refresh_dirty();
     }
 
     fn toggle_selected_checkbox(&mut self) {
@@ -1616,36 +1668,31 @@ impl SettingsPopup {
             (SettingsTopic::Recording, 0) => {
                 self.draft.recording.start_record_on_launch =
                     !self.draft.recording.start_record_on_launch;
-                self.refresh_dirty();
             }
             (SettingsTopic::Interface, 0) => {
                 self.draft.ui.request_list.auto_expand = !self.draft.ui.request_list.auto_expand;
-                self.refresh_dirty();
             }
             (SettingsTopic::Proxy, _) => match self.selected_proxy_widget() {
                 Some(ProxyWidget::MappingEnabled) => {
                     if let Some(proxy) = self.draft.proxy.as_mut() {
                         proxy.enable = !proxy.enable;
-                        self.refresh_dirty();
                     }
                 }
                 Some(ProxyWidget::MapRemoteEnabled) => {
                     if let Some(preset) = self.active_preset_mut() {
                         preset.map_remote.enable = !preset.map_remote.enable;
-                        self.refresh_dirty();
                     }
                 }
                 Some(ProxyWidget::MapLocalEnabled) => {
                     if let Some(preset) = self.active_preset_mut() {
                         preset.map_local.enable = !preset.map_local.enable;
-                        self.refresh_dirty();
                     }
                 }
                 _ => {
                     if let Some(index) = self.selected_remote_rule_index() {
-                        self.toggle_selected_remote_rule(index);
+                        self.toggle_rule(ProxyRuleTable::Remote, index);
                     } else if let Some(index) = self.selected_local_rule_index() {
-                        self.toggle_selected_local_rule(index);
+                        self.toggle_rule(ProxyRuleTable::Local, index);
                     }
                 }
             },
@@ -1691,9 +1738,9 @@ impl SettingsPopup {
         self.clamp_selected_row();
 
         if let Some(index) = self.selected_remote_rule_index() {
-            self.delete_remote_rule(index);
+            self.delete_rule(ProxyRuleTable::Remote, index);
         } else if let Some(index) = self.selected_local_rule_index() {
-            self.delete_local_rule(index);
+            self.delete_rule(ProxyRuleTable::Local, index);
         }
     }
 
@@ -1702,42 +1749,40 @@ impl SettingsPopup {
         let inserted = index
             .map_or(current_count, |index| index.saturating_add(1))
             .min(current_count);
-        match table {
-            ProxyRuleTable::Remote => self.add_remote_rule_after(index),
-            ProxyRuleTable::Local => self.add_local_rule_after(index),
+        if let Some(mut rules) = self.editable_rules_mut(table) {
+            rules.insert_default(inserted);
         }
         self.clamp_rule_table_scroll(table);
         inserted
     }
 
     fn delete_rule(&mut self, table: ProxyRuleTable, index: usize) {
-        match table {
-            ProxyRuleTable::Remote => self.delete_remote_rule(index),
-            ProxyRuleTable::Local => self.delete_local_rule(index),
+        if let Some(mut rules) = self.editable_rules_mut(table) {
+            rules.remove(index);
         }
+        self.clamp_rule_table_scroll(table);
         self.select_rule(table, index);
     }
 
     fn move_rule_up(&mut self, table: ProxyRuleTable, index: usize) {
-        match table {
-            ProxyRuleTable::Remote => self.move_remote_rule_up(index),
-            ProxyRuleTable::Local => self.move_local_rule_up(index),
+        if index > 0
+            && let Some(mut rules) = self.editable_rules_mut(table)
+        {
+            rules.swap(index - 1, index);
         }
         self.select_rule(table, index.saturating_sub(1));
     }
 
     fn move_rule_down(&mut self, table: ProxyRuleTable, index: usize) {
-        match table {
-            ProxyRuleTable::Remote => self.move_remote_rule_down(index),
-            ProxyRuleTable::Local => self.move_local_rule_down(index),
+        if let Some(mut rules) = self.editable_rules_mut(table) {
+            rules.swap(index, index.saturating_add(1));
         }
         self.select_rule(table, index.saturating_add(1));
     }
 
     fn toggle_rule(&mut self, table: ProxyRuleTable, index: usize) {
-        match table {
-            ProxyRuleTable::Remote => self.toggle_selected_remote_rule(index),
-            ProxyRuleTable::Local => self.toggle_selected_local_rule(index),
+        if let Some(mut rules) = self.editable_rules_mut(table) {
+            rules.toggle(index);
         }
     }
 
@@ -1748,9 +1793,9 @@ impl SettingsPopup {
         self.clamp_selected_row();
 
         if let Some(index) = self.selected_remote_rule_index() {
-            self.move_remote_rule_up(index);
+            self.move_rule_up(ProxyRuleTable::Remote, index);
         } else if let Some(index) = self.selected_local_rule_index() {
-            self.move_local_rule_up(index);
+            self.move_rule_up(ProxyRuleTable::Local, index);
         }
     }
 
@@ -1761,9 +1806,9 @@ impl SettingsPopup {
         self.clamp_selected_row();
 
         if let Some(index) = self.selected_remote_rule_index() {
-            self.move_remote_rule_down(index);
+            self.move_rule_down(ProxyRuleTable::Remote, index);
         } else if let Some(index) = self.selected_local_rule_index() {
-            self.move_local_rule_down(index);
+            self.move_rule_down(ProxyRuleTable::Local, index);
         }
     }
 
@@ -1870,6 +1915,14 @@ impl SettingsPopup {
         self.draft.proxy.as_mut()?.presets.get_mut(index)
     }
 
+    fn editable_rules_mut(&mut self, table: ProxyRuleTable) -> Option<EditableRulesMut<'_>> {
+        let preset = self.active_preset_mut()?;
+        Some(match table {
+            ProxyRuleTable::Remote => EditableRulesMut::Remote(&mut preset.map_remote.rules),
+            ProxyRuleTable::Local => EditableRulesMut::Local(&mut preset.map_local.rules),
+        })
+    }
+
     fn selected_proxy_widget(&self) -> Option<ProxyWidget> {
         ProxyWidget::from_row(self.visible_proxy_widgets(), self.selected_row)
     }
@@ -1910,9 +1963,8 @@ impl SettingsPopup {
             if proxy.active_preset.as_deref() == Some(old_name.as_str()) {
                 proxy.active_preset = Some(preset.name.clone());
             }
-            self.error = None;
+            self.draft.clear_error();
             self.clear_field_hint(FieldEditKind::ProxyPresetName);
-            self.refresh_dirty();
             self.clamp_selected_row();
             return FieldApplyOutcome::CloseEditor;
         }
@@ -1938,116 +1990,19 @@ impl SettingsPopup {
         }
     }
 
-    pub fn toggle_selected_remote_rule(&mut self, index: usize) {
-        if let Some(rule) = self
-            .active_preset_mut()
-            .and_then(|preset| preset.map_remote.rules.get_mut(index))
-        {
-            rule.enable = !rule.enable;
-        }
-        self.refresh_dirty();
-    }
-
+    #[cfg(test)]
     pub fn add_remote_rule_after(&mut self, index: Option<usize>) {
-        if let Some(preset) = self.active_preset_mut() {
-            let insert_at = index.map_or(preset.map_remote.rules.len(), |index| index + 1);
-            preset.map_remote.rules.insert(
-                insert_at.min(preset.map_remote.rules.len()),
-                ProxyMapRemoteRule {
-                    from: "https://example.com".to_string(),
-                    to: "http://localhost:3000".to_string(),
-                    enable: true,
-                },
-            );
-            self.refresh_dirty();
-        }
+        self.add_rule_after(ProxyRuleTable::Remote, index);
     }
 
+    #[cfg(test)]
     pub fn delete_remote_rule(&mut self, index: usize) {
-        if let Some(preset) = self.active_preset_mut()
-            && index < preset.map_remote.rules.len()
-        {
-            preset.map_remote.rules.remove(index);
-        }
-        self.clamp_rule_table_scroll(ProxyRuleTable::Remote);
-        self.refresh_dirty();
+        self.delete_rule(ProxyRuleTable::Remote, index);
     }
 
-    pub fn move_remote_rule_up(&mut self, index: usize) {
-        if index == 0 {
-            return;
-        }
-        if let Some(preset) = self.active_preset_mut()
-            && index < preset.map_remote.rules.len()
-        {
-            preset.map_remote.rules.swap(index - 1, index);
-        }
-        self.refresh_dirty();
-    }
-
+    #[cfg(test)]
     pub fn move_remote_rule_down(&mut self, index: usize) {
-        if let Some(preset) = self.active_preset_mut()
-            && index + 1 < preset.map_remote.rules.len()
-        {
-            preset.map_remote.rules.swap(index, index + 1);
-        }
-        self.refresh_dirty();
-    }
-
-    pub fn toggle_selected_local_rule(&mut self, index: usize) {
-        if let Some(rule) = self
-            .active_preset_mut()
-            .and_then(|preset| preset.map_local.rules.get_mut(index))
-        {
-            rule.enable = !rule.enable;
-        }
-        self.refresh_dirty();
-    }
-
-    pub fn add_local_rule_after(&mut self, index: Option<usize>) {
-        if let Some(preset) = self.active_preset_mut() {
-            let insert_at = index.map_or(preset.map_local.rules.len(), |index| index + 1);
-            preset.map_local.rules.insert(
-                insert_at.min(preset.map_local.rules.len()),
-                ProxyMapLocalRule {
-                    from: "https://example.com".to_string(),
-                    to: "~/mock-response.json".to_string(),
-                    enable: true,
-                },
-            );
-            self.refresh_dirty();
-        }
-    }
-
-    pub fn delete_local_rule(&mut self, index: usize) {
-        if let Some(preset) = self.active_preset_mut()
-            && index < preset.map_local.rules.len()
-        {
-            preset.map_local.rules.remove(index);
-        }
-        self.clamp_rule_table_scroll(ProxyRuleTable::Local);
-        self.refresh_dirty();
-    }
-
-    pub fn move_local_rule_up(&mut self, index: usize) {
-        if index == 0 {
-            return;
-        }
-        if let Some(preset) = self.active_preset_mut()
-            && index < preset.map_local.rules.len()
-        {
-            preset.map_local.rules.swap(index - 1, index);
-        }
-        self.refresh_dirty();
-    }
-
-    pub fn move_local_rule_down(&mut self, index: usize) {
-        if let Some(preset) = self.active_preset_mut()
-            && index + 1 < preset.map_local.rules.len()
-        {
-            preset.map_local.rules.swap(index, index + 1);
-        }
-        self.refresh_dirty();
+        self.move_rule_down(ProxyRuleTable::Remote, index);
     }
 
     pub fn row_count(&self) -> usize {
@@ -2062,7 +2017,6 @@ impl SettingsPopup {
 
     #[cfg(test)]
     pub(crate) fn draft_mut_for_tests(&mut self) -> &mut AppSettings {
-        self.dirty = true;
         &mut self.draft
     }
 
@@ -2189,59 +2143,8 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
 }
 
 fn validate_proxy(proxy: &ProxySettings) -> Result<(), String> {
-    let mut names = HashSet::new();
-    for preset in &proxy.presets {
-        if preset.name.trim().is_empty() {
-            return Err("proxy preset names cannot be empty".to_string());
-        }
-        if !names.insert(preset.name.as_str()) {
-            return Err(format!("duplicate proxy preset name: {}", preset.name));
-        }
-    }
-
-    if let Some(active) = &proxy.active_preset
-        && !proxy.presets.iter().any(|preset| preset.name == *active)
-    {
-        return Err(format!("active preset does not exist: {active}"));
-    }
-
-    for preset in &proxy.presets {
-        for rule in &preset.map_remote.rules {
-            validate_mapping_url(&rule.from, "map_remote.from")?;
-            validate_mapping_url(&rule.to, "map_remote.to")?;
-        }
-        for rule in &preset.map_local.rules {
-            validate_mapping_url(&rule.from, "map_local.from")?;
-            if rule.to.trim().is_empty() {
-                return Err("map_local.to cannot be empty".to_string());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_mapping_url(value: &str, label: &str) -> Result<(), String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(format!("{label} cannot be empty"));
-    }
-
-    let url = Url::parse(value).map_err(|error| format!("{label} must be a URL: {error}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("{label} scheme must be http or https"));
-    }
-    if !url.has_host() {
-        return Err(format!("{label} must include a host"));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(format!("{label} userinfo is not supported"));
-    }
-    if url.query().is_some() {
-        return Err(format!("{label} query is not supported"));
-    }
-    if url.fragment().is_some() {
-        return Err(format!("{label} fragment is not supported"));
-    }
-    Ok(())
+    validate_proxy_settings(proxy)
+        .into_iter()
+        .next()
+        .map_or(Ok(()), |diagnostic| Err(diagnostic.message))
 }

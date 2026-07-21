@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    capture::{CaptureSequence, CapturedExchange},
+    capture::{
+        BodySide, CapturePolicy, CapturePublisher, CaptureSequence, CapturedExchange,
+        RequestCaptureInput,
+    },
     recording::RecordingState,
     settings::{RequestListSettings, UiSettings},
     ui::RootView,
@@ -8,6 +11,7 @@ use crate::{
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use edtui::{EditorMode, Index2, clipboard::ClipboardTrait};
 use http::Method;
+use hyper::HeaderMap;
 use ratatui::{Terminal, backend::TestBackend};
 use std::{cell::RefCell, rc::Rc};
 
@@ -650,6 +654,41 @@ fn rendering_body_tab_caches_formatted_body_text_by_key() {
     );
 }
 
+#[tokio::test]
+async fn selected_streaming_body_progress_refreshes_without_per_chunk_render_events() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let publisher = CapturePublisher::new(tx, CapturePolicy::default());
+    let headers = HeaderMap::new();
+    let handle = publisher
+        .try_start(RequestCaptureInput {
+            method: Method::POST,
+            original_uri: "https://some.host.com/api",
+            effective_uri: "https://some.host.com/api",
+            local_path: None,
+            headers: &headers,
+        })
+        .expect("streaming capture should be admitted");
+    let record = rx.recv().await.expect("capture should be published");
+    let mut app = App::new(ui_settings(true));
+    app.add_capture(record);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    let key = app.current_body_viewer_key().expect("body key");
+    assert!(app.ensure_body_text_cached(key));
+    assert_eq!(
+        app.cached_body_text(key),
+        Some("(Body streaming… 0 bytes observed)")
+    );
+
+    handle.append(BodySide::Request, b"abc");
+
+    assert!(app.refresh_selected_live_body());
+    assert_eq!(
+        app.cached_body_text(key),
+        Some("(Body streaming… 3 bytes observed)")
+    );
+    assert!(!app.refresh_selected_live_body());
+}
+
 #[test]
 fn entering_body_viewer_consumes_cached_body_text() {
     let mut app = App::new(ui_settings(true));
@@ -754,7 +793,7 @@ fn requests_are_ordered_by_capture_sequence() {
 
     let uris = app
         .captures()
-        .map(|req| req.uri.as_str())
+        .map(|req| req.request.original_uri.clone())
         .collect::<Vec<_>>();
 
     assert_eq!(uris, ["https://a.com/a", "https://a.com/b"]);
@@ -765,8 +804,9 @@ fn requests_are_ordered_by_capture_sequence() {
     ]);
 
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://a.com/b")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://a.com/b".to_string())
     );
 }
 
@@ -807,8 +847,9 @@ fn request_list_auto_expand_opens_new_request_branches() {
         "segment:v1".to_string()
     ]));
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://some.host.com/api/v1/getUserInfo?a=1")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://some.host.com/api/v1/getUserInfo?a=1".to_string())
     );
 }
 
@@ -889,8 +930,9 @@ fn request_list_enter_on_selected_request_focuses_detail_panel() {
 
     assert!(app.is_panel_focused(PanelFocus::Detail));
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://some.host.com/api/v1/getUserInfo")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://some.host.com/api/v1/getUserInfo".to_string())
     );
 }
 
@@ -1058,8 +1100,9 @@ fn delete_selected_requests_removes_leaf_request() {
 
     assert_eq!(app.capture_count(), 1);
     assert_eq!(
-        app.capture_at(0).map(|capture| capture.uri.as_str()),
-        Some("https://some.host.com/api/b")
+        app.capture_at(0)
+            .map(|capture| capture.request.original_uri.clone()),
+        Some("https://some.host.com/api/b".to_string())
     );
     assert_eq!(
         app.request_list.state.selected(),
@@ -1070,8 +1113,9 @@ fn delete_selected_requests_removes_leaf_request() {
         ]
     );
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://some.host.com/api/b")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://some.host.com/api/b".to_string())
     );
 }
 
@@ -1093,8 +1137,9 @@ fn delete_selected_requests_removes_subtree_requests() {
 
     assert_eq!(app.capture_count(), 1);
     assert_eq!(
-        app.capture_at(0).map(|capture| capture.uri.as_str()),
-        Some("https://some.host.com/api/v2/c")
+        app.capture_at(0)
+            .map(|capture| capture.request.original_uri.clone()),
+        Some("https://some.host.com/api/v2/c".to_string())
     );
     assert_eq!(
         app.request_list.state.selected(),
@@ -1134,8 +1179,9 @@ fn delete_selected_requests_selects_previous_leaf_sibling() {
         tree_path(&["origin:https://some.host.com", "segment:api", "request:0"])
     );
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://some.host.com/api/a")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://some.host.com/api/a".to_string())
     );
 }
 
@@ -1158,8 +1204,9 @@ fn delete_selected_requests_selects_next_root_when_first_branch_disappears() {
     );
     assert_eq!(app.capture_count(), 1);
     assert_eq!(
-        app.capture_at(0).map(|capture| capture.uri.as_str()),
-        Some("https://b.com/api4")
+        app.capture_at(0)
+            .map(|capture| capture.request.original_uri.clone()),
+        Some("https://b.com/api4".to_string())
     );
 }
 
@@ -1187,8 +1234,9 @@ fn delete_selected_requests_selects_deepest_visible_node_in_previous_root() {
         ])
     );
     assert_eq!(
-        app.selected_request().map(|req| req.uri.as_str()),
-        Some("https://a.com/some/path/api3")
+        app.selected_request()
+            .map(|req| req.request.original_uri.clone()),
+        Some("https://a.com/some/path/api3".to_string())
     );
 }
 

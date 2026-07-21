@@ -17,7 +17,12 @@ use edtui::{
 use ratatui::layout::{Position, Rect};
 
 use super::{App, panels::MainDisplayTab};
-use crate::capture::{CaptureSequence, CapturedExchange};
+#[cfg(test)]
+use crate::capture::CapturedExchange;
+use crate::capture::{
+    BodySide, BodyStreamState, CaptureRecord, CaptureSequence, DecodeDisplayMode, DecodeKey,
+    DecodeResult,
+};
 
 pub(crate) const BODY_TEXT_TAB: &str = "    ";
 pub(crate) const BODY_TEXT_TAB_WIDTH: usize = BODY_TEXT_TAB.len();
@@ -26,15 +31,37 @@ pub(crate) const BODY_TEXT_TAB_WIDTH: usize = BODY_TEXT_TAB.len();
 pub struct BodyViewerKey {
     sequence: CaptureSequence,
     tab: MainDisplayTab,
+    revision: u64,
 }
 
 impl BodyViewerKey {
+    #[cfg(test)]
     pub fn new(sequence: CaptureSequence, tab: MainDisplayTab) -> Self {
-        Self { sequence, tab }
+        Self {
+            sequence,
+            tab,
+            revision: 0,
+        }
+    }
+
+    pub fn with_revision(sequence: CaptureSequence, tab: MainDisplayTab, revision: u64) -> Self {
+        Self {
+            sequence,
+            tab,
+            revision,
+        }
     }
 
     pub fn tab(self) -> MainDisplayTab {
         self.tab
+    }
+
+    fn sequence(self) -> CaptureSequence {
+        self.sequence
+    }
+
+    fn revision(self) -> u64 {
+        self.revision
     }
 }
 
@@ -713,11 +740,14 @@ impl App {
     }
 
     pub fn current_body_viewer_key(&self) -> Option<BodyViewerKey> {
-        let sequence = self.selected_request_sequence()?;
-        self.detail_panel
-            .active_tab
-            .is_body()
-            .then(|| BodyViewerKey::new(sequence, self.detail_panel.active_tab))
+        let capture = self.selected_request()?;
+        self.detail_panel.active_tab.is_body().then(|| {
+            BodyViewerKey::with_revision(
+                capture.sequence,
+                self.detail_panel.active_tab,
+                capture.revision,
+            )
+        })
     }
 
     pub(crate) fn ensure_body_text_cached(&mut self, key: BodyViewerKey) -> bool {
@@ -725,22 +755,112 @@ impl App {
             return true;
         }
 
-        let text = {
-            let Some(req) = self.selected_request() else {
+        let (record, capture) = {
+            let Some(record) = self.selected_capture_record() else {
                 return false;
             };
+            let capture = record.summary();
 
-            if BodyViewerKey::new(req.sequence, key.tab()) != key {
+            if BodyViewerKey::with_revision(capture.sequence, key.tab(), capture.revision) != key {
                 return false;
             }
-
-            body_text_for_tab(req, key.tab())
+            (record, capture)
         };
-        let Some(text) = text else {
-            return false;
+        let (side, status, mode, headers) = match key.tab() {
+            MainDisplayTab::RequestBody => (
+                BodySide::Request,
+                &capture.request_body,
+                DecodeDisplayMode::Request,
+                capture.request.headers.clone(),
+            ),
+            MainDisplayTab::ResponseBody => (
+                BodySide::Response,
+                &capture.response_body,
+                if capture.request.local_path.is_some() {
+                    DecodeDisplayMode::MapLocal
+                } else {
+                    DecodeDisplayMode::Response
+                },
+                capture
+                    .response
+                    .as_ref()
+                    .map(|response| response.headers.clone())
+                    .unwrap_or_else(|| record.empty_headers()),
+            ),
+            MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return false,
+        };
+
+        let text = if !matches!(
+            status.stream,
+            BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
+        ) {
+            format!("(Body streaming… {} bytes observed)", status.observed_bytes)
+        } else if let Some(client) = self.decode_client.as_ref() {
+            let requested = client.request(
+                DecodeKey {
+                    sequence: key.sequence(),
+                    side,
+                    revision: key.revision(),
+                    mode,
+                },
+                record.body_preview(side),
+                headers,
+            );
+            if requested {
+                "(Loading body…)".to_string()
+            } else {
+                "(Body display unavailable: decoder queue is full)".to_string()
+            }
+        } else {
+            let Some(text) = body_text_for_record(&record, key.tab()) else {
+                return false;
+            };
+            text
         };
 
         self.detail_panel.cache_body_text(key, text);
+        true
+    }
+
+    pub(crate) fn refresh_selected_live_body(&mut self) -> bool {
+        if self.detail_panel.body_viewer.is_active() {
+            return false;
+        }
+        let Some(key) = self.current_body_viewer_key() else {
+            return false;
+        };
+        let Some(capture) = self.selected_request() else {
+            return false;
+        };
+        let status = match key.tab() {
+            MainDisplayTab::RequestBody => &capture.request_body,
+            MainDisplayTab::ResponseBody => &capture.response_body,
+            MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return false,
+        };
+        if matches!(
+            status.stream,
+            BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
+        ) {
+            return false;
+        }
+        let text = format!("(Body streaming… {} bytes observed)", status.observed_bytes);
+        if self.cached_body_text(key) == Some(text.as_str()) {
+            return false;
+        }
+        self.detail_panel.cache_body_text(key, text);
+        true
+    }
+
+    pub(crate) fn apply_decode_result(&mut self, result: DecodeResult) -> bool {
+        let tab = match result.key.side {
+            BodySide::Request => MainDisplayTab::RequestBody,
+            BodySide::Response => MainDisplayTab::ResponseBody,
+        };
+        let key = BodyViewerKey::with_revision(result.key.sequence, tab, result.key.revision);
+        if self.current_body_viewer_key() != Some(key) {
+            return false;
+        }
+        self.detail_panel.cache_body_text(key, result.text);
         true
     }
 
@@ -750,6 +870,10 @@ impl App {
 
     pub(crate) fn cached_body_render_text(&self, key: BodyViewerKey) -> Option<&str> {
         self.detail_panel.cached_body_render_text(key)
+    }
+
+    pub(crate) fn body_text_revision(&self) -> u64 {
+        self.detail_panel.body_text_revision()
     }
 
     fn current_body_text(&mut self) -> Option<(BodyViewerKey, String)> {
@@ -764,15 +888,56 @@ impl App {
     }
 }
 
-pub(crate) fn body_text_for_tab(req: &CapturedExchange, tab: MainDisplayTab) -> Option<String> {
-    match tab {
-        MainDisplayTab::RequestBody => Some(format_request_body(
-            req.req_body.as_deref(),
-            &req.req_headers,
-        )),
-        MainDisplayTab::ResponseBody => Some(format_response_body(req)),
-        MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => None,
+fn body_text_for_record(record: &CaptureRecord, tab: MainDisplayTab) -> Option<String> {
+    let capture = record.summary();
+    let (side, status) = match tab {
+        MainDisplayTab::RequestBody => (BodySide::Request, &capture.request_body),
+        MainDisplayTab::ResponseBody => (BodySide::Response, &capture.response_body),
+        MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return None,
+    };
+    if !matches!(
+        status.stream,
+        BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
+    ) {
+        return Some(format!(
+            "(Body streaming… {} bytes observed)",
+            status.observed_bytes
+        ));
     }
+
+    let preview = record.body_preview(side);
+    let body = if preview.is_empty() {
+        None
+    } else {
+        std::str::from_utf8(&preview).ok()
+    };
+    Some(match side {
+        BodySide::Request => format_request_body(body, &capture.request.headers),
+        BodySide::Response if capture.request.local_path.is_some() => {
+            body.unwrap_or_default().to_string()
+        }
+        BodySide::Response => match body {
+            Some(body) => format_json_body(body),
+            None if status.observed_bytes == 0 => "(No body)".to_string(),
+            None => binary_body_summary(&preview, status.observed_bytes),
+        },
+    })
+}
+
+fn binary_body_summary(bytes: &[u8], observed_bytes: u64) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::new();
+    for (index, byte) in bytes.iter().take(32).enumerate() {
+        if index > 0 {
+            hex.push(' ');
+        }
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!(
+        "[Binary body: {observed_bytes} bytes observed, first {} retained bytes in hex: {hex}]",
+        bytes.len().min(32)
+    )
 }
 
 pub(crate) fn format_request_body(body: Option<&str>, headers: &[(String, String)]) -> String {
@@ -784,6 +949,7 @@ pub(crate) fn format_request_body(body: Option<&str>, headers: &[(String, String
     }
 }
 
+#[cfg(test)]
 pub(crate) fn format_response_body(req: &CapturedExchange) -> String {
     match req.res_body.as_deref() {
         Some(body) if req.local_path.is_some() => body.to_string(),

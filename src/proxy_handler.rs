@@ -1,42 +1,43 @@
-// src/proxy_handler.rs
-use crate::{
-    capture::{CaptureSequence, CapturedExchange},
-    mapping::MappingStore,
-    recording::RecordingState,
-};
+use std::path::Path;
+
 use hudsucker::{
     HttpContext, HttpHandler, RequestOrResponse,
     async_trait::async_trait,
     hyper::{
         Body, Method, Request, Response, StatusCode,
-        header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
+        body::Bytes,
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
     },
 };
-use std::io::{self, Read};
-use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use tokio::{fs::File, io::AsyncReadExt};
+
+use crate::{
+    capture::{
+        BodySide, BodyTaskTracker, CaptureHandle, CapturePublisher, RequestCaptureInput,
+        ResponseCaptureInput, drain_body, tee_body,
+    },
+    mapping::MappingStore,
+    recording::RecordingState,
 };
-use tokio::sync::mpsc;
 
 pub struct LogHandler {
-    tx: mpsc::Sender<CapturedExchange>,
-    next_sequence: Arc<AtomicU64>,
+    publisher: CapturePublisher,
+    body_tasks: BodyTaskTracker,
     mapping_store: MappingStore,
     recording: RecordingState,
-    current_request: Option<CapturedExchange>,
+    current_request: Option<CaptureHandle>,
 }
 
 impl LogHandler {
-    pub fn new(
-        tx: mpsc::Sender<CapturedExchange>,
+    pub(crate) fn new(
+        publisher: CapturePublisher,
+        body_tasks: BodyTaskTracker,
         mapping_store: MappingStore,
         recording: RecordingState,
     ) -> Self {
         Self {
-            tx,
-            next_sequence: Arc::new(AtomicU64::new(0)),
+            publisher,
+            body_tasks,
             mapping_store,
             recording,
             current_request: None,
@@ -44,127 +45,86 @@ impl LogHandler {
     }
 
     async fn capture_request(&mut self, req: Request<Body>) -> RequestOrResponse {
-        // Skip CONNECT requests - they're just for establishing HTTPS tunnels
-        // and not actual application requests we want to display
+        // CONNECT establishes the tunnel; the HTTP requests within it are captured separately.
         if req.method() == Method::CONNECT {
             return RequestOrResponse::Request(req);
         }
 
-        if !self.recording.is_enabled() {
-            return self.forward_uncaptured_request(req).await;
-        }
-
-        let sequence = CaptureSequence::new(self.next_sequence.fetch_add(1, Ordering::Relaxed));
         let (mut parts, body) = req.into_parts();
-
-        let (req_body, req_body_bytes) = match hyper::body::to_bytes(body).await {
-            Ok(bytes) => (body_for_display(&bytes, &parts.headers), bytes),
-            Err(e) => {
-                log::error!("Failed to read request body: {}", e);
-                (None, hyper::body::Bytes::new())
-            }
-        };
-
-        let data = CapturedExchange {
-            sequence,
-            method: parts.method.clone(),
-            uri: parts.uri.to_string(),
-            mapped_uri: None,
-            local_path: None,
-            status: None,
-            req_headers: parts
-                .headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect(),
-            res_headers: vec![],
-            req_body,
-            res_body: None,
-        };
-
         let mapping = self.mapping_store.current();
-        let decision = mapping.map_request(&parts.uri);
-        let original_uri = data.uri.clone();
-        let mut data = data;
+        let mut decision = mapping.map_request(&parts.uri);
+        let recording = self.recording.is_enabled();
+        let original_uri =
+            (recording || decision.mapped_uri.is_some() || decision.local_path.is_some())
+                .then(|| parts.uri.to_string());
 
-        if let Some(mapped_uri) = decision.mapped_uri {
-            log::info!("map remote: {} -> {}", original_uri, mapped_uri);
-            data.mapped_uri = Some(mapped_uri.to_string());
+        if let Some(mapped_uri) = decision.mapped_uri.take() {
+            log::info!(
+                "map remote: {} -> {}",
+                original_uri.as_deref().unwrap_or_default(),
+                mapped_uri
+            );
             parts.uri = mapped_uri;
         }
-
-        let reconstructed_req = Request::from_parts(parts, Body::from(req_body_bytes));
-
-        self.current_request = Some(data);
+        let capture = recording.then(|| {
+            let effective_uri = parts.uri.to_string();
+            let local_path = decision
+                .local_path
+                .as_ref()
+                .map(|path| path.display().to_string());
+            self.publisher.try_start(RequestCaptureInput {
+                method: parts.method.clone(),
+                original_uri: original_uri.as_deref().unwrap_or_default(),
+                effective_uri: &effective_uri,
+                local_path: local_path.as_deref(),
+                headers: &parts.headers,
+            })
+        });
+        let capture = capture.flatten();
 
         if let Some(local_path) = decision.local_path {
-            if let Some(data) = &mut self.current_request {
-                data.local_path = Some(local_path.display().to_string());
+            log::info!(
+                "map local: {} -> {}",
+                original_uri.as_deref().unwrap_or_default(),
+                local_path.display()
+            );
+            if let Some(capture) = capture.as_ref() {
+                drain_body(body, capture.clone(), &self.body_tasks);
+            } else {
+                discard_body(body, &self.body_tasks);
             }
-            log::info!("map local: {} -> {}", original_uri, local_path.display());
-            let mock_response = local_file_response(&local_path).await;
-            return RequestOrResponse::Response(self.capture_response(mock_response).await);
+            self.current_request = capture;
+            let response = local_file_response(&local_path, &self.body_tasks).await;
+            return RequestOrResponse::Response(self.capture_response(response));
         }
 
-        RequestOrResponse::Request(reconstructed_req)
-    }
-
-    async fn forward_uncaptured_request(&self, req: Request<Body>) -> RequestOrResponse {
-        let (mut parts, body) = req.into_parts();
-        let original_uri = parts.uri.to_string();
-        let mapping = self.mapping_store.current();
-        let decision = mapping.map_request(&parts.uri);
-
-        if let Some(mapped_uri) = decision.mapped_uri {
-            log::info!("map remote: {} -> {}", original_uri, mapped_uri);
-            parts.uri = mapped_uri;
-        }
-
-        if let Some(local_path) = decision.local_path {
-            log::info!("map local: {} -> {}", original_uri, local_path.display());
-            return RequestOrResponse::Response(local_file_response(&local_path).await);
-        }
-
+        let body = match capture.as_ref() {
+            Some(capture) => tee_body(body, capture.clone(), BodySide::Request, &self.body_tasks),
+            None => body,
+        };
+        self.current_request = capture;
         RequestOrResponse::Request(Request::from_parts(parts, body))
     }
 
-    async fn capture_response(&mut self, res: Response<Body>) -> Response<Body> {
-        let Some(mut data) = self.current_request.take() else {
+    fn capture_response(&mut self, res: Response<Body>) -> Response<Body> {
+        let Some(capture) = self.current_request.take() else {
             return res;
         };
         let (parts, body) = res.into_parts();
-
-        let (res_body, res_body_bytes) = match hyper::body::to_bytes(body).await {
-            Ok(bytes) => (body_for_display(&bytes, &parts.headers), bytes),
-            Err(e) => {
-                log::error!("Failed to read response body: {}", e);
-                (None, hyper::body::Bytes::new())
-            }
-        };
-
-        let status = parts.status.as_u16();
-        let res_headers: Vec<(String, String)> = parts
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-
-        let reconstructed_res = Response::from_parts(parts, Body::from(res_body_bytes));
-
-        data.status = Some(status);
-        data.res_headers = res_headers;
-        data.res_body = res_body;
-        let _ = self.tx.try_send(data);
-
-        reconstructed_res
+        capture.set_response(ResponseCaptureInput {
+            status: parts.status.as_u16(),
+            headers: &parts.headers,
+        });
+        let body = tee_body(body, capture, BodySide::Response, &self.body_tasks);
+        Response::from_parts(parts, body)
     }
 }
 
 impl Clone for LogHandler {
     fn clone(&self) -> Self {
         Self {
-            tx: self.tx.clone(),
-            next_sequence: Arc::clone(&self.next_sequence),
+            publisher: self.publisher.clone(),
+            body_tasks: self.body_tasks.clone(),
             mapping_store: self.mapping_store.clone(),
             recording: self.recording.clone(),
             current_request: None,
@@ -183,101 +143,123 @@ impl HttpHandler for LogHandler {
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        self.capture_response(res).await
-    }
-}
-
-fn body_for_display(bytes: &[u8], headers: &HeaderMap) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
+        self.capture_response(res)
     }
 
-    let display_bytes = match decode_content_encoded_body(bytes, headers) {
-        Ok(display_bytes) => display_bytes,
-        Err(error) => {
-            log::warn!("Failed to decode body for display: {error}");
-            bytes.to_vec()
-        }
-    };
-
-    String::from_utf8(display_bytes).ok().or_else(|| {
-        Some(format!(
-            "[Binary body: {} bytes, first 32 bytes in hex: {}]",
-            bytes.len(),
-            bytes
-                .iter()
-                .take(32)
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ))
-    })
-}
-
-fn decode_content_encoded_body(bytes: &[u8], headers: &HeaderMap) -> io::Result<Vec<u8>> {
-    let encodings = content_encodings(headers);
-    if encodings.is_empty() {
-        return Ok(bytes.to_vec());
-    }
-
-    let mut decoded = bytes.to_vec();
-    for encoding in encodings.iter().rev() {
-        decoded = match encoding.as_str() {
-            "gzip" | "x-gzip" => read_all(flate2::read::GzDecoder::new(decoded.as_slice()))?,
-            "deflate" => decode_deflate(&decoded)?,
-            "br" => read_all(brotli::Decompressor::new(decoded.as_slice(), 4096))?,
-            "zstd" => read_all(zstd::stream::read::Decoder::new(decoded.as_slice())?)?,
-            "identity" => decoded,
-            _ => return Ok(decoded),
-        };
-    }
-
-    Ok(decoded)
-}
-
-fn content_encodings(headers: &HeaderMap) -> Vec<String> {
-    headers
-        .get_all(CONTENT_ENCODING)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(|encoding| encoding.trim().to_ascii_lowercase())
-        .filter(|encoding| !encoding.is_empty() && encoding != "identity")
-        .collect()
-}
-
-fn decode_deflate(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    read_all(flate2::read::ZlibDecoder::new(bytes))
-        .or_else(|_| read_all(flate2::read::DeflateDecoder::new(bytes)))
-}
-
-fn read_all(mut reader: impl Read) -> io::Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    reader.read_to_end(&mut decoded)?;
-    Ok(decoded)
-}
-
-async fn local_file_response(path: &Path) -> Response<Body> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, content_type_for_path(path))
-            .header(CONTENT_LENGTH, bytes.len().to_string())
-            .body(Body::from(bytes))
-            .unwrap_or_else(|_| Response::new(Body::empty())),
-        Err(error) => {
-            let body = format!(
-                "Failed to read mapped local file {}: {error}",
-                path.display()
+    async fn handle_error(
+        &mut self,
+        _ctx: &HttpContext,
+        error: hudsucker::hyper::Error,
+    ) -> Response<Body> {
+        log::error!("Failed to forward request: {error}");
+        if let Some(capture) = self.current_request.take() {
+            let headers = hudsucker::hyper::HeaderMap::new();
+            capture.set_response(ResponseCaptureInput {
+                status: StatusCode::BAD_GATEWAY.as_u16(),
+                headers: &headers,
+            });
+            capture.fail(
+                BodySide::Response,
+                format!("upstream request failed: {error}"),
             );
+        }
+        Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::empty())
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
+}
+
+fn discard_body(mut source: Body, tasks: &BodyTaskTracker) {
+    use hudsucker::hyper::body::HttpBody as _;
+
+    let shutdown = tasks.shutdown_token();
+    tasks.spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                next = source.data() => match next {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        log::debug!("discarded mapped request body failed: {error}");
+                        return;
+                    }
+                    None => return,
+                }
+            }
+        }
+    });
+}
+
+async fn local_file_response(path: &Path, tasks: &BodyTaskTracker) -> Response<Body> {
+    match File::open(path).await {
+        Ok(file) => {
+            let length = match file.metadata().await {
+                Ok(metadata) => metadata.len(),
+                Err(error) => return local_file_error_response(path, error),
+            };
+            let (sender, body) = Body::channel();
+            let shutdown = tasks.shutdown_token();
+            tasks.spawn(stream_local_file(file, sender, shutdown));
             Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                .header(CONTENT_LENGTH, body.len().to_string())
-                .body(Body::from(body))
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, content_type_for_path(path))
+                .header(CONTENT_LENGTH, length.to_string())
+                .body(body)
                 .unwrap_or_else(|_| Response::new(Body::empty()))
         }
+        Err(error) => local_file_error_response(path, error),
     }
+}
+
+async fn stream_local_file(
+    mut file: File,
+    mut sender: hudsucker::hyper::body::Sender,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = tokio::select! {
+            _ = shutdown.cancelled() => {
+                sender.abort();
+                return;
+            }
+            read = file.read(&mut buffer) => read,
+        };
+        match read {
+            Ok(0) => return,
+            Ok(read) => {
+                let sent = tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        sender.abort();
+                        return;
+                    }
+                    sent = sender.send_data(Bytes::copy_from_slice(&buffer[..read])) => sent,
+                };
+                if sent.is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                log::error!("Failed to stream mapped local file: {error}");
+                sender.abort();
+                return;
+            }
+        }
+    }
+}
+
+fn local_file_error_response(path: &Path, error: std::io::Error) -> Response<Body> {
+    let body = format!(
+        "Failed to read mapped local file {}: {error}",
+        path.display()
+    );
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(CONTENT_LENGTH, body.len().to_string())
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
@@ -299,287 +281,301 @@ fn content_type_for_path(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
     use crate::{
+        capture::{BodyStreamState, CapturePolicy, CaptureRecord, CaptureSequence},
         mapping::MappingEngine,
-        recording::RecordingState,
         settings::{
             ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule, ProxyMapRemoteSettings,
             ProxyPresetSettings, ProxySettings,
         },
     };
-    use flate2::{Compression, write::GzEncoder};
-    use hudsucker::hyper::header::HeaderValue;
-    use std::{
-        fs,
-        io::Write,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
-    #[test]
-    fn decodes_gzip_body_for_display() {
-        let body = "compressed response text";
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(body.as_bytes()).unwrap();
-        let compressed = encoder.finish().unwrap();
-
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-
-        assert_eq!(
-            Some(body.to_string()),
-            body_for_display(&compressed, &headers)
-        );
+    struct Harness {
+        handler: LogHandler,
+        captures: mpsc::Receiver<std::sync::Arc<CaptureRecord>>,
+        shutdown: CancellationToken,
+        tasks: BodyTaskTracker,
     }
 
-    #[test]
-    fn still_summarizes_non_utf8_body() {
-        let headers = HeaderMap::new();
-        let body = [0xff, 0x00, 0x80];
+    impl Harness {
+        fn new(mapping_store: MappingStore, recording: RecordingState) -> Self {
+            let policy = CapturePolicy::default();
+            let (tx, captures) = mpsc::channel(policy.queue_capacity);
+            let publisher = CapturePublisher::new(tx, policy);
+            let shutdown = CancellationToken::new();
+            let tasks = BodyTaskTracker::new(shutdown.clone());
+            let handler = LogHandler::new(publisher, tasks.clone(), mapping_store, recording);
+            Self {
+                handler,
+                captures,
+                shutdown,
+                tasks,
+            }
+        }
 
-        assert_eq!(
-            Some("[Binary body: 3 bytes, first 32 bytes in hex: ff 00 80]".to_string()),
-            body_for_display(&body, &headers)
-        );
-    }
+        async fn next_capture(&mut self) -> std::sync::Arc<CaptureRecord> {
+            self.captures
+                .recv()
+                .await
+                .expect("capture should be published")
+        }
 
-    #[tokio::test]
-    async fn cloned_handlers_capture_concurrent_requests_independently() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let base_handler = LogHandler::new(tx, MappingStore::default(), RecordingState::default());
-        let mut slow_handler = base_handler.clone();
-        let mut fast_handler = base_handler.clone();
-
-        forward_request(&mut slow_handler, "https://example.com/slow").await;
-        forward_request(&mut fast_handler, "https://example.com/fast").await;
-
-        fast_handler
-            .capture_response(test_response(200, "fast body"))
-            .await;
-        slow_handler
-            .capture_response(test_response(201, "slow body"))
-            .await;
-
-        let fast = received_request(&mut rx);
-        let slow = received_request(&mut rx);
-
-        assert_eq!(fast.sequence, CaptureSequence::new(1));
-        assert_eq!(fast.uri, "https://example.com/fast");
-        assert_eq!(fast.status, Some(200));
-        assert_eq!(fast.res_body.as_deref(), Some("fast body"));
-        assert_eq!(slow.sequence, CaptureSequence::new(0));
-        assert_eq!(slow.uri, "https://example.com/slow");
-        assert_eq!(slow.status, Some(201));
-        assert_eq!(slow.res_body.as_deref(), Some("slow body"));
-        assert!(rx.try_recv().is_err());
+        async fn finish(self) {
+            self.shutdown.cancel();
+            self.tasks
+                .wait_for_shutdown(Duration::from_secs(1))
+                .await
+                .expect("body tasks should stop");
+        }
     }
 
     #[tokio::test]
-    async fn remote_mapping_rewrites_forwarded_uri_but_captures_original_uri() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut handler = LogHandler::new(
-            tx,
+    async fn cloned_handlers_capture_concurrent_requests_independently_in_capture_order() {
+        let mut harness = Harness::new(MappingStore::default(), RecordingState::default());
+        let mut slow_handler = harness.handler.clone();
+        let mut fast_handler = harness.handler.clone();
+
+        let slow_request = forward_request(&mut slow_handler, "https://example.com/slow").await;
+        let fast_request = forward_request(&mut fast_handler, "https://example.com/fast").await;
+        consume_request_body(slow_request).await;
+        consume_request_body(fast_request).await;
+
+        let fast_response = fast_handler.capture_response(test_response(200, "fast body"));
+        let slow_response = slow_handler.capture_response(test_response(201, "slow body"));
+        consume_response_body(fast_response).await;
+        consume_response_body(slow_response).await;
+
+        let slow = harness.next_capture().await;
+        let fast = harness.next_capture().await;
+        assert_eq!(slow.sequence(), CaptureSequence::new(0));
+        assert_eq!(
+            slow.summary().request.original_uri,
+            "https://example.com/slow"
+        );
+        assert_eq!(
+            slow.summary().response.as_ref().map(|res| res.status),
+            Some(201)
+        );
+        assert_eq!(
+            slow.body_preview(BodySide::Response).as_ref().as_ref(),
+            b"slow body"
+        );
+        assert_eq!(fast.sequence(), CaptureSequence::new(1));
+        assert_eq!(
+            fast.summary().request.original_uri,
+            "https://example.com/fast"
+        );
+        assert_eq!(
+            fast.summary().response.as_ref().map(|res| res.status),
+            Some(200)
+        );
+        assert_eq!(
+            fast.body_preview(BodySide::Response).as_ref().as_ref(),
+            b"fast body"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn remote_mapping_rewrites_forwarded_uri_but_captures_both_uris() {
+        let mut harness = Harness::new(
             mapping_store(
                 vec![remote_rule("https://a.com", "http://b.test.com")],
                 vec![],
             ),
             RecordingState::default(),
         );
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("https://a.com/some/api?x=1")
-            .body(Body::empty())
-            .expect("test request should be valid");
+        let request = request("GET", "https://a.com/some/api?x=1", Body::empty());
 
-        let forwarded = match handler.capture_request(request).await {
+        let forwarded = match harness.handler.capture_request(request).await {
             RequestOrResponse::Request(request) => request,
             RequestOrResponse::Response(_) => panic!("remote mapping should forward request"),
         };
-
         assert_eq!(
             forwarded.uri().to_string(),
             "http://b.test.com/some/api?x=1"
         );
+        consume_request_body(forwarded).await;
+        consume_response_body(harness.handler.capture_response(test_response(200, "ok"))).await;
 
-        handler.capture_response(test_response(200, "ok")).await;
-
-        let captured = received_request(&mut rx);
-        assert_eq!(captured.uri, "https://a.com/some/api?x=1");
+        let capture = harness.next_capture().await;
+        let summary = capture.summary();
+        assert_eq!(summary.request.original_uri, "https://a.com/some/api?x=1");
         assert_eq!(
-            captured.mapped_uri.as_deref(),
+            summary.request.mapped_uri(),
             Some("http://b.test.com/some/api?x=1")
         );
-        assert_eq!(captured.local_path, None);
-        assert_eq!(captured.status, Some(200));
+        assert!(summary.request.local_path.is_none());
+        harness.finish().await;
     }
 
     #[tokio::test]
-    async fn recording_off_forwards_mapped_request_without_capture() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut handler = LogHandler::new(
-            tx,
+    async fn first_response_chunk_is_forwarded_before_source_eof() {
+        let mut harness = Harness::new(MappingStore::default(), RecordingState::default());
+        let forwarded = forward_request(&mut harness.handler, "https://example.com/").await;
+        consume_request_body(forwarded).await;
+        let (mut source, body) = Body::channel();
+        let mut response = harness.handler.capture_response(Response::new(body));
+        source
+            .send_data(Bytes::from_static(b"first"))
+            .await
+            .expect("source should accept first chunk");
+
+        use hudsucker::hyper::body::HttpBody as _;
+        let first = tokio::time::timeout(Duration::from_secs(1), response.body_mut().data())
+            .await
+            .expect("forwarded chunk must not wait for EOF")
+            .expect("response should contain a chunk")
+            .expect("chunk should be forwarded");
+        assert_eq!(first.as_ref(), b"first");
+        drop(source);
+        drop(response);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn recording_off_preserves_mapping_without_publishing_capture() {
+        let mut harness = Harness::new(
             mapping_store(
                 vec![remote_rule("https://a.com", "http://b.test.com")],
                 vec![],
             ),
             RecordingState::new(false),
         );
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("https://a.com/some/api?x=1")
-            .header("x-keep", "1")
-            .body(Body::from("payload"))
-            .expect("test request should be valid");
-
-        let forwarded = match handler.capture_request(request).await {
+        let request = request("POST", "https://a.com/some/api?x=1", Body::from("payload"));
+        let forwarded = match harness.handler.capture_request(request).await {
             RequestOrResponse::Request(request) => request,
             RequestOrResponse::Response(_) => panic!("remote mapping should forward request"),
         };
-
         assert_eq!(
             forwarded.uri().to_string(),
             "http://b.test.com/some/api?x=1"
         );
-        assert_eq!(forwarded.headers()["x-keep"], "1");
-        let body = hyper::body::to_bytes(forwarded.into_body())
-            .await
-            .expect("forwarded body should read");
-        assert_eq!(body.as_ref(), b"payload");
-
-        handler.capture_response(test_response(200, "ok")).await;
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn recording_off_returns_local_mapping_response_without_capture() {
-        let path = temp_file_path("api-recording-off.json");
-        fs::write(&path, r#"{"mock":true}"#).expect("test file should be written");
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut handler = LogHandler::new(
-            tx,
-            mapping_store(
-                vec![],
-                vec![local_rule(
-                    "https://a.com/some/api1",
-                    &path.to_string_lossy(),
-                )],
-            ),
-            RecordingState::new(false),
+        assert_eq!(
+            hudsucker::hyper::body::to_bytes(forwarded.into_body())
+                .await
+                .expect("body should forward")
+                .as_ref(),
+            b"payload"
         );
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("https://a.com/some/api1?x=1")
-            .body(Body::empty())
-            .expect("test request should be valid");
-
-        let response = match handler.capture_request(request).await {
-            RequestOrResponse::Request(_) => panic!("local mapping should return response"),
-            RequestOrResponse::Response(response) => response,
-        };
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body())
-            .await
-            .expect("test response body should read");
-        assert_eq!(body.as_ref(), br#"{"mock":true}"#);
-        assert!(rx.try_recv().is_err());
-
-        let _ = fs::remove_file(path);
+        assert!(harness.captures.try_recv().is_err());
+        harness.finish().await;
     }
 
     #[tokio::test]
-    async fn local_mapping_returns_file_response_and_records_capture() {
-        let path = temp_file_path("api1.json");
-        fs::write(&path, r#"{"ok":true}"#).expect("test file should be written");
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut handler = LogHandler::new(
-            tx,
+    async fn local_mapping_streams_file_and_captures_exact_bytes() {
+        let path = temp_file_path("api.json");
+        fs::write(&path, br#"{"ok":true}"#).expect("test file should be written");
+        let mut harness = Harness::new(
             mapping_store(
                 vec![],
                 vec![local_rule(
-                    "https://a.com/some/api1",
+                    "https://a.com/some/api",
                     &path.to_string_lossy(),
                 )],
             ),
             RecordingState::default(),
         );
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("https://a.com/some/api1?x=1")
-            .body(Body::empty())
-            .expect("test request should be valid");
-
-        let response = match handler.capture_request(request).await {
+        let request = request("GET", "https://a.com/some/api?x=1", Body::empty());
+        let response = match harness.handler.capture_request(request).await {
             RequestOrResponse::Request(_) => panic!("local mapping should return response"),
             RequestOrResponse::Response(response) => response,
         };
-
         assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body())
+        let body = hudsucker::hyper::body::to_bytes(response.into_body())
             .await
-            .expect("test response body should read");
+            .expect("mapped response should stream");
         assert_eq!(body.as_ref(), br#"{"ok":true}"#);
 
-        let captured = received_request(&mut rx);
-        assert_eq!(captured.uri, "https://a.com/some/api1?x=1");
-        assert_eq!(captured.status, Some(200));
-        assert_eq!(captured.res_body.as_deref(), Some(r#"{"ok":true}"#));
+        let capture = harness.next_capture().await;
+        let summary = capture.summary();
+        assert_eq!(summary.response.as_ref().map(|res| res.status), Some(200));
         assert_eq!(
-            captured.local_path.as_deref(),
+            summary.request.local_path.as_deref(),
             Some(path.to_string_lossy().as_ref())
         );
-
+        assert_eq!(
+            capture.body_preview(BodySide::Response).as_ref().as_ref(),
+            br#"{"ok":true}"#
+        );
+        assert_eq!(summary.response_body.stream, BodyStreamState::Complete);
         let _ = fs::remove_file(path);
+        harness.finish().await;
     }
 
     #[tokio::test]
-    async fn missing_local_file_returns_bad_gateway_and_records_error_body() {
+    async fn missing_local_file_returns_and_captures_bad_gateway() {
         let path = temp_file_path("missing.json");
         let _ = fs::remove_file(&path);
-        let (tx, mut rx) = mpsc::channel(8);
-        let mut handler = LogHandler::new(
-            tx,
+        let mut harness = Harness::new(
             mapping_store(
                 vec![],
                 vec![local_rule("https://a.com/missing", &path.to_string_lossy())],
             ),
             RecordingState::default(),
         );
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri("https://a.com/missing")
-            .body(Body::empty())
-            .expect("test request should be valid");
-
-        let response = match handler.capture_request(request).await {
+        let response = match harness
+            .handler
+            .capture_request(request("GET", "https://a.com/missing", Body::empty()))
+            .await
+        {
             RequestOrResponse::Request(_) => panic!("local mapping should return response"),
             RequestOrResponse::Response(response) => response,
         };
-
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let captured = received_request(&mut rx);
-        assert_eq!(captured.status, Some(502));
-        assert!(
-            captured
-                .res_body
-                .as_deref()
-                .is_some_and(|body| body.contains("Failed to read mapped local file"))
+        let forwarded = hudsucker::hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("error body should forward");
+        assert!(String::from_utf8_lossy(&forwarded).contains("Failed to read mapped local file"));
+        let capture = harness.next_capture().await;
+        assert_eq!(
+            capture.summary().response.as_ref().map(|res| res.status),
+            Some(502)
         );
+        assert!(
+            String::from_utf8_lossy(&capture.body_preview(BodySide::Response))
+                .contains("Failed to read mapped local file")
+        );
+        harness.finish().await;
     }
 
-    async fn forward_request(handler: &mut LogHandler, uri: &str) {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Body::empty())
-            .expect("test request should be valid");
-
-        match handler.capture_request(request).await {
-            RequestOrResponse::Request(_) => {}
+    async fn forward_request(handler: &mut LogHandler, uri: &str) -> Request<Body> {
+        match handler
+            .capture_request(request("GET", uri, Body::empty()))
+            .await
+        {
+            RequestOrResponse::Request(request) => request,
             RequestOrResponse::Response(_) => panic!("test request should be forwarded"),
         }
+    }
+
+    async fn consume_request_body(request: Request<Body>) {
+        hudsucker::hyper::body::to_bytes(request.into_body())
+            .await
+            .expect("request body should forward");
+    }
+
+    async fn consume_response_body(response: Response<Body>) {
+        hudsucker::hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("response body should forward");
+    }
+
+    fn request(method: &str, uri: &str, body: Body) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(body)
+            .expect("test request should be valid")
     }
 
     fn test_response(status: u16, body: &str) -> Response<Body> {
@@ -587,10 +583,6 @@ mod tests {
             .status(status)
             .body(Body::from(body.to_string()))
             .expect("test response should be valid")
-    }
-
-    fn received_request(rx: &mut mpsc::Receiver<CapturedExchange>) -> CapturedExchange {
-        rx.try_recv().expect("request should have been captured")
     }
 
     fn mapping_store(
@@ -612,7 +604,6 @@ mod tests {
                 },
             }],
         };
-
         MappingStore::new(MappingEngine::compile(Some(&proxy)))
     }
 

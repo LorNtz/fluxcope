@@ -11,7 +11,7 @@ tui-tree-widget = "0.23" # Essential for the request list panel
 
 # Async & Runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 # Proxy & Networking
@@ -19,7 +19,6 @@ hudsucker = "0.20" # The heavy lifter for MitM
 hyper = { version = "0.14", features = ["client", "http1", "http2"] }
 rcgen = "0.11" # For generating CA and leaf certs
 rustls = "0.21"
-tokio-rustls = "0.24"
 
 # Data & Serialization
 serde = { version = "1", features = ["derive"] }
@@ -35,8 +34,9 @@ zstd = "0.13"
 parking_lot = "0.12" # Faster Mutex/RwLock
 anyhow = "1"
 log = "0.4"
-uuid = "1.19.0"
 qrcode = { version = "0.14", default-features = false }
+unicode-segmentation = "1"
+unicode-width = "0.2"
 edtui = { version = "=0.9.9", default-features = false, features = ["arboard", "mouse-support"] }
 tui-scrollview = "=0.5.1"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }

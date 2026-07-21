@@ -1,8 +1,36 @@
+mod body;
+mod decode;
+mod model;
+mod publisher;
 mod store;
 
 use hyper::Method;
 
+pub(crate) use body::{BodyTaskTracker, drain_body, tee_body};
+pub(crate) use decode::{
+    DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
+    DecodeResult, start_decode_service,
+};
+pub use model::{
+    BodyPreviewLimit, BodySide, BodyStatus, BodyStreamState, CaptureRecord, CaptureSummary,
+    CapturedBodyPreview, CapturedHeaders, MetadataTruncation, RequestMetadata, ResponseMetadata,
+};
+pub(crate) use publisher::{
+    CaptureDirtySignal, CaptureHandle, CaptureMetrics, CaptureMetricsSnapshot, CapturePolicy,
+    CapturePublisher, RequestCaptureInput, ResponseCaptureInput,
+};
 pub(crate) use store::{CaptureRetentionPolicy, CaptureStore};
+
+pub(crate) fn benchmark_ordered_store(captures: Vec<CapturedExchange>) -> usize {
+    let mut store = CaptureStore::new(CaptureRetentionPolicy {
+        max_records: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    for capture in captures {
+        store.insert(CaptureRecord::from_completed(capture));
+    }
+    store.len()
+}
 
 /// Monotonic identity assigned when a request is admitted for capture.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

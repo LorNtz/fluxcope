@@ -48,21 +48,24 @@ impl MappingEngine {
             return engine;
         }
 
-        let Some(preset) = active_preset(proxy, &mut engine.diagnostics) else {
+        let Some((preset_index, preset)) = active_preset(proxy, &mut engine.diagnostics) else {
             return engine;
         };
 
         if preset.map_remote.enable {
-            compile_remote_rules(&preset.map_remote.rules, &mut engine);
+            compile_remote_rules(preset_index, &preset.map_remote.rules, &mut engine);
         }
         if preset.map_local.enable {
-            compile_local_rules(&preset.map_local.rules, &mut engine);
+            compile_local_rules(preset_index, &preset.map_local.rules, &mut engine);
         }
 
         engine
     }
 
     pub fn map_request(&self, uri: &Uri) -> MappingDecision {
+        if self.remote_rules.is_empty() && self.local_rules.is_empty() {
+            return MappingDecision::default();
+        }
         let Some(original) = RequestUrl::from_uri(uri) else {
             return MappingDecision::default();
         };
@@ -72,6 +75,12 @@ impl MappingEngine {
             .match_target(&original)
             .map(|target| target.apply_to(&original.url));
         let effective_url = remote_url.as_ref().unwrap_or(&original.url);
+        if self.local_rules.is_empty() {
+            return MappingDecision {
+                mapped_uri: remote_url.and_then(|url| url.as_str().parse().ok()),
+                local_path: None,
+            };
+        }
         let effective_request = RequestUrl::from_url(effective_url.clone());
         let local_path = effective_request
             .as_ref()
@@ -97,22 +106,71 @@ pub struct MappingDecision {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MappingDiagnostic {
-    pub level: MappingDiagnosticLevel,
+    pub severity: DiagnosticSeverity,
+    pub code: MappingDiagnosticCode,
+    pub location: Option<MappingLocation>,
     pub message: String,
 }
 
 impl MappingDiagnostic {
-    fn warning(message: impl Into<String>) -> Self {
+    fn warning(code: MappingDiagnosticCode, message: impl Into<String>) -> Self {
         Self {
-            level: MappingDiagnosticLevel::Warning,
+            severity: DiagnosticSeverity::Warning,
+            code,
+            location: None,
+            message: message.into(),
+        }
+    }
+
+    fn rule(
+        severity: DiagnosticSeverity,
+        code: MappingDiagnosticCode,
+        location: MappingLocation,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity,
+            code,
+            location: Some(location),
             message: message.into(),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MappingDiagnosticLevel {
+pub enum DiagnosticSeverity {
     Warning,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingDiagnosticCode {
+    MissingActivePreset,
+    ActivePresetNotFound,
+    InvalidRuleSource,
+    InvalidRuleTarget,
+    EmptyPresetName,
+    DuplicatePresetName,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingTable {
+    Remote,
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingField {
+    From,
+    To,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappingLocation {
+    pub preset_index: usize,
+    pub table: MappingTable,
+    pub rule_index: usize,
+    pub field: MappingField,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +186,10 @@ impl<T> CompiledRules<T> {
         } else {
             rules.host_rule = Some(target);
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_origin.is_empty()
     }
 
     fn match_target<'a>(&'a self, request: &RequestUrl) -> Option<&'a T> {
@@ -241,31 +303,49 @@ impl RequestUrl {
 fn active_preset<'a>(
     proxy: &'a ProxySettings,
     diagnostics: &mut Vec<MappingDiagnostic>,
-) -> Option<&'a ProxyPresetSettings> {
+) -> Option<(usize, &'a ProxyPresetSettings)> {
     let active_name = proxy.active_preset.as_deref().unwrap_or("").trim();
-    if active_name.is_empty() {
-        if !proxy.presets.is_empty() {
-            diagnostics.push(MappingDiagnostic::warning(
-                "proxy mapping has presets but no active_preset",
-            ));
-        }
+    if let Some(diagnostic) = active_preset_diagnostic(proxy) {
+        diagnostics.push(diagnostic);
         return None;
     }
-
-    let preset = proxy
+    if active_name.is_empty() {
+        return None;
+    }
+    proxy
         .presets
         .iter()
-        .find(|preset| preset.name == active_name);
-    if preset.is_none() {
-        diagnostics.push(MappingDiagnostic::warning(format!(
-            "proxy mapping active preset '{active_name}' was not found"
-        )));
-    }
-
-    preset
+        .enumerate()
+        .find(|(_, preset)| preset.name == active_name)
 }
 
-fn compile_remote_rules(rules: &[ProxyMapRemoteRule], engine: &mut MappingEngine) {
+fn active_preset_diagnostic(proxy: &ProxySettings) -> Option<MappingDiagnostic> {
+    let active_name = proxy.active_preset.as_deref().unwrap_or("").trim();
+    if active_name.is_empty() {
+        return (!proxy.presets.is_empty()).then(|| {
+            MappingDiagnostic::warning(
+                MappingDiagnosticCode::MissingActivePreset,
+                "proxy mapping has presets but no active_preset",
+            )
+        });
+    }
+    (!proxy
+        .presets
+        .iter()
+        .any(|preset| preset.name == active_name))
+    .then(|| {
+        MappingDiagnostic::warning(
+            MappingDiagnosticCode::ActivePresetNotFound,
+            format!("proxy mapping active preset '{active_name}' was not found"),
+        )
+    })
+}
+
+fn compile_remote_rules(
+    preset_index: usize,
+    rules: &[ProxyMapRemoteRule],
+    engine: &mut MappingEngine,
+) {
     for (index, rule) in rules.iter().enumerate() {
         if !rule.enable {
             continue;
@@ -274,18 +354,30 @@ fn compile_remote_rules(rules: &[ProxyMapRemoteRule], engine: &mut MappingEngine
         let pattern = match parse_rule_url(&rule.from) {
             Ok(url) => url,
             Err(error) => {
-                engine.diagnostics.push(MappingDiagnostic::warning(format!(
-                    "map_remote rule {index} skipped: invalid from URL: {error}"
-                )));
+                engine.diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Warning,
+                    MappingDiagnosticCode::InvalidRuleSource,
+                    preset_index,
+                    MappingTable::Remote,
+                    index,
+                    MappingField::From,
+                    format!("map_remote rule {index} skipped: invalid from URL: {error}"),
+                ));
                 continue;
             }
         };
         let target = match parse_remote_target(&rule.to) {
             Ok(target) => target,
             Err(error) => {
-                engine.diagnostics.push(MappingDiagnostic::warning(format!(
-                    "map_remote rule {index} skipped: invalid to URL: {error}"
-                )));
+                engine.diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Warning,
+                    MappingDiagnosticCode::InvalidRuleTarget,
+                    preset_index,
+                    MappingTable::Remote,
+                    index,
+                    MappingField::To,
+                    format!("map_remote rule {index} skipped: invalid to URL: {error}"),
+                ));
                 continue;
             }
         };
@@ -294,7 +386,11 @@ fn compile_remote_rules(rules: &[ProxyMapRemoteRule], engine: &mut MappingEngine
     }
 }
 
-fn compile_local_rules(rules: &[ProxyMapLocalRule], engine: &mut MappingEngine) {
+fn compile_local_rules(
+    preset_index: usize,
+    rules: &[ProxyMapLocalRule],
+    engine: &mut MappingEngine,
+) {
     for (index, rule) in rules.iter().enumerate() {
         if !rule.enable {
             continue;
@@ -303,23 +399,148 @@ fn compile_local_rules(rules: &[ProxyMapLocalRule], engine: &mut MappingEngine) 
         let pattern = match parse_rule_url(&rule.from) {
             Ok(url) => url,
             Err(error) => {
-                engine.diagnostics.push(MappingDiagnostic::warning(format!(
-                    "map_local rule {index} skipped: invalid from URL: {error}"
-                )));
+                engine.diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Warning,
+                    MappingDiagnosticCode::InvalidRuleSource,
+                    preset_index,
+                    MappingTable::Local,
+                    index,
+                    MappingField::From,
+                    format!("map_local rule {index} skipped: invalid from URL: {error}"),
+                ));
                 continue;
             }
         };
         let target = match expand_home_path(rule.to.trim()) {
             Ok(path) => path,
             Err(error) => {
-                engine.diagnostics.push(MappingDiagnostic::warning(format!(
-                    "map_local rule {index} skipped: invalid to path: {error}"
-                )));
+                engine.diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Warning,
+                    MappingDiagnosticCode::InvalidRuleTarget,
+                    preset_index,
+                    MappingTable::Local,
+                    index,
+                    MappingField::To,
+                    format!("map_local rule {index} skipped: invalid to path: {error}"),
+                ));
                 continue;
             }
         };
 
         engine.local_rules.insert(pattern, target);
+    }
+}
+
+fn rule_diagnostic(
+    severity: DiagnosticSeverity,
+    code: MappingDiagnosticCode,
+    preset_index: usize,
+    table: MappingTable,
+    rule_index: usize,
+    field: MappingField,
+    message: impl Into<String>,
+) -> MappingDiagnostic {
+    MappingDiagnostic::rule(
+        severity,
+        code,
+        MappingLocation {
+            preset_index,
+            table,
+            rule_index,
+            field,
+        },
+        message,
+    )
+}
+
+pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for (preset_index, preset) in proxy.presets.iter().enumerate() {
+        if preset.name.trim().is_empty() {
+            diagnostics.push(MappingDiagnostic::warning(
+                MappingDiagnosticCode::EmptyPresetName,
+                "proxy preset names cannot be empty",
+            ));
+        } else if !names.insert(preset.name.as_str()) {
+            diagnostics.push(MappingDiagnostic::warning(
+                MappingDiagnosticCode::DuplicatePresetName,
+                format!("duplicate proxy preset name: {}", preset.name),
+            ));
+        }
+        validate_rules(
+            preset_index,
+            MappingTable::Remote,
+            preset
+                .map_remote
+                .rules
+                .iter()
+                .map(|rule| (&rule.from, &rule.to)),
+            &mut diagnostics,
+        );
+        for (rule_index, rule) in preset.map_local.rules.iter().enumerate() {
+            if let Err(error) = parse_rule_url(&rule.from) {
+                diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Error,
+                    MappingDiagnosticCode::InvalidRuleSource,
+                    preset_index,
+                    MappingTable::Local,
+                    rule_index,
+                    MappingField::From,
+                    format!("map_local.from {error}"),
+                ));
+            }
+            if let Err(error) = expand_home_path(rule.to.trim()) {
+                diagnostics.push(rule_diagnostic(
+                    DiagnosticSeverity::Error,
+                    MappingDiagnosticCode::InvalidRuleTarget,
+                    preset_index,
+                    MappingTable::Local,
+                    rule_index,
+                    MappingField::To,
+                    format!("map_local.to {error}"),
+                ));
+            }
+        }
+    }
+    if let Some(diagnostic) = active_preset_diagnostic(proxy) {
+        diagnostics.push(diagnostic);
+    }
+    for diagnostic in &mut diagnostics {
+        diagnostic.severity = DiagnosticSeverity::Error;
+    }
+    diagnostics
+}
+
+fn validate_rules<'a>(
+    preset_index: usize,
+    table: MappingTable,
+    rules: impl Iterator<Item = (&'a String, &'a String)>,
+    diagnostics: &mut Vec<MappingDiagnostic>,
+) {
+    for (rule_index, (from, to)) in rules.enumerate() {
+        if let Err(error) = parse_rule_url(from) {
+            diagnostics.push(rule_diagnostic(
+                DiagnosticSeverity::Error,
+                MappingDiagnosticCode::InvalidRuleSource,
+                preset_index,
+                table,
+                rule_index,
+                MappingField::From,
+                format!("map_remote.from {error}"),
+            ));
+        }
+        if let Err(error) = parse_remote_target(to) {
+            diagnostics.push(rule_diagnostic(
+                DiagnosticSeverity::Error,
+                MappingDiagnosticCode::InvalidRuleTarget,
+                preset_index,
+                table,
+                rule_index,
+                MappingField::To,
+                format!("map_remote.to {error}"),
+            ));
+        }
     }
 }
 
@@ -443,6 +664,27 @@ mod tests {
             decision(&engine, "https://a.com/some/path?x=1")
         );
         assert!(engine.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn runtime_and_save_validation_agree_on_missing_active_preset() {
+        let proxy = ProxySettings {
+            enable: true,
+            active_preset: None,
+            presets: vec![ProxyPresetSettings {
+                name: "dev".to_string(),
+                ..ProxyPresetSettings::default()
+            }],
+        };
+
+        assert_eq!(
+            MappingEngine::compile(Some(&proxy)).diagnostics()[0].code,
+            MappingDiagnosticCode::MissingActivePreset
+        );
+        assert_eq!(
+            validate_proxy_settings(&proxy)[0].code,
+            MappingDiagnosticCode::MissingActivePreset
+        );
     }
 
     #[test]

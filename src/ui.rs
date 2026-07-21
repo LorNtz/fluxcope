@@ -3,7 +3,7 @@ use crate::app::ProxyRow;
 use crate::app::{
     ActionDialog, App, BODY_TEXT_TAB_WIDTH, BodyViewerKey, FieldEditKind, MainDisplayTab,
     PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus, PopupFocus, ProxyRuleTable, ProxyWidget,
-    RULE_EDITOR_KEY_HINTS, RequestTreeEntry, RuleEditField, RuleEditorState, SelectTarget,
+    RULE_EDITOR_KEY_HINTS, RequestTreeNodeSnapshot, RuleEditField, RuleEditorState, SelectTarget,
     SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsScrollRequest, SettingsSelectId,
     SettingsTopic,
 };
@@ -11,7 +11,6 @@ use crate::select::{SelectItem, SelectState};
 use crate::select_widget::SelectWidget;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use edtui::{EditorStatusLine, EditorTheme, EditorView};
-use qrcode::{EcLevel, QrCode, render::unicode};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -24,10 +23,20 @@ use ratatui::{
         ScrollbarState, StatefulWidget, Tabs, Widget, Wrap,
     },
 };
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, cell::RefCell, collections::HashSet};
 use tui_scrollview::{ScrollView, ScrollbarVisibility};
 use tui_textarea::{CursorMove, TextArea};
-use tui_tree_widget::{Tree, TreeItem};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+mod certificate_popup;
+use certificate_popup::render_certificate_popup;
+mod log_view;
+use log_view::LogView;
+mod request_list;
+use request_list::RequestListView;
+#[cfg(test)]
+use request_list::build_request_tree_items;
 
 trait View {
     fn area(&self) -> Rect;
@@ -192,228 +201,6 @@ impl View for StatusView {
             self.area(),
         );
     }
-}
-
-struct RequestListView {
-    area: Rect,
-}
-
-impl RequestListView {
-    fn new() -> Self {
-        Self {
-            area: Rect::default(),
-        }
-    }
-}
-
-impl View for RequestListView {
-    fn area(&self) -> Rect {
-        self.area
-    }
-
-    fn set_area(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    fn render(&self, frame: &mut Frame, app: &mut App) {
-        let items = build_request_tree_items(app);
-        let focused = app.is_panel_focused(PanelFocus::RequestList);
-        let tree = Tree::new(&items)
-            .expect("request tree identifiers are unique")
-            .block(panel_block("Requests", focused))
-            .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray))
-            .node_closed_symbol("▶ ")
-            .node_open_symbol("▼ ")
-            .node_no_children_symbol("  ")
-            .experimental_scrollbar(Some(
-                Scrollbar::default()
-                    .orientation(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(Some("↑"))
-                    .end_symbol(Some("↓")),
-            ));
-
-        frame.render_stateful_widget(tree, self.area(), &mut app.request_list.state);
-    }
-}
-
-impl MouseHandler for RequestListView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        if !self.contains_mouse(mouse) {
-            return false;
-        }
-
-        match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                app.request_list.scroll_down();
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                app.request_list.scroll_up();
-                true
-            }
-            MouseEventKind::Down(_) => {
-                app.focus_panel(PanelFocus::RequestList);
-                let changed = app
-                    .request_list
-                    .click_at(Position::new(mouse.column, mouse.row));
-                app.apply_request_list_change(changed);
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct RequestTreeNode {
-    identifier: String,
-    label: String,
-    leaf_count: usize,
-    children: Vec<RequestTreeNode>,
-}
-
-impl RequestTreeNode {
-    fn new(identifier: String, label: String) -> Self {
-        Self {
-            identifier,
-            label,
-            leaf_count: 0,
-            children: Vec::new(),
-        }
-    }
-
-    fn branch_child_mut_or_insert(&mut self, identifier: String, label: String) -> &mut Self {
-        if let Some(index) = self
-            .children
-            .iter()
-            .position(|child| child.identifier == identifier)
-        {
-            return &mut self.children[index];
-        }
-
-        let insert_index = self
-            .children
-            .iter()
-            .position(RequestTreeNode::is_leaf)
-            .unwrap_or(self.children.len());
-        self.children
-            .insert(insert_index, Self::new(identifier, label));
-        &mut self.children[insert_index]
-    }
-
-    fn is_leaf(&self) -> bool {
-        self.children.is_empty()
-    }
-
-    fn into_tree_item(self) -> TreeItem<'static, String> {
-        let Self {
-            identifier,
-            label,
-            leaf_count,
-            children,
-        } = self;
-
-        if children.is_empty() {
-            TreeItem::new_leaf(identifier, label)
-        } else {
-            TreeItem::new(
-                identifier,
-                subtree_label_with_count(label, leaf_count),
-                children
-                    .into_iter()
-                    .map(RequestTreeNode::into_tree_item)
-                    .collect(),
-            )
-            .expect("request tree node child identifiers are unique")
-        }
-    }
-}
-
-fn build_request_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
-    let mut roots = Vec::new();
-
-    for req in app.captures() {
-        insert_request_tree_entry(&mut roots, RequestTreeEntry::from(req));
-    }
-
-    roots
-        .into_iter()
-        .map(RequestTreeNode::into_tree_item)
-        .collect()
-}
-
-fn insert_request_tree_entry(roots: &mut Vec<RequestTreeNode>, entry: RequestTreeEntry) {
-    let identifiers = entry.request_path();
-    let Some(origin_identifier) = identifiers.first() else {
-        return;
-    };
-    let Some(request_identifier) = identifiers.last() else {
-        return;
-    };
-
-    let current = root_mut_or_insert(
-        roots,
-        origin_identifier.clone(),
-        subtree_label(&entry.origin),
-    );
-    current.leaf_count += 1;
-    let parent_segments = entry
-        .segments
-        .split_last()
-        .map_or(&[] as &[String], |(_, parent_segments)| parent_segments);
-
-    let mut current = current;
-    let parent_identifiers = if identifiers.len() > 2 {
-        &identifiers[1..identifiers.len() - 1]
-    } else {
-        &[]
-    };
-    for (identifier, label) in parent_identifiers.iter().zip(parent_segments) {
-        current = current.branch_child_mut_or_insert(identifier.clone(), subtree_label(label));
-        current.leaf_count += 1;
-    }
-
-    let leaf_label = entry
-        .segments
-        .last()
-        .cloned()
-        .unwrap_or_else(|| "/".to_string());
-    current
-        .children
-        .push(RequestTreeNode::new(request_identifier.clone(), leaf_label));
-}
-
-fn subtree_label(label: &str) -> String {
-    if label.ends_with('/') {
-        label.to_string()
-    } else {
-        format!("{label}/")
-    }
-}
-
-fn subtree_label_with_count(label: String, leaf_count: usize) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(label),
-        Span::styled(
-            format!(" {leaf_count}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
-}
-
-fn root_mut_or_insert(
-    roots: &mut Vec<RequestTreeNode>,
-    identifier: String,
-    label: String,
-) -> &mut RequestTreeNode {
-    if let Some(index) = roots.iter().position(|root| root.identifier == identifier) {
-        return &mut roots[index];
-    }
-
-    roots.push(RequestTreeNode::new(identifier, label));
-    roots
-        .last_mut()
-        .expect("root was inserted immediately before access")
 }
 
 #[cfg(test)]
@@ -2198,7 +1985,7 @@ mod tests {
         app.add_request(captured(0, "https://a.com/some/api2"));
         app.add_request(captured(1, "https://a.com/some/path/api1"));
 
-        let items = build_request_tree_items(&app);
+        let items = build_request_tree_items(&mut app);
         let origin = &items[0];
         let some = &origin.children()[0];
         let child_identifiers = some
@@ -2217,7 +2004,7 @@ mod tests {
         app.add_request(captured(1, "https://a.com/some/b/api1"));
         app.add_request(captured(2, "https://a.com/some/a/api2"));
 
-        let items = build_request_tree_items(&app);
+        let items = build_request_tree_items(&mut app);
         let some = &items[0].children()[0];
         let child_identifiers = some
             .children()
@@ -2603,6 +2390,21 @@ mod tests {
         assert_eq!(editor.cursor.row, 0);
         assert_eq!(editor.cursor.col, 3);
     }
+
+    #[test]
+    fn terminal_measurement_handles_wide_combining_emoji_and_tabs() {
+        assert_eq!(text_width("界"), 2);
+        assert_eq!(text_width("e\u{301}"), 1);
+        assert_eq!(text_width("👩‍💻"), 2);
+        assert_eq!(text_width("\t"), BODY_TEXT_TAB_WIDTH as u16);
+
+        assert_eq!(hard_wrap_text("界界", 2), ["界", "界"]);
+        assert_eq!(
+            hard_wrap_text("e\u{301}e\u{301}", 1),
+            ["e\u{301}", "e\u{301}"]
+        );
+        assert_eq!(wrap_cell_text("a\n\n界", 2), ["a", "", "界"]);
+    }
 }
 
 struct RightPanelView {
@@ -2646,6 +2448,31 @@ impl MouseHandler for RightPanelView {
 
 struct DetailView {
     area: Rect,
+    body_measurement: RefCell<Option<DetailBodyMeasurement>>,
+    header_rows: RefCell<Option<DetailHeaderRows>>,
+}
+
+#[derive(Clone, Copy)]
+struct DetailBodyMeasurement {
+    key: BodyViewerKey,
+    text_revision: u64,
+    width: u16,
+    total_lines: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DetailHeaderKey {
+    sequence: crate::capture::CaptureSequence,
+    revision: u64,
+    tab: MainDisplayTab,
+}
+
+struct DetailHeaderRows {
+    key: DetailHeaderKey,
+    rows: Vec<TableRow>,
+    render_width: Option<u16>,
+    render_selection: Option<usize>,
+    render: Option<HeaderTableRender>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2658,6 +2485,8 @@ impl DetailView {
     fn new() -> Self {
         Self {
             area: Rect::default(),
+            body_measurement: RefCell::new(None),
+            header_rows: RefCell::new(None),
         }
     }
 }
@@ -2703,15 +2532,35 @@ impl View for DetailView {
             }
             DetailContent::Body(body_key) => {
                 if app.ensure_body_text_cached(body_key) {
-                    let total_lines: u16 = app
-                        .cached_body_render_text(body_key)
-                        .map(|detail_text| {
-                            detail_text_paragraph(detail_text, focused)
-                                .line_count(self.area().width)
-                        })
-                        .unwrap_or_default()
-                        .try_into()
-                        .unwrap_or(u16::MAX);
+                    let text_revision = app.body_text_revision();
+                    let cached = *self.body_measurement.borrow();
+                    let total_lines = match cached {
+                        Some(cached)
+                            if cached.key == body_key
+                                && cached.text_revision == text_revision
+                                && cached.width == self.area().width =>
+                        {
+                            cached.total_lines
+                        }
+                        _ => {
+                            let total_lines = app
+                                .cached_body_render_text(body_key)
+                                .map(|detail_text| {
+                                    detail_text_paragraph(detail_text, focused)
+                                        .line_count(self.area().width)
+                                })
+                                .unwrap_or_default()
+                                .try_into()
+                                .unwrap_or(u16::MAX);
+                            *self.body_measurement.borrow_mut() = Some(DetailBodyMeasurement {
+                                key: body_key,
+                                text_revision,
+                                width: self.area().width,
+                                total_lines,
+                            });
+                            total_lines
+                        }
+                    };
                     app.detail_panel.scroll.max_offset =
                         total_lines.saturating_sub(self.area().height);
                     let offset = app
@@ -2729,13 +2578,50 @@ impl View for DetailView {
                     }
                 }
             }
-            DetailContent::Table(rows) => {
+            DetailContent::Table(req) => {
+                let key = DetailHeaderKey {
+                    sequence: req.sequence,
+                    revision: req.revision,
+                    tab: app.detail_panel.active_tab,
+                };
+                if self.header_rows.borrow().as_ref().map(|cached| cached.key) != Some(key) {
+                    let rows = match key.tab {
+                        MainDisplayTab::RequestHeader => request_header_rows(&req),
+                        MainDisplayTab::ResponseHeader => response_header_rows(&req),
+                        MainDisplayTab::RequestBody | MainDisplayTab::ResponseBody => {
+                            unreachable!()
+                        }
+                    };
+                    *self.header_rows.borrow_mut() = Some(DetailHeaderRows {
+                        key,
+                        rows,
+                        render_width: None,
+                        render_selection: None,
+                        render: None,
+                    });
+                }
                 let table_area = detail_content_area(self.area());
-                let table = header_table_render(
-                    &rows,
-                    table_area.width,
-                    app.detail_panel.selected_header_row,
-                );
+                let selected_row = app.detail_panel.selected_header_row;
+                {
+                    let mut cache = self.header_rows.borrow_mut();
+                    let cache = cache.as_mut().expect("header rows should be cached");
+                    if cache.render_width != Some(table_area.width)
+                        || cache.render_selection != selected_row
+                    {
+                        cache.render = Some(header_table_render(
+                            &cache.rows,
+                            table_area.width,
+                            selected_row,
+                        ));
+                        cache.render_width = Some(table_area.width);
+                        cache.render_selection = selected_row;
+                    }
+                }
+                let cache = self.header_rows.borrow();
+                let table = cache
+                    .as_ref()
+                    .and_then(|cache| cache.render.as_ref())
+                    .expect("header render should be cached");
                 let total_lines: u16 = table.lines.len().try_into().unwrap_or(u16::MAX);
                 app.detail_panel.scroll.max_offset = total_lines.saturating_sub(table_area.height);
                 let offset = app
@@ -2746,7 +2632,7 @@ impl View for DetailView {
                 app.detail_panel.scroll.offset = offset;
 
                 frame.render_widget(
-                    Paragraph::new(table.lines)
+                    Paragraph::new(borrowed_lines(&table.lines))
                         .block(detail_panel_block(focused))
                         .scroll((offset, 0)),
                     self.area(),
@@ -2999,80 +2885,6 @@ impl MouseHandler for DetailView {
                         .contains(Position::new(mouse.column, mouse.row)) =>
             {
                 app.detail_panel.body_viewer.handle_mouse(mouse);
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-struct LogView {
-    area: Rect,
-}
-
-impl LogView {
-    fn new() -> Self {
-        Self {
-            area: Rect::default(),
-        }
-    }
-}
-
-impl View for LogView {
-    fn area(&self) -> Rect {
-        self.area
-    }
-
-    fn set_area(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    fn render(&self, frame: &mut Frame, app: &mut App) {
-        let focused = app.is_panel_focused(PanelFocus::Log);
-        let mut paragraph = Paragraph::new(app.log_panel.render_text())
-            .wrap(Wrap { trim: false })
-            .block(panel_block("Logs", focused));
-
-        let total_lines: u16 = paragraph
-            .line_count(self.area().width)
-            .try_into()
-            .unwrap_or(u16::MAX);
-        app.log_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
-        paragraph = paragraph.scroll((
-            app.log_panel
-                .scroll
-                .offset
-                .min(app.log_panel.scroll.max_offset),
-            0,
-        ));
-
-        frame.render_widget(paragraph, self.area());
-        render_scrollbar(
-            frame,
-            self.area(),
-            app.log_panel.scroll.max_offset,
-            app.log_panel.scroll.offset,
-        );
-    }
-}
-
-impl MouseHandler for LogView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
-        if !self.contains_mouse(mouse) {
-            return false;
-        }
-
-        match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                app.log_panel.scroll.scroll_down();
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                app.log_panel.scroll.scroll_up();
-                true
-            }
-            MouseEventKind::Down(_) => {
-                app.focus_panel(PanelFocus::Log);
                 true
             }
             _ => false,
@@ -5076,124 +4888,6 @@ fn handle_proxy_preset_select_mouse(mouse: MouseEvent, app: &mut App, root_area:
     }
 }
 
-fn render_certificate_popup(frame: &mut Frame, app: &App) {
-    let download_url = app.certificate_popup.download_url.as_deref();
-    let qr_lines = download_url.map(build_qr_lines).unwrap_or_default();
-    let description_lines = [
-        "Connect your mobile phone to the same LAN as this device",
-        "then scan to download the proxy CA certificate and install it.",
-        "Don't forget to manually trust the CA if you're on iOS 10 or later.",
-    ];
-    let qr_width = qr_lines
-        .iter()
-        .map(|line| line.chars().count() as u16)
-        .max()
-        .unwrap_or(0);
-    let text_width = description_lines
-        .iter()
-        .copied()
-        .chain([
-            "Certificate download URL is unavailable.",
-            "Press Esc to close",
-        ])
-        .chain(download_url)
-        .map(text_width)
-        .max()
-        .unwrap_or(0);
-    let available_width = frame.area().width.saturating_sub(4).max(1);
-    let width = qr_width
-        .max(text_width)
-        .saturating_add(4)
-        .max(56)
-        .min(available_width);
-    let wrap_width = width.saturating_sub(4).max(1);
-    let available_height = frame.area().height.saturating_sub(2).max(1);
-    let content_height = available_height.saturating_sub(2) as usize;
-
-    let mut lines = PopupLines::new();
-    lines.push_blank();
-    for description in description_lines {
-        lines.push_centered_wrapped(description, wrap_width);
-    }
-    lines.push_blank();
-
-    if qr_lines.is_empty() {
-        lines.push_centered_wrapped("Certificate download URL is unavailable.", wrap_width);
-    } else {
-        lines.extend_centered(qr_lines);
-        if let Some(download_url) = download_url {
-            let url_lines = wrap_text(download_url, wrap_width);
-            if lines.len() + url_lines.len() < content_height {
-                lines.push_blank();
-                lines.extend_centered(url_lines);
-                lines.push_blank();
-            }
-        }
-    }
-
-    let height = lines
-        .len()
-        .try_into()
-        .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .min(available_height);
-    let area = centered_rect(width, height, frame.area());
-
-    let content = Paragraph::new(lines.into_lines())
-        .block(
-            Block::default()
-                .title("Install Certificate")
-                .title_alignment(Alignment::Center)
-                .title_bottom(Line::from("Press Esc to close").alignment(Alignment::Center))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(if app.is_popup_focused(PopupFocus::Certificate) {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default()
-                }),
-        )
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(Clear, area);
-    frame.render_widget(content, area);
-}
-
-struct PopupLines {
-    lines: Vec<Line<'static>>,
-}
-
-impl PopupLines {
-    fn new() -> Self {
-        Self { lines: Vec::new() }
-    }
-
-    fn len(&self) -> usize {
-        self.lines.len()
-    }
-
-    fn push_blank(&mut self) {
-        self.lines.push(Line::from(""));
-    }
-
-    fn push_centered_wrapped(&mut self, text: &str, max_width: u16) {
-        self.extend_centered(wrap_text(text, max_width));
-    }
-
-    fn extend_centered(&mut self, lines: impl IntoIterator<Item = String>) {
-        self.lines.extend(
-            lines
-                .into_iter()
-                .map(|line| Line::from(line).alignment(Alignment::Center)),
-        );
-    }
-
-    fn into_lines(self) -> Vec<Line<'static>> {
-        self.lines
-    }
-}
-
 fn wrap_text(text: &str, max_width: u16) -> Vec<String> {
     let max_width = max_width as usize;
     if max_width == 0 || text.is_empty() {
@@ -5247,13 +4941,22 @@ fn hard_wrap_text(text: &str, max_width: usize) -> Vec<String> {
 
     let mut lines = Vec::new();
     let mut current = String::new();
+    let mut current_width = 0_usize;
 
-    for ch in text.chars() {
-        if current.chars().count() >= max_width {
+    for grapheme in text.graphemes(true) {
+        let width = terminal_grapheme_width(grapheme);
+        if current_width > 0 && current_width.saturating_add(width) > max_width {
             lines.push(current);
             current = String::new();
+            current_width = 0;
         }
-        current.push(ch);
+        current.push_str(grapheme);
+        current_width = current_width.saturating_add(width);
+        if current_width >= max_width {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+        }
     }
 
     if !current.is_empty() {
@@ -5264,19 +4967,19 @@ fn hard_wrap_text(text: &str, max_width: usize) -> Vec<String> {
 }
 
 fn text_width(text: &str) -> u16 {
-    text.chars().count().try_into().unwrap_or(u16::MAX)
+    text.graphemes(true)
+        .fold(0_usize, |width, grapheme| {
+            width.saturating_add(terminal_grapheme_width(grapheme))
+        })
+        .try_into()
+        .unwrap_or(u16::MAX)
 }
 
-fn build_qr_lines(download_url: &str) -> Vec<String> {
-    match QrCode::with_error_correction_level(download_url.as_bytes(), EcLevel::L) {
-        Ok(code) => code
-            .render::<unicode::Dense1x2>()
-            .quiet_zone(false)
-            .build()
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        Err(_) => vec!["Unable to generate QR code".to_string()],
+fn terminal_grapheme_width(grapheme: &str) -> usize {
+    if grapheme == "\t" {
+        BODY_TEXT_TAB_WIDTH
+    } else {
+        UnicodeWidthStr::width(grapheme)
     }
 }
 
@@ -5297,7 +5000,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 enum DetailContent {
     Text(&'static str),
     Body(BodyViewerKey),
-    Table(Vec<TableRow>),
+    Table(crate::capture::CaptureSummary),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5316,6 +5019,21 @@ struct HeaderTableColumns {
 
 struct HeaderTableRender {
     lines: Vec<Line<'static>>,
+}
+
+fn borrowed_lines<'a>(lines: &'a [Line<'static>]) -> Vec<Line<'a>> {
+    lines
+        .iter()
+        .map(|line| Line {
+            style: line.style,
+            alignment: line.alignment,
+            spans: line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.content.as_ref(), span.style))
+                .collect(),
+        })
+        .collect()
 }
 
 trait HeaderTableRowText {
@@ -5361,44 +5079,72 @@ fn build_detail_content(app: &App) -> DetailContent {
     };
 
     match app.detail_panel.active_tab {
-        MainDisplayTab::RequestHeader => DetailContent::Table(request_header_rows(req)),
-        MainDisplayTab::ResponseHeader => DetailContent::Table(response_header_rows(req)),
+        MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => DetailContent::Table(req),
         MainDisplayTab::RequestBody | MainDisplayTab::ResponseBody => unreachable!(),
     }
 }
 
-fn request_header_rows(req: &crate::capture::CapturedExchange) -> Vec<TableRow> {
+fn request_header_rows(req: &crate::capture::CaptureSummary) -> Vec<TableRow> {
     let mut lines = vec![
-        header_table_row("Method", req.method.to_string()),
-        header_table_row("URI", req.uri.clone()),
+        header_table_row("Method", req.request.method.to_string()),
+        header_table_row("URI", req.request.original_uri.clone()),
     ];
-    if let Some(mapped_uri) = &req.mapped_uri {
-        lines.push(header_table_row("Mapped URI", mapped_uri.clone()));
+    if let Some(mapped_uri) = req.request.mapped_uri() {
+        lines.push(header_table_row("Mapped URI", mapped_uri));
     }
-    if let Some(local_path) = &req.local_path {
+    if let Some(local_path) = &req.request.local_path {
         lines.push(header_table_row("Map Local File", local_path.clone()));
     }
 
     lines.extend(
-        req.req_headers
+        req.request
+            .headers
             .iter()
             .map(|(key, value)| header_table_row(key.clone(), value.clone())),
     );
+    lines.push(header_table_row(
+        "Capture Body",
+        capture_body_status(&req.request_body),
+    ));
+    if req.metadata_truncation.request_target || req.metadata_truncation.request_headers {
+        lines.push(header_table_row(
+            "Capture Metadata",
+            metadata_truncation_text(
+                req.metadata_truncation.request_target,
+                req.metadata_truncation.request_headers,
+            ),
+        ));
+    }
 
     lines
 }
 
-fn response_header_rows(req: &crate::capture::CapturedExchange) -> Vec<TableRow> {
+fn response_header_rows(req: &crate::capture::CaptureSummary) -> Vec<TableRow> {
     let mut lines = vec![header_table_row(
         "Status",
-        req.status
+        req.response
+            .as_ref()
+            .map(|response| response.status)
             .map_or("N/A".to_string(), |status| status.to_string()),
     )];
-    lines.extend(
-        req.res_headers
-            .iter()
-            .map(|(key, value)| header_table_row(key.clone(), value.clone())),
-    );
+    if let Some(response) = &req.response {
+        lines.extend(
+            response
+                .headers
+                .iter()
+                .map(|(key, value)| header_table_row(key.clone(), value.clone())),
+        );
+    }
+    lines.push(header_table_row(
+        "Capture Body",
+        capture_body_status(&req.response_body),
+    ));
+    if req.metadata_truncation.response_headers {
+        lines.push(header_table_row(
+            "Capture Metadata",
+            "response headers truncated".to_string(),
+        ));
+    }
 
     lines
 }
@@ -5507,10 +5253,7 @@ fn wrapped_line_count(text: &str, max_width: u16) -> usize {
     }
 
     text.split('\n')
-        .map(|source_line| {
-            let width = source_line.chars().count();
-            width.max(1).div_ceil(max_width)
-        })
+        .map(|source_line| hard_wrap_text(source_line, max_width).len().max(1))
         .sum::<usize>()
         .max(1)
 }
@@ -5541,15 +5284,12 @@ fn wrap_cell_text(text: &str, max_width: u16) -> Vec<String> {
 
     let mut lines = Vec::new();
     for source_line in text.split('\n') {
-        let mut current = String::new();
-        for ch in source_line.chars() {
-            if current.chars().count() >= max_width {
-                lines.push(current);
-                current = String::new();
-            }
-            current.push(ch);
+        let wrapped = hard_wrap_text(source_line, max_width);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.extend(wrapped);
         }
-        lines.push(current);
     }
 
     if lines.is_empty() {
@@ -5581,8 +5321,8 @@ fn header_table_row_at_position(app: &App, area: Rect, position: Position) -> Op
 
     let req = app.selected_request()?;
     let rows = match app.detail_panel.active_tab {
-        MainDisplayTab::RequestHeader => request_header_row_refs(req),
-        MainDisplayTab::ResponseHeader => response_header_row_refs(req),
+        MainDisplayTab::RequestHeader => request_header_row_refs(&req),
+        MainDisplayTab::ResponseHeader => response_header_row_refs(&req),
         MainDisplayTab::RequestBody | MainDisplayTab::ResponseBody => return None,
     };
     let line_index = app.detail_panel.scroll.offset as usize
@@ -5598,42 +5338,119 @@ fn header_table_row_at_position(app: &App, area: Rect, position: Position) -> Op
     })
 }
 
-fn request_header_row_refs(req: &crate::capture::CapturedExchange) -> Vec<HeaderTableRowRef<'_>> {
-    let extra_rows = usize::from(req.mapped_uri.is_some()) + usize::from(req.local_path.is_some());
-    let mut rows = Vec::with_capacity(2 + extra_rows + req.req_headers.len());
-    rows.push(header_table_row_ref("Method", req.method.to_string()));
-    rows.push(header_table_row_ref("URI", req.uri.as_str()));
-    if let Some(mapped_uri) = &req.mapped_uri {
-        rows.push(header_table_row_ref("Mapped URI", mapped_uri.as_str()));
+fn request_header_row_refs(req: &crate::capture::CaptureSummary) -> Vec<HeaderTableRowRef<'_>> {
+    let extra_rows = usize::from(req.request.mapped_uri().is_some())
+        + usize::from(req.request.local_path.is_some());
+    let mut rows = Vec::with_capacity(2 + extra_rows + req.request.headers.len());
+    rows.push(header_table_row_ref(
+        "Method",
+        req.request.method.to_string(),
+    ));
+    rows.push(header_table_row_ref(
+        "URI",
+        req.request.original_uri.as_str(),
+    ));
+    if let Some(mapped_uri) = req.request.mapped_uri() {
+        rows.push(header_table_row_ref("Mapped URI", mapped_uri));
     }
-    if let Some(local_path) = &req.local_path {
+    if let Some(local_path) = &req.request.local_path {
         rows.push(header_table_row_ref("Map Local File", local_path.as_str()));
     }
     rows.extend(
-        req.req_headers
+        req.request
+            .headers
             .iter()
             .map(|(key, value)| header_table_row_ref(key.as_str(), value.as_str())),
     );
+    rows.push(header_table_row_ref(
+        "Capture Body",
+        capture_body_status(&req.request_body),
+    ));
+    if req.metadata_truncation.request_target || req.metadata_truncation.request_headers {
+        rows.push(header_table_row_ref(
+            "Capture Metadata",
+            metadata_truncation_text(
+                req.metadata_truncation.request_target,
+                req.metadata_truncation.request_headers,
+            ),
+        ));
+    }
 
     rows
 }
 
-fn response_header_row_refs(req: &crate::capture::CapturedExchange) -> Vec<HeaderTableRowRef<'_>> {
-    let mut rows = Vec::with_capacity(1 + req.res_headers.len());
+fn response_header_row_refs(req: &crate::capture::CaptureSummary) -> Vec<HeaderTableRowRef<'_>> {
+    let mut rows = Vec::with_capacity(
+        1 + req
+            .response
+            .as_ref()
+            .map_or(0, |response| response.headers.len()),
+    );
     rows.push(header_table_row_ref(
         "Status",
-        req.status.map_or_else(
-            || Cow::Borrowed("N/A"),
-            |status| Cow::Owned(status.to_string()),
-        ),
+        req.response
+            .as_ref()
+            .map(|response| response.status)
+            .map_or_else(
+                || Cow::Borrowed("N/A"),
+                |status| Cow::Owned(status.to_string()),
+            ),
     ));
-    rows.extend(
-        req.res_headers
-            .iter()
-            .map(|(key, value)| header_table_row_ref(key.as_str(), value.as_str())),
-    );
+    if let Some(response) = &req.response {
+        rows.extend(
+            response
+                .headers
+                .iter()
+                .map(|(key, value)| header_table_row_ref(key.as_str(), value.as_str())),
+        );
+    }
+    rows.push(header_table_row_ref(
+        "Capture Body",
+        capture_body_status(&req.response_body),
+    ));
+    if req.metadata_truncation.response_headers {
+        rows.push(header_table_row_ref(
+            "Capture Metadata",
+            "response headers truncated",
+        ));
+    }
 
     rows
+}
+
+fn capture_body_status(status: &crate::capture::BodyStatus) -> String {
+    let stream = match status.stream {
+        crate::capture::BodyStreamState::Pending => "pending",
+        crate::capture::BodyStreamState::Streaming => "streaming",
+        crate::capture::BodyStreamState::Complete => "complete",
+        crate::capture::BodyStreamState::Failed => "failed",
+        crate::capture::BodyStreamState::Cancelled => "cancelled",
+    };
+    let mut text = format!(
+        "{stream}; {} bytes observed; {} bytes retained",
+        status.observed_bytes, status.retained_bytes
+    );
+    if let Some(limit) = status.preview_limit {
+        let limit = match limit {
+            crate::capture::BodyPreviewLimit::PerBodyLimit => "per-body preview limit",
+            crate::capture::BodyPreviewLimit::TotalMemoryLimit => "total capture memory limit",
+        };
+        text.push_str(&format!("; truncated by {limit}"));
+    }
+    if let Some(error) = &status.error {
+        text.push_str(&format!("; {error}"));
+    }
+    text
+}
+
+fn metadata_truncation_text(target: bool, headers: bool) -> String {
+    match (target, headers) {
+        (true, true) => "request target and headers truncated",
+        (true, false) => "request target truncated",
+        (false, true) => "request headers truncated",
+        (false, false) => "not truncated",
+    }
+    .to_string()
 }
 
 fn header_table_row_ref<'a>(key: &'a str, value: impl Into<Cow<'a, str>>) -> HeaderTableRowRef<'a> {

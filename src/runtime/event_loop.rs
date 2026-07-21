@@ -17,7 +17,10 @@ use super::{
 };
 use crate::{
     app::App,
-    capture::CapturedExchange,
+    capture::{
+        CaptureDirtySignal, CaptureMetrics, CaptureMetricsSnapshot, CaptureRecord, DecodeMetrics,
+        DecodeMetricsSnapshot, DecodeResult,
+    },
     logging::{LogRecord, LoggingMetrics, LoggingMetricsSnapshot, LoggingStatus},
     mapping::MappingStore,
     settings::SettingsManager,
@@ -27,11 +30,18 @@ use crate::{
 pub(super) struct AppRuntime {
     app: App,
     ui: RootView,
-    capture_rx: mpsc::Receiver<CapturedExchange>,
+    capture_rx: mpsc::Receiver<Arc<CaptureRecord>>,
     log_rx: mpsc::Receiver<LogRecord>,
     logging_status_rx: mpsc::Receiver<LoggingStatus>,
     logging_metrics: Arc<LoggingMetrics>,
     last_logging_metrics: LoggingMetricsSnapshot,
+    capture_dirty: Arc<CaptureDirtySignal>,
+    capture_metrics: Arc<CaptureMetrics>,
+    last_capture_metrics: CaptureMetricsSnapshot,
+    last_capture_pressure: u64,
+    decode_rx: mpsc::Receiver<DecodeResult>,
+    decode_metrics: Arc<DecodeMetrics>,
+    last_decode_metrics: DecodeMetricsSnapshot,
     tui: Tui,
     settings: SettingsManager,
     mapping_store: MappingStore,
@@ -44,10 +54,14 @@ impl AppRuntime {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: App,
-        capture_rx: mpsc::Receiver<CapturedExchange>,
+        capture_rx: mpsc::Receiver<Arc<CaptureRecord>>,
         log_rx: mpsc::Receiver<LogRecord>,
         logging_status_rx: mpsc::Receiver<LoggingStatus>,
         logging_metrics: Arc<LoggingMetrics>,
+        capture_dirty: Arc<CaptureDirtySignal>,
+        capture_metrics: Arc<CaptureMetrics>,
+        decode_rx: mpsc::Receiver<DecodeResult>,
+        decode_metrics: Arc<DecodeMetrics>,
         tui: Tui,
         settings: SettingsManager,
         mapping_store: MappingStore,
@@ -63,6 +77,13 @@ impl AppRuntime {
             logging_status_rx,
             logging_metrics,
             last_logging_metrics: LoggingMetricsSnapshot::default(),
+            capture_dirty,
+            capture_metrics,
+            last_capture_metrics: CaptureMetricsSnapshot::default(),
+            last_capture_pressure: 0,
+            decode_rx,
+            decode_metrics,
+            last_decode_metrics: DecodeMetricsSnapshot::default(),
             tui,
             settings,
             mapping_store,
@@ -85,10 +106,16 @@ impl AppRuntime {
         frame_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut metrics_tick = time::interval(self.policy.metrics_interval);
         metrics_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut live_body_tick = time::interval(self.policy.live_body_interval);
+        live_body_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         self.tui
             .draw(&mut self.ui, &mut self.app)
             .context("failed to draw initial terminal frame")?;
         let mut dirty = false;
+        let mut captures_open = true;
+        let mut logs_open = true;
+        let mut logging_status_open = true;
+        let mut decode_results_open = true;
 
         loop {
             tokio::select! {
@@ -103,24 +130,47 @@ impl AppRuntime {
                     dirty = true;
                     dirty |= self.handle_settings_save_request();
                 }
-                capture = self.capture_rx.recv() => {
-                    if let Some(capture) = capture {
-                        self.app.add_request(capture);
-                        self.drain_runtime_events();
-                        dirty = true;
+                capture = self.capture_rx.recv(), if captures_open => {
+                    match capture {
+                        Some(capture) => {
+                            self.app.add_capture(capture);
+                            self.drain_runtime_events();
+                            dirty = true;
+                        }
+                        None => captures_open = false,
                     }
                 }
-                record = self.log_rx.recv() => {
-                    if let Some(record) = record {
-                        self.app.append_log(record);
-                        self.drain_runtime_events();
-                        dirty = true;
+                _ = self.capture_dirty.notified() => {
+                    let pressure = self.capture_metrics.snapshot().memory_pressure;
+                    if pressure > self.last_capture_pressure {
+                        self.last_capture_pressure = pressure;
+                        self.app.evict_oldest_capture();
+                    }
+                    dirty = true;
+                }
+                result = self.decode_rx.recv(), if decode_results_open => {
+                    match result {
+                        Some(result) => dirty |= self.app.apply_decode_result(result),
+                        None => decode_results_open = false,
                     }
                 }
-                status = self.logging_status_rx.recv() => {
-                    if let Some(LoggingStatus::Degraded(message)) = status {
-                        self.app.append_log(LogRecord::system(format!("ERROR - [wirelens::logging] {message}")));
-                        dirty = true;
+                record = self.log_rx.recv(), if logs_open => {
+                    match record {
+                        Some(record) => {
+                            self.app.append_log(record);
+                            self.drain_runtime_events();
+                            dirty = true;
+                        }
+                        None => logs_open = false,
+                    }
+                }
+                status = self.logging_status_rx.recv(), if logging_status_open => {
+                    match status {
+                        Some(LoggingStatus::Degraded(message)) => {
+                            self.app.append_log(LogRecord::system(format!("ERROR - [wirelens::logging] {message}")));
+                            dirty = true;
+                        }
+                        None => logging_status_open = false,
                     }
                 }
                 completion = self.services.join_next() => {
@@ -149,10 +199,21 @@ impl AppRuntime {
                             self.app.append_log(LogRecord::system(format!("ERROR - [wirelens::runtime] {message}")));
                             dirty = true;
                         }
+                        ServiceKind::BodyPumps => {
+                            completion.result?;
+                            return Err(anyhow!("body pump supervisor exited unexpectedly"));
+                        }
+                        ServiceKind::Decoder => {
+                            completion.result?;
+                            return Err(anyhow!("decode service exited unexpectedly"));
+                        }
                     }
                 }
                 _ = metrics_tick.tick() => {
                     dirty |= self.refresh_metrics();
+                }
+                _ = live_body_tick.tick() => {
+                    dirty |= self.app.refresh_selected_live_body();
                 }
                 _ = frame_tick.tick() => {
                     if dirty {
@@ -190,7 +251,7 @@ impl AppRuntime {
             }
 
             if let Ok(capture) = self.capture_rx.try_recv() {
-                self.app.add_request(capture);
+                self.app.add_capture(capture);
                 continue;
             }
             if let Ok(record) = self.log_rx.try_recv() {
@@ -223,20 +284,41 @@ impl AppRuntime {
     }
 
     fn refresh_metrics(&mut self) -> bool {
-        let snapshot = self.logging_metrics.snapshot();
-        if snapshot == self.last_logging_metrics {
+        let logging = self.logging_metrics.snapshot();
+        let capture = self.capture_metrics.snapshot();
+        let decode = self.decode_metrics.snapshot();
+        if logging == self.last_logging_metrics
+            && capture == self.last_capture_metrics
+            && decode == self.last_decode_metrics
+        {
             return false;
         }
-        self.last_logging_metrics = snapshot;
-        if snapshot == LoggingMetricsSnapshot::default() {
-            return false;
+        self.last_logging_metrics = logging;
+        self.last_capture_metrics = capture;
+        self.last_decode_metrics = decode;
+        let mut changed = false;
+        if logging != LoggingMetricsSnapshot::default()
+            || capture != CaptureMetricsSnapshot::default()
+            || decode != DecodeMetricsSnapshot::default()
+        {
+            self.app.append_log(LogRecord::system(format!(
+                "WARN - [wirelens::metrics] capture_not_admitted={} capture_memory_pressure={} preview_body_limited={} preview_memory_limited={} metadata_truncated={} decode_rejected={} decode_superseded={} decode_limited={} decode_failed={} log_producer_dropped={} log_tui_dropped={} log_truncated={}",
+                capture.exchanges_not_admitted,
+                capture.memory_pressure,
+                capture.previews_per_body_limited,
+                capture.previews_memory_limited,
+                capture.metadata_truncated,
+                decode.rejected,
+                decode.superseded,
+                decode.output_limited,
+                decode.failed,
+                logging.producer_dropped,
+                logging.tui_dropped,
+                logging.records_truncated
+            )));
+            changed = true;
         }
-
-        self.app.append_log(LogRecord::system(format!(
-            "WARN - [wirelens::metrics] log drops producer={} tui={} truncated={}",
-            snapshot.producer_dropped, snapshot.tui_dropped, snapshot.records_truncated
-        )));
-        true
+        changed
     }
 }
 
@@ -246,20 +328,23 @@ pub(super) struct Tui {
 
 impl Tui {
     pub fn enter() -> io::Result<Self> {
+        let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+        let mut terminal = ratatui::Terminal::new(backend)?;
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        ) {
+            let _ = execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            );
             let _ = disable_raw_mode();
             return Err(error);
         }
-        let backend = ratatui::backend::CrosstermBackend::new(stdout);
-        match ratatui::Terminal::new(backend) {
-            Ok(terminal) => Ok(Self { terminal }),
-            Err(error) => {
-                let _ = disable_raw_mode();
-                Err(error)
-            }
-        }
+        Ok(Self { terminal })
     }
 
     fn draw(&mut self, ui: &mut RootView, app: &mut App) -> io::Result<()> {

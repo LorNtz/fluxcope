@@ -1,4 +1,6 @@
 mod app;
+#[doc(hidden)]
+pub mod benchmark_support;
 mod ca;
 pub mod capture;
 mod logging;

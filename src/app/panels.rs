@@ -121,6 +121,7 @@ pub struct DetailPanel {
     pub selected_header_row: Option<usize>,
     pub body_viewer: BodyViewer,
     cached_body_text: Option<CachedBodyText>,
+    body_text_revision: u64,
 }
 
 impl DetailPanel {
@@ -131,6 +132,7 @@ impl DetailPanel {
             selected_header_row: None,
             body_viewer: BodyViewer::new(),
             cached_body_text: None,
+            body_text_revision: 0,
         }
     }
 
@@ -164,6 +166,7 @@ impl DetailPanel {
         self.selected_header_row = None;
         self.body_viewer.reset();
         self.cached_body_text = None;
+        self.body_text_revision = self.body_text_revision.wrapping_add(1);
     }
 
     pub(in crate::app) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {
@@ -182,6 +185,7 @@ impl DetailPanel {
 
     pub(in crate::app) fn cache_body_text(&mut self, key: BodyViewerKey, text: String) {
         self.cached_body_text = Some(CachedBodyText::new(key, text));
+        self.body_text_revision = self.body_text_revision.wrapping_add(1);
     }
 
     pub(in crate::app) fn take_cached_body_text(&mut self, key: BodyViewerKey) -> Option<String> {
@@ -190,12 +194,19 @@ impl DetailPanel {
             .as_ref()
             .is_some_and(|cached| cached.key == key)
         {
-            self.cached_body_text
+            let text = self
+                .cached_body_text
                 .take()
-                .map(|cached| cached.source_text)
+                .map(|cached| cached.source_text);
+            self.body_text_revision = self.body_text_revision.wrapping_add(1);
+            text
         } else {
             None
         }
+    }
+
+    pub(in crate::app) fn body_text_revision(&self) -> u64 {
+        self.body_text_revision
     }
 }
 
@@ -227,6 +238,9 @@ pub struct LogPanel {
     logs: std::collections::VecDeque<LogRecord>,
     retained_bytes: usize,
     retention: LogRetentionPolicy,
+    rendered_text: String,
+    rendered_text_dirty: bool,
+    revision: u64,
     pub scroll: ScrollState,
     pub visible: bool,
 }
@@ -237,6 +251,9 @@ impl LogPanel {
             logs: std::collections::VecDeque::new(),
             retained_bytes: 0,
             retention,
+            rendered_text: String::new(),
+            rendered_text_dirty: false,
+            revision: 0,
             scroll: ScrollState::new(),
             visible: false,
         }
@@ -245,6 +262,7 @@ impl LogPanel {
     pub fn add_log(&mut self, record: LogRecord) {
         self.retained_bytes = self.retained_bytes.saturating_add(record.len());
         self.logs.push_back(record);
+        let mut evicted_any = false;
         while self.logs.len() > self.retention.max_records
             || self.retained_bytes > self.retention.max_bytes
         {
@@ -252,10 +270,34 @@ impl LogPanel {
                 break;
             };
             self.retained_bytes = self.retained_bytes.saturating_sub(evicted.len());
+            evicted_any = true;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        if evicted_any {
+            self.rendered_text_dirty = true;
+        } else if !self.rendered_text_dirty {
+            if !self.rendered_text.is_empty() {
+                self.rendered_text.push('\n');
+            }
+            if let Some(record) = self.logs.back() {
+                self.rendered_text.push_str(record.as_str());
+            }
         }
     }
 
-    pub fn render_text(&self) -> String {
+    pub fn render_text(&mut self) -> &str {
+        if self.rendered_text_dirty {
+            self.rebuild_rendered_text();
+            self.rendered_text_dirty = false;
+        }
+        &self.rendered_text
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn rebuild_rendered_text(&mut self) {
         let newline_bytes = self.logs.len().saturating_sub(1);
         let mut rendered = String::with_capacity(self.retained_bytes + newline_bytes);
         for (index, record) in self.logs.iter().enumerate() {
@@ -264,7 +306,7 @@ impl LogPanel {
             }
             rendered.push_str(record.as_str());
         }
-        rendered
+        self.rendered_text = rendered;
     }
 
     pub fn toggle(&mut self) {

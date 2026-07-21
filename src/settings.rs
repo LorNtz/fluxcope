@@ -275,7 +275,6 @@ impl SettingsManager {
         self.settings.proxy.as_ref()
     }
 
-    #[allow(dead_code)]
     pub fn update<F>(&mut self, change: F) -> io::Result<()>
     where
         F: FnOnce(&mut AppSettings),
@@ -287,11 +286,9 @@ impl SettingsManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn set_server_port(&mut self, port: u16) -> io::Result<()> {
-        self.update(|settings| {
-            settings.server.port = port;
-        })
+        self.update(|settings| settings.server.port = port)
     }
 
     fn save(&self) -> io::Result<()> {
@@ -370,6 +367,20 @@ fn preserve_semantic_noop_entries(
     let mut missing = Vec::new();
     collect_missing_entries(Some(value), previous, &mut Vec::new(), &mut missing);
 
+    let mut batch = value.clone();
+    let inserted_all = missing
+        .iter()
+        .all(|entry| insert_config_entry(&mut batch, &entry.path, entry.value.clone()));
+    if inserted_all {
+        let batch_settings: AppSettings =
+            serde_yaml::from_value(batch.clone()).map_err(yaml_error)?;
+        if batch_settings == *settings {
+            *value = batch;
+            reorder_mappings_like_previous(value, previous);
+            return Ok(());
+        }
+    }
+
     for entry in missing {
         let mut candidate = value.clone();
         if !insert_config_entry(&mut candidate, &entry.path, entry.value) {
@@ -385,6 +396,77 @@ fn preserve_semantic_noop_entries(
     reorder_mappings_like_previous(value, previous);
 
     Ok(())
+}
+
+pub(crate) fn benchmark_yaml_semantic_preservation(rule_count: usize) -> usize {
+    let rules = (0..rule_count)
+        .map(|index| ProxyMapRemoteRule {
+            from: format!("https://source-{index}.example"),
+            to: format!("https://target-{index}.example"),
+            enable: true,
+        })
+        .collect();
+    let settings = AppSettings {
+        proxy: Some(ProxySettings {
+            enable: true,
+            active_preset: Some("benchmark".to_string()),
+            presets: vec![ProxyPresetSettings {
+                name: "benchmark".to_string(),
+                map_remote: ProxyMapRemoteSettings {
+                    enable: true,
+                    rules,
+                },
+                map_local: ProxyMapLocalSettings::default(),
+            }],
+        }),
+        ..AppSettings::default()
+    };
+    let mut value = serde_yaml::to_value(&settings).expect("benchmark settings should serialize");
+    let mut previous = value.clone();
+    add_explicit_default_enable_fields(&mut previous);
+    preserve_semantic_noop_entries(&mut value, &previous, &settings)
+        .expect("benchmark preservation should remain semantically valid");
+    serde_yaml::to_string(&value)
+        .expect("benchmark settings should serialize to text")
+        .len()
+}
+
+fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
+    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+    let Some(proxy) = value
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(key("proxy")))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    proxy.insert(key("enable"), serde_yaml::Value::Bool(true));
+    let Some(presets) = proxy
+        .get_mut(key("presets"))
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return;
+    };
+    for preset in presets {
+        let Some(remote) = preset
+            .as_mapping_mut()
+            .and_then(|preset| preset.get_mut(key("map_remote")))
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        else {
+            continue;
+        };
+        remote.insert(key("enable"), serde_yaml::Value::Bool(true));
+        if let Some(rules) = remote
+            .get_mut(key("rules"))
+            .and_then(serde_yaml::Value::as_sequence_mut)
+        {
+            for rule in rules {
+                if let Some(rule) = rule.as_mapping_mut() {
+                    rule.insert(key("enable"), serde_yaml::Value::Bool(true));
+                }
+            }
+        }
+    }
 }
 
 fn collect_missing_entries(
@@ -894,9 +976,12 @@ proxy:
     }
 
     fn temp_config_path() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+        let unique = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         env::temp_dir().join(format!(
-            "wirelens-settings-{}/config.yml",
-            uuid::Uuid::new_v4()
+            "wirelens-settings-{}-{unique}/config.yml",
+            std::process::id()
         ))
     }
 

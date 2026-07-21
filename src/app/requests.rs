@@ -3,17 +3,27 @@ use tui_tree_widget::TreeState;
 use super::{
     App,
     request_tree::{
-        DeleteSelectionContext, RequestPathTree, RequestTreeEntry, selected_request_sequence,
+        DeleteSelectionContext, RequestTreeEntry, RequestTreeModel, RequestTreeNodeSnapshot,
+        selected_request_sequence,
     },
 };
+#[cfg(test)]
 use crate::capture::CapturedExchange;
+use crate::capture::{CaptureRecord, CaptureSummary};
+use std::sync::Arc;
 
 impl App {
+    #[cfg(test)]
     pub fn add_request(&mut self, req: CapturedExchange) {
+        self.add_capture(CaptureRecord::from_completed(req));
+    }
+
+    pub fn add_capture(&mut self, record: Arc<CaptureRecord>) {
         let was_empty = self.captures.is_empty();
-        let tree_entry = RequestTreeEntry::from(&req);
-        let uri = req.uri.clone();
-        let evicted = self.captures.insert(req);
+        let summary = record.summary();
+        let tree_entry = RequestTreeEntry::from(&summary);
+        let uri = summary.request.original_uri.clone();
+        let evicted = self.captures.insert(record);
         log::info!("request received: {}", uri);
 
         if !evicted.is_empty() {
@@ -118,12 +128,12 @@ impl App {
         &mut self,
         mut should_open: impl FnMut(&[String]) -> bool,
     ) -> bool {
+        self.ensure_request_tree_model();
+        let paths = self.request_tree.branch_paths();
         let mut changed = false;
-        for req in self.captures.iter() {
-            for path in RequestTreeEntry::from(req).branch_paths() {
-                if should_open(&path) {
-                    changed |= self.request_list.state.open(path);
-                }
+        for path in paths {
+            if should_open(&path) {
+                changed |= self.request_list.state.open(path);
             }
         }
         changed
@@ -146,7 +156,13 @@ impl App {
         selected_request_sequence(self.request_list.state.selected())
     }
 
-    pub fn selected_request(&self) -> Option<&CapturedExchange> {
+    pub fn selected_request(&self) -> Option<CaptureSummary> {
+        self.selected_request_sequence()
+            .and_then(|sequence| self.captures.get(sequence))
+            .map(|record| record.summary())
+    }
+
+    pub(crate) fn selected_capture_record(&self) -> Option<Arc<CaptureRecord>> {
         self.selected_request_sequence()
             .and_then(|sequence| self.captures.get(sequence))
     }
@@ -162,17 +178,9 @@ impl App {
             return 0;
         }
 
-        let tree_before_delete = RequestPathTree::from_requests(self.captures.iter());
-        let sequences = self
-            .captures
-            .iter()
-            .filter(|req| {
-                RequestTreeEntry::from(*req)
-                    .request_path()
-                    .starts_with(&selected_path)
-            })
-            .map(|req| req.sequence)
-            .collect::<Vec<_>>();
+        self.ensure_request_tree_model();
+        let tree_before_delete = self.request_tree.clone();
+        let sequences = tree_before_delete.sequences_under(&selected_path);
         let removed_count = self.captures.remove_sequences(sequences);
 
         if removed_count > 0 {
@@ -211,9 +219,10 @@ impl App {
     fn rebuild_request_list_state_after_delete(
         &mut self,
         deleted_path: &[String],
-        tree_before_delete: &RequestPathTree,
+        tree_before_delete: &RequestTreeModel,
     ) {
-        let tree_after_delete = RequestPathTree::from_requests(self.captures.iter());
+        self.ensure_request_tree_model();
+        let tree_after_delete = self.request_tree.clone();
         let opened_paths_before_delete = self
             .request_list
             .state
@@ -245,12 +254,20 @@ impl App {
         self.request_list.state.select(path_to_select);
     }
 
-    pub fn captures(&self) -> impl DoubleEndedIterator<Item = &CapturedExchange> {
-        self.captures.iter()
+    pub fn captures(&self) -> impl DoubleEndedIterator<Item = CaptureSummary> + '_ {
+        self.captures.iter().map(|capture| capture.summary())
     }
 
     pub fn capture_count(&self) -> usize {
         self.captures.len()
+    }
+
+    pub(crate) fn evict_oldest_capture(&mut self) -> bool {
+        if self.captures.evict_oldest().is_none() {
+            return false;
+        }
+        self.repair_request_list_after_retention_eviction();
+        true
     }
 
     #[cfg(test)]
@@ -259,12 +276,16 @@ impl App {
     }
 
     #[cfg(test)]
-    pub fn capture_at(&self, index: usize) -> Option<&CapturedExchange> {
-        self.captures.iter().nth(index)
+    pub fn capture_at(&self, index: usize) -> Option<CaptureSummary> {
+        self.captures
+            .iter()
+            .nth(index)
+            .map(|capture| capture.summary())
     }
 
     fn repair_request_list_after_retention_eviction(&mut self) {
-        let tree = RequestPathTree::from_requests(self.captures.iter());
+        self.ensure_request_tree_model();
+        let tree = self.request_tree.clone();
         let opened = self
             .request_list
             .state
@@ -281,5 +302,24 @@ impl App {
                 .select(visible.first().cloned().unwrap_or_default());
             self.detail_panel.reset_content_position();
         }
+    }
+
+    pub(crate) fn request_tree_snapshot(&mut self) -> Vec<RequestTreeNodeSnapshot> {
+        self.ensure_request_tree_model();
+        self.request_tree.snapshot()
+    }
+
+    pub(crate) fn request_tree_revision(&mut self) -> u64 {
+        self.ensure_request_tree_model();
+        self.request_tree_revision
+    }
+
+    fn ensure_request_tree_model(&mut self) {
+        let revision = self.captures.revision();
+        if revision == self.request_tree_revision {
+            return;
+        }
+        self.request_tree = RequestTreeModel::from_requests(self.captures());
+        self.request_tree_revision = revision;
     }
 }

@@ -67,21 +67,13 @@ impl<'a, Id> SelectWidget<'a, Id> {
         self
     }
 
-    #[allow(dead_code)]
     pub(crate) fn max_visible_items(mut self, max_visible_items: usize) -> Self {
         self.max_visible_items = max_visible_items.max(1);
         self
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_min_width(mut self, min_width: usize) -> Self {
         self.min_width = min_width.max(3);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_max_width(mut self, max_width: usize) -> Self {
-        self.max_width = max_width.max(self.min_width);
         self
     }
 
