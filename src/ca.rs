@@ -1,4 +1,5 @@
 // src/ca.rs
+use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyUsagePurpose,
 };
@@ -18,26 +19,33 @@ pub struct CaData {
 
 impl CaData {
     /// Create new CaData from a Certificate
-    fn from_cert(cert: &Certificate) -> Self {
-        let cert_der = cert.serialize_der().unwrap();
+    fn from_cert(cert: &Certificate) -> Result<Self> {
+        let cert_der = cert
+            .serialize_der()
+            .context("failed to serialize generated CA certificate as DER")?;
         let key_der = cert.serialize_private_key_der();
-        let cert_pem = cert.serialize_pem().unwrap();
-        CaData {
+        let cert_pem = cert
+            .serialize_pem()
+            .context("failed to serialize generated CA certificate as PEM")?;
+        Ok(CaData {
             cert_der,
             key_der,
             cert_pem,
-        }
+        })
     }
 
     /// Load CaData from DER files on disk
-    fn from_disk(cert_dir: &Path, pem_filename: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn from_disk(cert_dir: &Path, pem_filename: &str) -> Result<Self> {
         let cert_path = cert_dir.join(CA_CERT_FILE);
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
 
-        let cert_der = fs::read(cert_path)?;
-        let key_der = fs::read(key_path)?;
-        let cert_pem = fs::read_to_string(pem_path)?;
+        let cert_der = fs::read(&cert_path)
+            .with_context(|| format!("failed to read CA certificate {}", cert_path.display()))?;
+        let key_der = fs::read(&key_path)
+            .with_context(|| format!("failed to read CA private key {}", key_path.display()))?;
+        let cert_pem = fs::read_to_string(&pem_path)
+            .with_context(|| format!("failed to read CA PEM {}", pem_path.display()))?;
 
         Ok(CaData {
             cert_der,
@@ -47,11 +55,18 @@ impl CaData {
     }
 
     /// Save to disk
-    fn save(&self, cert_dir: &Path, pem_filename: &str) -> Result<(), Box<dyn std::error::Error>> {
-        fs::create_dir_all(cert_dir)?;
-        fs::write(cert_dir.join(CA_CERT_FILE), &self.cert_der)?;
-        fs::write(cert_dir.join(CA_KEY_FILE), &self.key_der)?;
-        fs::write(cert_dir.join(pem_filename), &self.cert_pem)?;
+    fn save(&self, cert_dir: &Path, pem_filename: &str) -> Result<()> {
+        fs::create_dir_all(cert_dir)
+            .with_context(|| format!("failed to create CA directory {}", cert_dir.display()))?;
+        let cert_path = cert_dir.join(CA_CERT_FILE);
+        let key_path = cert_dir.join(CA_KEY_FILE);
+        let pem_path = cert_dir.join(pem_filename);
+        fs::write(&cert_path, &self.cert_der)
+            .with_context(|| format!("failed to persist CA certificate {}", cert_path.display()))?;
+        fs::write(&key_path, &self.key_der)
+            .with_context(|| format!("failed to persist CA private key {}", key_path.display()))?;
+        fs::write(&pem_path, &self.cert_pem)
+            .with_context(|| format!("failed to persist CA PEM {}", pem_path.display()))?;
         Ok(())
     }
 
@@ -72,40 +87,29 @@ impl CaData {
 }
 
 /// Create or load CA certificate from disk
-pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> CaData {
+pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> {
     let cert_path = cert_dir.join(CA_CERT_FILE);
     let key_path = cert_dir.join(CA_KEY_FILE);
+    let pem_path = cert_dir.join(pem_filename);
 
-    // Try to load existing certificate
-    if cert_path.exists() && key_path.exists() {
+    if cert_path.exists() || key_path.exists() || pem_path.exists() {
         log::info!("Loading existing CA certificate from {:?}", cert_dir);
-        match CaData::from_disk(cert_dir, pem_filename) {
-            Ok(data) => {
-                log::info!("Successfully loaded existing CA certificate");
-                return data;
-            }
-            Err(e) => {
-                log::warn!("Failed to load existing CA certificate: {}", e);
-                log::info!("Creating new CA certificate...");
-            }
-        }
+        let data = CaData::from_disk(cert_dir, pem_filename)
+            .with_context(|| format!("failed to load CA from {}", cert_dir.display()))?;
+        log::info!("Successfully loaded existing CA certificate");
+        return Ok(data);
     }
 
-    // Create new certificate
-    let cert = create_ca();
-    let data = CaData::from_cert(&cert);
+    let cert = create_ca()?;
+    let data = CaData::from_cert(&cert)?;
 
-    // Save to disk
-    if let Err(e) = data.save(cert_dir, pem_filename) {
-        log::error!("Failed to save CA certificate: {}", e);
-    } else {
-        log::info!("CA certificate saved to {:?}", cert_dir);
-    }
+    data.save(cert_dir, pem_filename)?;
+    log::info!("CA certificate saved to {:?}", cert_dir);
 
-    data
+    Ok(data)
 }
 
-fn create_ca() -> Certificate {
+fn create_ca() -> Result<Certificate> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.distinguished_name = DistinguishedName::new();
@@ -117,7 +121,7 @@ fn create_ca() -> Certificate {
         KeyUsagePurpose::DigitalSignature,
     ];
 
-    Certificate::from_params(params).unwrap()
+    Certificate::from_params(params).context("failed to generate CA certificate")
 }
 
 #[cfg(test)]
@@ -135,7 +139,8 @@ mod tests {
         let _ = fs::remove_dir_all(&cert_dir);
 
         // First run - should create new certificate
-        let ca1 = create_or_load_ca(&cert_dir, pem_filename);
+        let ca1 =
+            create_or_load_ca(&cert_dir, pem_filename).expect("first CA creation should succeed");
         let cert_pem1 = ca1.cert_pem();
 
         // Verify files were created
@@ -153,7 +158,7 @@ mod tests {
         );
 
         // Second run - should load existing certificate
-        let ca2 = create_or_load_ca(&cert_dir, pem_filename);
+        let ca2 = create_or_load_ca(&cert_dir, pem_filename).expect("persisted CA should load");
         let cert_pem2 = ca2.cert_pem();
 
         // Certificates should match
@@ -167,6 +172,23 @@ mod tests {
         assert_eq!(ca1.key_der(), ca2.key_der(), "Key DER bytes should match");
 
         // Clean up
+        let _ = fs::remove_dir_all(&cert_dir);
+    }
+
+    #[test]
+    fn incomplete_persisted_authority_is_fatal() {
+        let cert_dir = temp_cert_dir();
+        let pem_filename = "wirelens-ca.pem";
+        fs::create_dir_all(&cert_dir).expect("test CA directory should be created");
+        fs::write(cert_dir.join(CA_CERT_FILE), b"incomplete")
+            .expect("partial CA file should be written");
+
+        let error = create_or_load_ca(&cert_dir, pem_filename)
+            .err()
+            .expect("partial persisted CA should fail");
+
+        assert!(error.to_string().contains("failed to load CA"));
+        assert!(!cert_dir.join(CA_KEY_FILE).exists());
         let _ = fs::remove_dir_all(&cert_dir);
     }
 

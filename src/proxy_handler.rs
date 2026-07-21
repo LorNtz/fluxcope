@@ -21,7 +21,7 @@ use std::sync::{
 use tokio::sync::mpsc;
 
 pub struct LogHandler {
-    tx: mpsc::UnboundedSender<CapturedExchange>,
+    tx: mpsc::Sender<CapturedExchange>,
     next_sequence: Arc<AtomicU64>,
     mapping_store: MappingStore,
     recording: RecordingState,
@@ -30,7 +30,7 @@ pub struct LogHandler {
 
 impl LogHandler {
     pub fn new(
-        tx: mpsc::UnboundedSender<CapturedExchange>,
+        tx: mpsc::Sender<CapturedExchange>,
         mapping_store: MappingStore,
         recording: RecordingState,
     ) -> Self {
@@ -154,7 +154,7 @@ impl LogHandler {
         data.status = Some(status);
         data.res_headers = res_headers;
         data.res_body = res_body;
-        let _ = self.tx.send(data);
+        let _ = self.tx.try_send(data);
 
         reconstructed_res
     }
@@ -346,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloned_handlers_capture_concurrent_requests_independently() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let base_handler = LogHandler::new(tx, MappingStore::default(), RecordingState::default());
         let mut slow_handler = base_handler.clone();
         let mut fast_handler = base_handler.clone();
@@ -377,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_mapping_rewrites_forwarded_uri_but_captures_original_uri() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let mut handler = LogHandler::new(
             tx,
             mapping_store(
@@ -416,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn recording_off_forwards_mapped_request_without_capture() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let mut handler = LogHandler::new(
             tx,
             mapping_store(
@@ -456,7 +456,7 @@ mod tests {
     async fn recording_off_returns_local_mapping_response_without_capture() {
         let path = temp_file_path("api-recording-off.json");
         fs::write(&path, r#"{"mock":true}"#).expect("test file should be written");
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let mut handler = LogHandler::new(
             tx,
             mapping_store(
@@ -493,7 +493,7 @@ mod tests {
     async fn local_mapping_returns_file_response_and_records_capture() {
         let path = temp_file_path("api1.json");
         fs::write(&path, r#"{"ok":true}"#).expect("test file should be written");
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let mut handler = LogHandler::new(
             tx,
             mapping_store(
@@ -538,7 +538,7 @@ mod tests {
     async fn missing_local_file_returns_bad_gateway_and_records_error_body() {
         let path = temp_file_path("missing.json");
         let _ = fs::remove_file(&path);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         let mut handler = LogHandler::new(
             tx,
             mapping_store(
@@ -589,7 +589,7 @@ mod tests {
             .expect("test response should be valid")
     }
 
-    fn received_request(rx: &mut mpsc::UnboundedReceiver<CapturedExchange>) -> CapturedExchange {
+    fn received_request(rx: &mut mpsc::Receiver<CapturedExchange>) -> CapturedExchange {
         rx.try_recv().expect("request should have been captured")
     }
 

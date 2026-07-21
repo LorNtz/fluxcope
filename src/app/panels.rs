@@ -1,4 +1,7 @@
-use crate::settings::RequestListSettings;
+use crate::{
+    logging::{LogRecord, LogRetentionPolicy},
+    settings::RequestListSettings,
+};
 use ratatui::layout::Position;
 use tui_tree_widget::TreeState;
 
@@ -221,22 +224,47 @@ impl CachedBodyText {
 }
 
 pub struct LogPanel {
-    pub logs: Vec<String>,
+    logs: std::collections::VecDeque<LogRecord>,
+    retained_bytes: usize,
+    retention: LogRetentionPolicy,
     pub scroll: ScrollState,
     pub visible: bool,
 }
 
 impl LogPanel {
-    pub fn new() -> Self {
+    pub fn with_retention(retention: LogRetentionPolicy) -> Self {
         Self {
-            logs: vec![],
+            logs: std::collections::VecDeque::new(),
+            retained_bytes: 0,
+            retention,
             scroll: ScrollState::new(),
             visible: false,
         }
     }
 
-    pub fn add_log(&mut self, msg: String) {
-        self.logs.push(msg);
+    pub fn add_log(&mut self, record: LogRecord) {
+        self.retained_bytes = self.retained_bytes.saturating_add(record.len());
+        self.logs.push_back(record);
+        while self.logs.len() > self.retention.max_records
+            || self.retained_bytes > self.retention.max_bytes
+        {
+            let Some(evicted) = self.logs.pop_front() else {
+                break;
+            };
+            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.len());
+        }
+    }
+
+    pub fn render_text(&self) -> String {
+        let newline_bytes = self.logs.len().saturating_sub(1);
+        let mut rendered = String::with_capacity(self.retained_bytes + newline_bytes);
+        for (index, record) in self.logs.iter().enumerate() {
+            if index > 0 {
+                rendered.push('\n');
+            }
+            rendered.push_str(record.as_str());
+        }
+        rendered
     }
 
     pub fn toggle(&mut self) {
@@ -267,5 +295,25 @@ impl CertificatePopup {
 
     pub fn set_download_url(&mut self, download_url: String) {
         self.download_url = Some(download_url);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_retention_evicts_by_count_and_bytes() {
+        let mut panel = LogPanel::with_retention(LogRetentionPolicy {
+            max_records: 2,
+            max_bytes: 5,
+        });
+
+        panel.add_log(LogRecord::system("abc".to_string()));
+        panel.add_log(LogRecord::system("de".to_string()));
+        panel.add_log(LogRecord::system("fghi".to_string()));
+
+        assert_eq!(panel.render_text(), "fghi");
+        assert_eq!(panel.retained_bytes, 4);
     }
 }

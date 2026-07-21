@@ -11,7 +11,12 @@ mod tests;
 
 #[cfg(test)]
 use crate::settings::UiSettings;
-use crate::{capture::CapturedExchange, recording::RecordingState, settings::AppSettings};
+use crate::{
+    capture::CapturedExchange,
+    logging::{LogRecord, LogRetentionPolicy},
+    recording::RecordingState,
+    settings::AppSettings,
+};
 use focus::FocusState;
 
 pub(crate) use body_viewer::BODY_TEXT_TAB_WIDTH;
@@ -61,7 +66,16 @@ impl App {
         Self::with_settings(settings, recording)
     }
 
+    #[cfg(test)]
     pub fn with_settings(settings: AppSettings, recording: RecordingState) -> Self {
+        Self::with_settings_and_log_retention(settings, recording, LogRetentionPolicy::default())
+    }
+
+    pub fn with_settings_and_log_retention(
+        settings: AppSettings,
+        recording: RecordingState,
+        log_retention: LogRetentionPolicy,
+    ) -> Self {
         let ui_settings = settings.ui.clone();
         Self {
             requests: vec![],
@@ -69,7 +83,7 @@ impl App {
             focus: FocusState::new(),
             request_list: RequestListPanel::new(ui_settings.request_list),
             detail_panel: DetailPanel::new(),
-            log_panel: LogPanel::new(),
+            log_panel: LogPanel::with_retention(log_retention),
             certificate_popup: CertificatePopup::new(),
             settings_popup: SettingsPopup::new(),
             settings,
@@ -115,8 +129,8 @@ impl App {
         self.focus.open_popup(PopupFocus::Settings);
     }
 
-    pub fn append_log(&mut self, message: String) {
-        self.log_panel.add_log(message);
+    pub fn append_log(&mut self, record: LogRecord) {
+        self.log_panel.add_log(record);
     }
 
     pub fn set_certificate_download_url(&mut self, download_url: String) {

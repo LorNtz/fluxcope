@@ -3025,7 +3025,7 @@ impl View for LogView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         let focused = app.is_panel_focused(PanelFocus::Log);
-        let mut paragraph = Paragraph::new(app.log_panel.logs.join("\n"))
+        let mut paragraph = Paragraph::new(app.log_panel.render_text())
             .wrap(Wrap { trim: false })
             .block(panel_block("Logs", focused));
 
