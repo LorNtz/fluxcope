@@ -1,4 +1,4 @@
-use crate::proxy_handler::CapturedData;
+use crate::capture::{CaptureSequence, CapturedExchange};
 use std::collections::HashSet;
 use url::Url;
 
@@ -16,7 +16,7 @@ impl RequestPathTree {
     ///
     /// This tree mirrors the UI tree's identifier structure without depending on UI
     /// rendering code, which lets app-state logic make selection decisions directly.
-    pub(in crate::app) fn from_requests(requests: &[CapturedData]) -> Self {
+    pub(in crate::app) fn from_requests(requests: &[CapturedExchange]) -> Self {
         let mut tree = Self::default();
 
         for req in requests {
@@ -255,7 +255,7 @@ impl<'a> DeleteSelectionContext<'a> {
 pub struct RequestTreeEntry {
     pub origin: String,
     pub segments: Vec<String>,
-    request_sequence: u64,
+    request_sequence: CaptureSequence,
 }
 
 impl RequestTreeEntry {
@@ -291,8 +291,8 @@ impl RequestTreeEntry {
     }
 }
 
-impl From<&CapturedData> for RequestTreeEntry {
-    fn from(req: &CapturedData) -> Self {
+impl From<&CapturedExchange> for RequestTreeEntry {
+    fn from(req: &CapturedExchange) -> Self {
         let display_uri = request_display_uri(req);
         let (origin, segments) = Url::parse(display_uri)
             .ok()
@@ -313,11 +313,12 @@ impl From<&CapturedData> for RequestTreeEntry {
     }
 }
 
-pub(in crate::app) fn selected_request_sequence(path: &[String]) -> Option<u64> {
+pub(in crate::app) fn selected_request_sequence(path: &[String]) -> Option<CaptureSequence> {
     path.last()?
         .strip_prefix(REQUEST_IDENTIFIER_PREFIX)?
         .parse()
         .ok()
+        .map(CaptureSequence::new)
 }
 
 pub(in crate::app) fn origin_identifier(origin: &str) -> String {
@@ -328,8 +329,8 @@ fn segment_identifier(segment: &str) -> String {
     format!("{SEGMENT_IDENTIFIER_PREFIX}{segment}")
 }
 
-fn request_identifier(sequence: u64) -> String {
-    format!("{REQUEST_IDENTIFIER_PREFIX}{sequence}")
+fn request_identifier(sequence: CaptureSequence) -> String {
+    format!("{REQUEST_IDENTIFIER_PREFIX}{}", sequence.value())
 }
 
 fn parent_segments(segments: &[String]) -> &[String] {
@@ -346,11 +347,11 @@ fn absolute_url_origin(url: &Url) -> String {
     }
 }
 
-fn request_display_uri(req: &CapturedData) -> &str {
-    req.mapped_uri.as_deref().unwrap_or(&req.uri)
+fn request_display_uri(req: &CapturedExchange) -> &str {
+    req.display_uri()
 }
 
-fn fallback_origin_and_segments(req: &CapturedData) -> (String, Vec<String>) {
+fn fallback_origin_and_segments(req: &CapturedExchange) -> (String, Vec<String>) {
     let origin = request_header(req, "host")
         .map(|host| format!("https://{host}"))
         .unwrap_or_else(|| "(unknown host)".to_string());
@@ -362,7 +363,7 @@ fn fallback_origin_and_segments(req: &CapturedData) -> (String, Vec<String>) {
     (origin, path_segments_with_query(path, query))
 }
 
-fn request_header<'a>(req: &'a CapturedData, name: &str) -> Option<&'a str> {
+fn request_header<'a>(req: &'a CapturedExchange, name: &str) -> Option<&'a str> {
     req.req_headers
         .iter()
         .find(|(key, value)| key.eq_ignore_ascii_case(name) && !value.is_empty())

@@ -1,4 +1,3 @@
-use crate::app::AppEvent;
 use log::{Level, Metadata, Record, SetLoggerError};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -7,11 +6,11 @@ use tokio::sync::mpsc;
 
 pub struct AppLogger {
     file: Mutex<File>,
-    tx: mpsc::UnboundedSender<AppEvent>,
+    tx: mpsc::UnboundedSender<String>,
 }
 
 impl AppLogger {
-    pub fn new(tx: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<String>) -> Self {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -24,7 +23,7 @@ impl AppLogger {
         }
     }
 
-    pub fn init(tx: mpsc::UnboundedSender<AppEvent>) -> Result<(), SetLoggerError> {
+    pub fn init(tx: mpsc::UnboundedSender<String>) -> Result<(), SetLoggerError> {
         let logger = Box::new(AppLogger::new(tx));
         log::set_logger(Box::leak(logger)).map(|()| log::set_max_level(log::LevelFilter::Info))
     }
@@ -58,7 +57,7 @@ impl log::Log for AppLogger {
             }
 
             // Send to TUI
-            let _ = self.tx.send(AppEvent::LogMessage(log_msg));
+            let _ = self.tx.send(log_msg);
         }
     }
 

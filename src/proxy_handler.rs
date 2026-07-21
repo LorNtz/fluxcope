@@ -1,5 +1,9 @@
 // src/proxy_handler.rs
-use crate::{app::AppEvent, mapping::MappingStore, recording::RecordingState};
+use crate::{
+    capture::{CaptureSequence, CapturedExchange},
+    mapping::MappingStore,
+    recording::RecordingState,
+};
 use hudsucker::{
     HttpContext, HttpHandler, RequestOrResponse,
     async_trait::async_trait,
@@ -16,33 +20,17 @@ use std::sync::{
 };
 use tokio::sync::mpsc;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CapturedData {
-    pub id: uuid::Uuid,
-    pub sequence: u64,
-    pub method: Method,
-    pub uri: String,
-    pub mapped_uri: Option<String>,
-    pub local_path: Option<String>,
-    pub status: Option<u16>,
-    pub req_headers: Vec<(String, String)>,
-    pub res_headers: Vec<(String, String)>,
-    pub req_body: Option<String>,
-    pub res_body: Option<String>,
-}
-
 pub struct LogHandler {
-    tx: mpsc::UnboundedSender<AppEvent>,
+    tx: mpsc::UnboundedSender<CapturedExchange>,
     next_sequence: Arc<AtomicU64>,
     mapping_store: MappingStore,
     recording: RecordingState,
-    current_request: Option<CapturedData>,
+    current_request: Option<CapturedExchange>,
 }
 
 impl LogHandler {
     pub fn new(
-        tx: mpsc::UnboundedSender<AppEvent>,
+        tx: mpsc::UnboundedSender<CapturedExchange>,
         mapping_store: MappingStore,
         recording: RecordingState,
     ) -> Self {
@@ -66,8 +54,7 @@ impl LogHandler {
             return self.forward_uncaptured_request(req).await;
         }
 
-        let id = uuid::Uuid::new_v4();
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        let sequence = CaptureSequence::new(self.next_sequence.fetch_add(1, Ordering::Relaxed));
         let (mut parts, body) = req.into_parts();
 
         let (req_body, req_body_bytes) = match hyper::body::to_bytes(body).await {
@@ -78,8 +65,7 @@ impl LogHandler {
             }
         };
 
-        let data = CapturedData {
-            id,
+        let data = CapturedExchange {
             sequence,
             method: parts.method.clone(),
             uri: parts.uri.to_string(),
@@ -168,7 +154,7 @@ impl LogHandler {
         data.status = Some(status);
         data.res_headers = res_headers;
         data.res_body = res_body;
-        let _ = self.tx.send(AppEvent::NetworkRequest(data));
+        let _ = self.tx.send(data);
 
         reconstructed_res
     }
@@ -378,11 +364,11 @@ mod tests {
         let fast = received_request(&mut rx);
         let slow = received_request(&mut rx);
 
-        assert_eq!(fast.sequence, 1);
+        assert_eq!(fast.sequence, CaptureSequence::new(1));
         assert_eq!(fast.uri, "https://example.com/fast");
         assert_eq!(fast.status, Some(200));
         assert_eq!(fast.res_body.as_deref(), Some("fast body"));
-        assert_eq!(slow.sequence, 0);
+        assert_eq!(slow.sequence, CaptureSequence::new(0));
         assert_eq!(slow.uri, "https://example.com/slow");
         assert_eq!(slow.status, Some(201));
         assert_eq!(slow.res_body.as_deref(), Some("slow body"));
@@ -603,13 +589,8 @@ mod tests {
             .expect("test response should be valid")
     }
 
-    fn received_request(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> CapturedData {
-        match rx.try_recv().expect("request should have been captured") {
-            AppEvent::NetworkRequest(data) => data,
-            AppEvent::LogMessage(_) | AppEvent::CertificateDownloadReady(_) => {
-                panic!("unexpected app event")
-            }
-        }
+    fn received_request(rx: &mut mpsc::UnboundedReceiver<CapturedExchange>) -> CapturedExchange {
+        rx.try_recv().expect("request should have been captured")
     }
 
     fn mapping_store(

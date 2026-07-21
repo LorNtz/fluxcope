@@ -17,19 +17,19 @@ use edtui::{
 use ratatui::layout::{Position, Rect};
 
 use super::{App, panels::MainDisplayTab};
-use crate::proxy_handler::CapturedData;
+use crate::capture::{CaptureSequence, CapturedExchange};
 
 pub(crate) const BODY_TEXT_TAB: &str = "    ";
 pub(crate) const BODY_TEXT_TAB_WIDTH: usize = BODY_TEXT_TAB.len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BodyViewerKey {
-    sequence: u64,
+    sequence: CaptureSequence,
     tab: MainDisplayTab,
 }
 
 impl BodyViewerKey {
-    pub fn new(sequence: u64, tab: MainDisplayTab) -> Self {
+    pub fn new(sequence: CaptureSequence, tab: MainDisplayTab) -> Self {
         Self { sequence, tab }
     }
 
@@ -764,7 +764,7 @@ impl App {
     }
 }
 
-pub(crate) fn body_text_for_tab(req: &CapturedData, tab: MainDisplayTab) -> Option<String> {
+pub(crate) fn body_text_for_tab(req: &CapturedExchange, tab: MainDisplayTab) -> Option<String> {
     match tab {
         MainDisplayTab::RequestBody => Some(format_request_body(
             req.req_body.as_deref(),
@@ -784,7 +784,7 @@ pub(crate) fn format_request_body(body: Option<&str>, headers: &[(String, String
     }
 }
 
-pub(crate) fn format_response_body(req: &CapturedData) -> String {
+pub(crate) fn format_response_body(req: &CapturedExchange) -> String {
     match req.res_body.as_deref() {
         Some(body) if req.local_path.is_some() => body.to_string(),
         None if req.local_path.is_some() => String::new(),

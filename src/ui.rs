@@ -416,7 +416,7 @@ fn root_mut_or_insert(
 mod tests {
     use super::*;
     use crate::app::{format_request_body, format_response_body};
-    use crate::proxy_handler::CapturedData;
+    use crate::capture::{CaptureSequence, CapturedExchange};
     use crate::settings::{ProxyPresetSettings, ProxySettings, RequestListSettings, UiSettings};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
     use http::Method;
@@ -472,10 +472,9 @@ mod tests {
         }
     }
 
-    fn captured(sequence: u64, uri: &str) -> CapturedData {
-        CapturedData {
-            id: uuid::Uuid::nil(),
-            sequence,
+    fn captured(sequence: u64, uri: &str) -> CapturedExchange {
+        CapturedExchange {
+            sequence: CaptureSequence::new(sequence),
             method: Method::GET,
             uri: uri.to_string(),
             mapped_uri: None,
@@ -517,7 +516,7 @@ mod tests {
                 .iter()
                 .all(|cell| !cell.symbol().contains('\t'))
         );
-        let key = BodyViewerKey::new(0, MainDisplayTab::ResponseBody);
+        let key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::ResponseBody);
         assert_eq!(app.cached_body_text(key), Some(raw_body));
         assert_eq!(
             app.cached_body_render_text(key),
@@ -5364,7 +5363,7 @@ fn build_detail_content(app: &App) -> DetailContent {
     }
 }
 
-fn request_header_rows(req: &crate::proxy_handler::CapturedData) -> Vec<TableRow> {
+fn request_header_rows(req: &crate::capture::CapturedExchange) -> Vec<TableRow> {
     let mut lines = vec![
         header_table_row("Method", req.method.to_string()),
         header_table_row("URI", req.uri.clone()),
@@ -5385,7 +5384,7 @@ fn request_header_rows(req: &crate::proxy_handler::CapturedData) -> Vec<TableRow
     lines
 }
 
-fn response_header_rows(req: &crate::proxy_handler::CapturedData) -> Vec<TableRow> {
+fn response_header_rows(req: &crate::capture::CapturedExchange) -> Vec<TableRow> {
     let mut lines = vec![header_table_row(
         "Status",
         req.status
@@ -5595,7 +5594,7 @@ fn header_table_row_at_position(app: &App, area: Rect, position: Position) -> Op
     })
 }
 
-fn request_header_row_refs(req: &crate::proxy_handler::CapturedData) -> Vec<HeaderTableRowRef<'_>> {
+fn request_header_row_refs(req: &crate::capture::CapturedExchange) -> Vec<HeaderTableRowRef<'_>> {
     let extra_rows = usize::from(req.mapped_uri.is_some()) + usize::from(req.local_path.is_some());
     let mut rows = Vec::with_capacity(2 + extra_rows + req.req_headers.len());
     rows.push(header_table_row_ref("Method", req.method.to_string()));
@@ -5615,9 +5614,7 @@ fn request_header_row_refs(req: &crate::proxy_handler::CapturedData) -> Vec<Head
     rows
 }
 
-fn response_header_row_refs(
-    req: &crate::proxy_handler::CapturedData,
-) -> Vec<HeaderTableRowRef<'_>> {
+fn response_header_row_refs(req: &crate::capture::CapturedExchange) -> Vec<HeaderTableRowRef<'_>> {
     let mut rows = Vec::with_capacity(1 + req.res_headers.len());
     rows.push(header_table_row_ref(
         "Status",

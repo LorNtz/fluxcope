@@ -1,6 +1,7 @@
 use crate::{
-    app::{App, AppEvent},
+    app::App,
     ca,
+    capture::CapturedExchange,
     logging::AppLogger,
     mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
@@ -49,9 +50,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (capture_tx, capture_rx) = mpsc::unbounded_channel::<CapturedExchange>();
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
 
-    init_logger(tx.clone());
+    init_logger(log_tx);
     log::info!("Loaded settings from {}", settings.path().display());
 
     let mapping_engine = MappingEngine::compile(settings.proxy_settings());
@@ -60,8 +62,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     }
     let mapping_store = MappingStore::new(mapping_engine);
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
-    start_proxy(
-        tx,
+    let certificate_download_url = start_proxy(
+        capture_tx,
         proxy_addr,
         certificate_store_dir,
         certificate_pem_filename,
@@ -70,11 +72,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let tui = Tui::enter()?;
-    let app = App::with_settings(settings.settings().clone(), recording);
-    AppRuntime::new(app, rx, tui, settings, mapping_store).run()
+    let mut app = App::with_settings(settings.settings().clone(), recording);
+    if let Some(download_url) = certificate_download_url {
+        app.set_certificate_download_url(download_url);
+    }
+    AppRuntime::new(app, capture_rx, log_rx, tui, settings, mapping_store).run()
 }
 
-fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
+fn init_logger(tx: mpsc::UnboundedSender<String>) {
     if let Err(error) = AppLogger::init(tx) {
         eprintln!("Failed to initialize logger: {error}");
     }
@@ -82,13 +87,13 @@ fn init_logger(tx: mpsc::UnboundedSender<AppEvent>) {
 }
 
 fn start_proxy(
-    tx: mpsc::UnboundedSender<AppEvent>,
+    capture_tx: mpsc::UnboundedSender<CapturedExchange>,
     proxy_addr: SocketAddr,
     certificate_store_dir: PathBuf,
     certificate_pem_filename: String,
     mapping_store: MappingStore,
     recording: RecordingState,
-) {
+) -> Option<String> {
     let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename);
     log::info!(
         "CA certificate available at {}",
@@ -96,11 +101,7 @@ fn start_proxy(
             .join(&certificate_pem_filename)
             .display()
     );
-    if let Some(download_url) =
-        start_certificate_download_server(ca.cert_pem(), certificate_pem_filename)
-    {
-        let _ = tx.send(AppEvent::CertificateDownloadReady(download_url));
-    }
+    let download_url = start_certificate_download_server(ca.cert_pem(), certificate_pem_filename);
 
     let authority = RcgenAuthority::new(
         PrivateKey(ca.key_der()),
@@ -113,7 +114,7 @@ fn start_proxy(
         .with_addr(proxy_addr)
         .with_rustls_client()
         .with_ca(authority)
-        .with_http_handler(LogHandler::new(tx, mapping_store, recording))
+        .with_http_handler(LogHandler::new(capture_tx, mapping_store, recording))
         .build();
 
     log::info!("Proxy server listening on {proxy_addr}");
@@ -128,6 +129,8 @@ fn start_proxy(
             panic!("Failed to establish proxy: {error}");
         }
     });
+
+    download_url
 }
 
 fn start_certificate_download_server(cert_pem: String, cert_filename: String) -> Option<String> {
@@ -229,7 +232,8 @@ fn format_url_host(ip: IpAddr) -> String {
 struct AppRuntime {
     app: App,
     ui: RootView,
-    rx: mpsc::UnboundedReceiver<AppEvent>,
+    capture_rx: mpsc::UnboundedReceiver<CapturedExchange>,
+    log_rx: mpsc::UnboundedReceiver<String>,
     tui: Tui,
     settings: SettingsManager,
     mapping_store: MappingStore,
@@ -238,7 +242,8 @@ struct AppRuntime {
 impl AppRuntime {
     fn new(
         app: App,
-        rx: mpsc::UnboundedReceiver<AppEvent>,
+        capture_rx: mpsc::UnboundedReceiver<CapturedExchange>,
+        log_rx: mpsc::UnboundedReceiver<String>,
         tui: Tui,
         settings: SettingsManager,
         mapping_store: MappingStore,
@@ -246,7 +251,8 @@ impl AppRuntime {
         Self {
             app,
             ui: RootView::new(),
-            rx,
+            capture_rx,
+            log_rx,
             tui,
             settings,
             mapping_store,
@@ -286,8 +292,11 @@ impl AppRuntime {
     }
 
     fn handle_app_events(&mut self) {
-        while let Ok(event) = self.rx.try_recv() {
-            self.app.handle_app_event(event);
+        while let Ok(capture) = self.capture_rx.try_recv() {
+            self.app.add_request(capture);
+        }
+        while let Ok(message) = self.log_rx.try_recv() {
+            self.app.append_log(message);
         }
     }
 

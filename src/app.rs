@@ -1,5 +1,4 @@
 mod body_viewer;
-mod event;
 mod focus;
 mod input;
 mod panels;
@@ -12,14 +11,13 @@ mod tests;
 
 #[cfg(test)]
 use crate::settings::UiSettings;
-use crate::{proxy_handler::CapturedData, recording::RecordingState, settings::AppSettings};
+use crate::{capture::CapturedExchange, recording::RecordingState, settings::AppSettings};
 use focus::FocusState;
 
 pub(crate) use body_viewer::BODY_TEXT_TAB_WIDTH;
 pub use body_viewer::BodyViewerKey;
 #[cfg(test)]
 pub(crate) use body_viewer::{format_request_body, format_response_body};
-pub use event::AppEvent;
 pub use focus::{PanelFocus, PopupFocus};
 pub use panels::{CertificatePopup, DetailPanel, LogPanel, MainDisplayTab, RequestListPanel};
 pub use request_tree::RequestTreeEntry;
@@ -36,7 +34,7 @@ pub(crate) use settings_popup::{
 };
 
 pub struct App {
-    pub requests: Vec<CapturedData>,
+    pub requests: Vec<CapturedExchange>,
     pub recording: RecordingState,
     focus: FocusState,
     pub request_list: RequestListPanel,
@@ -115,6 +113,14 @@ impl App {
         log::error!("Failed to save settings: {message}");
         self.settings_popup.mark_save_failed(message);
         self.focus.open_popup(PopupFocus::Settings);
+    }
+
+    pub fn append_log(&mut self, message: String) {
+        self.log_panel.add_log(message);
+    }
+
+    pub fn set_certificate_download_url(&mut self, download_url: String) {
+        self.certificate_popup.set_download_url(download_url);
     }
 
     pub fn focus_panel(&mut self, panel: PanelFocus) {

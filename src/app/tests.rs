@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    proxy_handler::CapturedData,
+    capture::{CaptureSequence, CapturedExchange},
     recording::RecordingState,
     settings::{RequestListSettings, UiSettings},
     ui::RootView,
@@ -17,14 +17,13 @@ fn ui_settings(auto_expand: bool) -> UiSettings {
     }
 }
 
-fn captured(uri: &str) -> CapturedData {
+fn captured(uri: &str) -> CapturedExchange {
     captured_with_sequence(0, uri)
 }
 
-fn captured_with_sequence(sequence: u64, uri: &str) -> CapturedData {
-    CapturedData {
-        id: uuid::Uuid::nil(),
-        sequence,
+fn captured_with_sequence(sequence: u64, uri: &str) -> CapturedExchange {
+    CapturedExchange {
+        sequence: CaptureSequence::new(sequence),
         method: Method::GET,
         uri: uri.to_string(),
         mapped_uri: None,
@@ -37,7 +36,7 @@ fn captured_with_sequence(sequence: u64, uri: &str) -> CapturedData {
     }
 }
 
-fn mapped_captured_with_sequence(sequence: u64, uri: &str, mapped_uri: &str) -> CapturedData {
+fn mapped_captured_with_sequence(sequence: u64, uri: &str, mapped_uri: &str) -> CapturedExchange {
     let mut captured = captured_with_sequence(sequence, uri);
     captured.mapped_uri = Some(mapped_uri.to_string());
     captured
@@ -633,7 +632,7 @@ fn rendering_body_tab_caches_formatted_body_text_by_key() {
 
     render_app(&mut app);
 
-    let request_key = BodyViewerKey::new(0, MainDisplayTab::RequestBody);
+    let request_key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::RequestBody);
     assert_eq!(
         app.cached_body_text(request_key),
         Some("{\n  \"request\": true\n}")
@@ -644,7 +643,7 @@ fn rendering_body_tab_caches_formatted_body_text_by_key() {
 
     render_app(&mut app);
 
-    let response_key = BodyViewerKey::new(0, MainDisplayTab::ResponseBody);
+    let response_key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::ResponseBody);
     assert_eq!(
         app.cached_body_text(response_key),
         Some("{\n  \"response\": true\n}")
@@ -661,7 +660,7 @@ fn entering_body_viewer_consumes_cached_body_text() {
     app.detail_panel.select_tab(MainDisplayTab::RequestBody);
     render_app(&mut app);
 
-    let request_key = BodyViewerKey::new(0, MainDisplayTab::RequestBody);
+    let request_key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::RequestBody);
     assert!(app.cached_body_text(request_key).is_some());
 
     app.handle_key_event(key(KeyCode::Enter));

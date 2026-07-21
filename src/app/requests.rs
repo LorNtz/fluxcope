@@ -2,15 +2,14 @@ use tui_tree_widget::TreeState;
 
 use super::{
     App,
-    event::AppEvent,
     request_tree::{
         DeleteSelectionContext, RequestPathTree, RequestTreeEntry, selected_request_sequence,
     },
 };
-use crate::proxy_handler::CapturedData;
+use crate::capture::CapturedExchange;
 
 impl App {
-    pub fn add_request(&mut self, req: CapturedData) {
+    pub fn add_request(&mut self, req: CapturedExchange) {
         let was_empty = self.requests.is_empty();
         let tree_entry = RequestTreeEntry::from(&req);
         let insert_pos = self
@@ -142,11 +141,11 @@ impl App {
         self.selected_request_sequence().is_some()
     }
 
-    pub fn selected_request_sequence(&self) -> Option<u64> {
+    pub fn selected_request_sequence(&self) -> Option<crate::capture::CaptureSequence> {
         selected_request_sequence(self.request_list.state.selected())
     }
 
-    pub fn selected_request(&self) -> Option<&CapturedData> {
+    pub fn selected_request(&self) -> Option<&CapturedExchange> {
         self.selected_request_sequence()
             .and_then(|sequence| self.requests.iter().find(|req| req.sequence == sequence))
     }
@@ -192,16 +191,6 @@ impl App {
         self.detail_panel.reset_content_position();
         if removed_count > 0 {
             log::info!("cleared {removed_count} request(s) from request tree");
-        }
-    }
-
-    pub fn handle_app_event(&mut self, event: AppEvent) {
-        match event {
-            AppEvent::NetworkRequest(req) => self.add_request(req),
-            AppEvent::LogMessage(msg) => self.log_panel.add_log(msg),
-            AppEvent::CertificateDownloadReady(download_url) => {
-                self.certificate_popup.set_download_url(download_url)
-            }
         }
     }
 
