@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     capture::{
         BodySide, CapturePolicy, CapturePublisher, CaptureSequence, CapturedExchange,
-        RequestCaptureInput,
+        DecodeDisplayMode, DecodeKey, DecodePolicy, DecodeResult, RequestCaptureInput,
+        start_decode_service,
     },
     recording::RecordingState,
     settings::{RequestListSettings, UiSettings},
@@ -14,6 +15,7 @@ use http::Method;
 use hyper::HeaderMap;
 use ratatui::{Terminal, backend::TestBackend};
 use std::{cell::RefCell, rc::Rc};
+use tokio_util::sync::CancellationToken;
 
 fn ui_settings(auto_expand: bool) -> UiSettings {
     UiSettings {
@@ -71,6 +73,7 @@ fn key_with_kind(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
 }
 
 fn render_app(app: &mut App) {
+    let _ = app.prepare_current_body_display(std::time::Instant::now());
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     let mut ui = RootView::new();
@@ -673,7 +676,10 @@ async fn selected_streaming_body_progress_refreshes_without_per_chunk_render_eve
     app.add_capture(record);
     app.detail_panel.select_tab(MainDisplayTab::RequestBody);
     let key = app.current_body_viewer_key().expect("body key");
-    assert!(app.ensure_body_text_cached(key));
+    assert_eq!(
+        app.prepare_current_body_display(std::time::Instant::now()),
+        BodyDisplayPreparation::ReadyToRender
+    );
     assert_eq!(
         app.cached_body_text(key),
         Some("(Body streaming… 0 bytes observed)")
@@ -687,6 +693,192 @@ async fn selected_streaming_body_progress_refreshes_without_per_chunk_render_eve
         Some("(Body streaming… 3 bytes observed)")
     );
     assert!(!app.refresh_selected_live_body());
+}
+
+#[tokio::test]
+async fn completed_body_waits_for_decode_without_caching_loading_as_content() {
+    let shutdown = CancellationToken::new();
+    let service = start_decode_service(DecodePolicy::default(), shutdown.clone());
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("decoded body".to_string());
+    app.add_request(req);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.set_decode_client(service.client.clone());
+    let key = app.current_body_viewer_key().expect("body key");
+    let started_at = std::time::Instant::now();
+
+    assert_eq!(
+        app.prepare_current_body_display(started_at),
+        BodyDisplayPreparation::Pending { started_at }
+    );
+    assert!(matches!(
+        app.body_render_text(key),
+        Some(BodyRenderText::Loading)
+    ));
+    assert!(app.cached_body_text(key).is_none());
+    assert!(!app.enter_current_body_viewer());
+    assert!(!app.detail_panel.body_viewer.is_active());
+    app.log_panel.visible = true;
+    assert_eq!(
+        app.prepare_current_body_display(started_at),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    app.log_panel.visible = false;
+    assert_eq!(
+        app.prepare_current_body_display(started_at),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    app.settings_popup.visible = true;
+    assert_eq!(
+        app.prepare_current_body_display(started_at),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    app.settings_popup.visible = false;
+
+    assert!(app.apply_decode_result(DecodeResult {
+        key: DecodeKey {
+            sequence: CaptureSequence::new(0),
+            side: BodySide::Request,
+            revision: 0,
+            mode: DecodeDisplayMode::Request,
+        },
+        text: "decoded body".to_string(),
+        limited: false,
+        error: None,
+    }));
+    assert_eq!(
+        app.prepare_current_body_display(started_at + std::time::Duration::from_millis(1)),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    assert_eq!(app.cached_body_text(key), Some("decoded body"));
+    assert!(app.enter_current_body_viewer());
+
+    shutdown.cancel();
+    service
+        .task
+        .await
+        .expect("decode service should join")
+        .expect("decode service should stop");
+}
+
+#[tokio::test]
+async fn completed_zero_byte_body_bypasses_decoder_and_is_immediately_ready() {
+    let shutdown = CancellationToken::new();
+    let service = start_decode_service(
+        DecodePolicy {
+            max_queued_input_bytes: 0,
+            ..DecodePolicy::default()
+        },
+        shutdown.clone(),
+    );
+    let mut app = App::new(ui_settings(true));
+    app.add_request(captured("https://some.host.com/api"));
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.set_decode_client(service.client.clone());
+    let key = app.current_body_viewer_key().expect("body key");
+
+    assert_eq!(
+        app.prepare_current_body_display(std::time::Instant::now()),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    assert_eq!(app.cached_body_text(key), Some("(No body)"));
+    assert_eq!(service.metrics.snapshot().rejected, 0);
+
+    shutdown.cancel();
+    service
+        .task
+        .await
+        .expect("decode service should join")
+        .expect("decode service should stop");
+}
+
+#[tokio::test]
+async fn decoder_queue_rejection_is_unavailable_content_not_an_editor_body() {
+    let shutdown = CancellationToken::new();
+    let service = start_decode_service(
+        DecodePolicy {
+            max_queued_input_bytes: 0,
+            ..DecodePolicy::default()
+        },
+        shutdown.clone(),
+    );
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured("https://some.host.com/api");
+    req.req_body = Some("body".to_string());
+    app.add_request(req);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.set_decode_client(service.client.clone());
+    let key = app.current_body_viewer_key().expect("body key");
+
+    assert_eq!(
+        app.prepare_current_body_display(std::time::Instant::now()),
+        BodyDisplayPreparation::ReadyToRender
+    );
+    assert!(matches!(
+        app.body_render_text(key),
+        Some(BodyRenderText::Text(
+            "(Body display unavailable: decoder queue is full)"
+        ))
+    ));
+    assert!(app.cached_body_text(key).is_none());
+    assert!(!app.enter_current_body_viewer());
+    assert_eq!(service.metrics.snapshot().rejected, 1);
+
+    shutdown.cancel();
+    service
+        .task
+        .await
+        .expect("decode service should join")
+        .expect("decode service should stop");
+}
+
+#[tokio::test]
+async fn decode_result_for_previous_selection_cannot_replace_current_body() {
+    let shutdown = CancellationToken::new();
+    let service = start_decode_service(DecodePolicy::default(), shutdown.clone());
+    let mut first = captured_with_sequence(0, "https://some.host.com/api/first");
+    first.req_body = Some("first".to_string());
+    let mut second = captured_with_sequence(1, "https://some.host.com/api/second");
+    second.req_body = Some("second".to_string());
+    let second_path = RequestTreeEntry::from(&second).request_path();
+    let mut app = App::new(ui_settings(true));
+    app.add_request(first);
+    app.add_request(second);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.set_decode_client(service.client.clone());
+    assert!(matches!(
+        app.prepare_current_body_display(std::time::Instant::now()),
+        BodyDisplayPreparation::Pending { .. }
+    ));
+
+    app.request_list.state.select(second_path);
+    app.apply_request_list_change(true);
+
+    assert!(!app.apply_decode_result(DecodeResult {
+        key: DecodeKey {
+            sequence: CaptureSequence::new(0),
+            side: BodySide::Request,
+            revision: 0,
+            mode: DecodeDisplayMode::Request,
+        },
+        text: "stale first".to_string(),
+        limited: false,
+        error: None,
+    }));
+    let current_key = app.current_body_viewer_key().expect("current body key");
+    assert!(app.cached_body_text(current_key).is_none());
+    assert!(matches!(
+        app.prepare_current_body_display(std::time::Instant::now()),
+        BodyDisplayPreparation::Pending { .. }
+    ));
+
+    shutdown.cancel();
+    service
+        .task
+        .await
+        .expect("decode service should join")
+        .expect("decode service should stop");
 }
 
 #[test]

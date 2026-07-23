@@ -16,6 +16,7 @@ pub(super) struct RuntimePolicy {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RenderPolicy {
     pub frame_interval: Duration,
+    pub body_loading_grace: Duration,
     pub max_events_per_turn: usize,
     pub event_budget: Duration,
     pub metrics_interval: Duration,
@@ -27,6 +28,7 @@ impl Default for RenderPolicy {
     fn default() -> Self {
         Self {
             frame_interval: Duration::from_millis(1_000 / 60),
+            body_loading_grace: Duration::from_millis(100),
             max_events_per_turn: 256,
             event_budget: Duration::from_millis(2),
             metrics_interval: Duration::from_secs(1),

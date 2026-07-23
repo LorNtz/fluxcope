@@ -21,11 +21,12 @@ use crate::{
 use focus::FocusState;
 use request_tree::RequestTreeModel;
 
-pub(crate) use body_viewer::BODY_TEXT_TAB_WIDTH;
 pub use body_viewer::BodyViewerKey;
+pub(crate) use body_viewer::{BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyDisplayPreparation};
 #[cfg(test)]
 pub(crate) use body_viewer::{format_request_body, format_response_body};
 pub use focus::{PanelFocus, PopupFocus};
+pub(crate) use panels::BodyRenderText;
 pub use panels::{CertificatePopup, DetailPanel, LogPanel, MainDisplayTab, RequestListPanel};
 #[cfg(test)]
 pub use request_tree::RequestTreeEntry;

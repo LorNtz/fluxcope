@@ -3,6 +3,7 @@ use crate::{
     settings::RequestListSettings,
 };
 use ratatui::layout::Position;
+use std::time::Instant;
 use tui_tree_widget::TreeState;
 
 use super::body_viewer::{BODY_TEXT_TAB, BodyViewer, BodyViewerKey};
@@ -120,7 +121,7 @@ pub struct DetailPanel {
     pub scroll: ScrollState,
     pub selected_header_row: Option<usize>,
     pub body_viewer: BodyViewer,
-    cached_body_text: Option<CachedBodyText>,
+    body_text: BodyTextState,
     body_text_revision: u64,
 }
 
@@ -131,7 +132,7 @@ impl DetailPanel {
             scroll: ScrollState::new(),
             selected_header_row: None,
             body_viewer: BodyViewer::new(),
-            cached_body_text: None,
+            body_text: BodyTextState::Idle,
             body_text_revision: 0,
         }
     }
@@ -165,48 +166,154 @@ impl DetailPanel {
         self.scroll.reset();
         self.selected_header_row = None;
         self.body_viewer.reset();
-        self.cached_body_text = None;
+        self.body_text = BodyTextState::Idle;
         self.body_text_revision = self.body_text_revision.wrapping_add(1);
     }
 
     pub(in crate::app) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {
-        self.cached_body_text
-            .as_ref()
-            .filter(|cached| cached.key == key)
-            .map(|cached| cached.source_text.as_str())
+        match &self.body_text {
+            BodyTextState::Ready(cached) if cached.key == key => Some(&cached.source_text),
+            BodyTextState::Idle
+            | BodyTextState::Pending { .. }
+            | BodyTextState::Ready(_)
+            | BodyTextState::Unavailable { .. } => None,
+        }
     }
 
+    #[cfg(test)]
     pub(in crate::app) fn cached_body_render_text(&self, key: BodyViewerKey) -> Option<&str> {
-        self.cached_body_text
-            .as_ref()
-            .filter(|cached| cached.key == key)
-            .map(CachedBodyText::render_text)
+        match &self.body_text {
+            BodyTextState::Ready(cached) if cached.key == key => Some(cached.render_text()),
+            BodyTextState::Idle
+            | BodyTextState::Pending { .. }
+            | BodyTextState::Ready(_)
+            | BodyTextState::Unavailable { .. } => None,
+        }
+    }
+
+    pub(in crate::app) fn body_render_text(
+        &self,
+        key: BodyViewerKey,
+    ) -> Option<BodyRenderText<'_>> {
+        match &self.body_text {
+            BodyTextState::Pending {
+                key: pending_key, ..
+            } if *pending_key == key => Some(BodyRenderText::Loading),
+            BodyTextState::Ready(cached) if cached.key == key => {
+                Some(BodyRenderText::Text(cached.render_text()))
+            }
+            BodyTextState::Unavailable {
+                key: unavailable_key,
+                message,
+            } if *unavailable_key == key => Some(BodyRenderText::Text(message)),
+            BodyTextState::Idle
+            | BodyTextState::Pending { .. }
+            | BodyTextState::Ready(_)
+            | BodyTextState::Unavailable { .. } => None,
+        }
+    }
+
+    pub(in crate::app) fn has_body_text_state(&self, key: BodyViewerKey) -> bool {
+        self.body_text.key() == Some(key)
+    }
+
+    pub(in crate::app) fn pending_body_started_at(&self, key: BodyViewerKey) -> Option<Instant> {
+        match self.body_text {
+            BodyTextState::Pending {
+                key: pending_key,
+                defer_started_at: Some(started_at),
+            } if pending_key == key => Some(started_at),
+            BodyTextState::Idle
+            | BodyTextState::Pending { .. }
+            | BodyTextState::Ready(_)
+            | BodyTextState::Unavailable { .. } => None,
+        }
+    }
+
+    pub(in crate::app) fn set_body_text_pending(
+        &mut self,
+        key: BodyViewerKey,
+        started_at: Instant,
+    ) {
+        self.body_text = BodyTextState::Pending {
+            key,
+            defer_started_at: Some(started_at),
+        };
+        self.body_text_revision = self.body_text_revision.wrapping_add(1);
+    }
+
+    pub(in crate::app) fn body_text_is_pending(&self, key: BodyViewerKey) -> bool {
+        matches!(self.body_text, BodyTextState::Pending { key: pending_key, .. } if pending_key == key)
+    }
+
+    pub(in crate::app) fn disable_pending_body_deferral(&mut self) {
+        if let BodyTextState::Pending {
+            defer_started_at, ..
+        } = &mut self.body_text
+        {
+            *defer_started_at = None;
+        }
     }
 
     pub(in crate::app) fn cache_body_text(&mut self, key: BodyViewerKey, text: String) {
-        self.cached_body_text = Some(CachedBodyText::new(key, text));
+        self.body_text = BodyTextState::Ready(CachedBodyText::new(key, text));
+        self.body_text_revision = self.body_text_revision.wrapping_add(1);
+    }
+
+    pub(in crate::app) fn set_body_text_unavailable(
+        &mut self,
+        key: BodyViewerKey,
+        message: &'static str,
+    ) {
+        self.body_text = BodyTextState::Unavailable { key, message };
         self.body_text_revision = self.body_text_revision.wrapping_add(1);
     }
 
     pub(in crate::app) fn take_cached_body_text(&mut self, key: BodyViewerKey) -> Option<String> {
-        if self
-            .cached_body_text
-            .as_ref()
-            .is_some_and(|cached| cached.key == key)
-        {
-            let text = self
-                .cached_body_text
-                .take()
-                .map(|cached| cached.source_text);
-            self.body_text_revision = self.body_text_revision.wrapping_add(1);
-            text
-        } else {
-            None
+        if !matches!(&self.body_text, BodyTextState::Ready(cached) if cached.key == key) {
+            return None;
         }
+
+        let BodyTextState::Ready(cached) =
+            std::mem::replace(&mut self.body_text, BodyTextState::Idle)
+        else {
+            unreachable!("body text state was checked before replacement");
+        };
+        self.body_text_revision = self.body_text_revision.wrapping_add(1);
+        Some(cached.source_text)
     }
 
     pub(in crate::app) fn body_text_revision(&self) -> u64 {
         self.body_text_revision
+    }
+}
+
+pub(crate) enum BodyRenderText<'a> {
+    Loading,
+    Text(&'a str),
+}
+
+enum BodyTextState {
+    Idle,
+    Pending {
+        key: BodyViewerKey,
+        defer_started_at: Option<Instant>,
+    },
+    Ready(CachedBodyText),
+    Unavailable {
+        key: BodyViewerKey,
+        message: &'static str,
+    },
+}
+
+impl BodyTextState {
+    fn key(&self) -> Option<BodyViewerKey> {
+        match self {
+            Self::Idle => None,
+            Self::Pending { key, .. }
+            | Self::Unavailable { key, .. }
+            | Self::Ready(CachedBodyText { key, .. }) => Some(*key),
+        }
     }
 }
 

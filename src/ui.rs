@@ -1,11 +1,11 @@
 #[cfg(test)]
 use crate::app::ProxyRow;
 use crate::app::{
-    ActionDialog, App, BODY_TEXT_TAB_WIDTH, BodyViewerKey, FieldEditKind, MainDisplayTab,
-    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus, PopupFocus, ProxyRuleTable, ProxyWidget,
-    RULE_EDITOR_KEY_HINTS, RequestTreeNodeSnapshot, RuleEditField, RuleEditorState, SelectTarget,
-    SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsScrollRequest, SettingsSelectId,
-    SettingsTopic,
+    ActionDialog, App, BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyRenderText, BodyViewerKey,
+    FieldEditKind, MainDisplayTab, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus, PopupFocus,
+    ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS, RequestTreeNodeSnapshot, RuleEditField,
+    RuleEditorState, SelectTarget, SettingsKeyHint, SettingsPaneFocus, SettingsPopup,
+    SettingsScrollRequest, SettingsSelectId, SettingsTopic,
 };
 use crate::select::{SelectItem, SelectState};
 use crate::select_widget::SelectWidget;
@@ -207,11 +207,12 @@ impl View for StatusView {
 mod tests {
     use super::*;
     use crate::app::{format_request_body, format_response_body};
-    use crate::capture::{CaptureSequence, CapturedExchange};
+    use crate::capture::{CaptureSequence, CapturedExchange, DecodePolicy, start_decode_service};
     use crate::settings::{ProxyPresetSettings, ProxySettings, RequestListSettings, UiSettings};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
     use http::Method;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+    use tokio_util::sync::CancellationToken;
 
     fn ui_settings(auto_expand: bool) -> UiSettings {
         UiSettings {
@@ -322,6 +323,35 @@ mod tests {
             app.detail_panel.body_viewer.editor_mut().unwrap().lines,
             edtui::Lines::from(raw_body)
         );
+    }
+
+    #[tokio::test]
+    async fn pending_body_renders_loading_without_making_it_editor_content() {
+        let shutdown = CancellationToken::new();
+        let service = start_decode_service(DecodePolicy::default(), shutdown.clone());
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("body".to_string());
+        let mut app = App::new(ui_settings(true));
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.set_decode_client(service.client.clone());
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::RequestBody);
+
+        assert!(
+            find_buffer_text(&buffer, ui.right_panel.detail.area(), BODY_LOADING_TEXT).is_some()
+        );
+        assert!(app.cached_body_text(key).is_none());
+        assert!(!app.enter_current_body_viewer());
+
+        shutdown.cancel();
+        service
+            .task
+            .await
+            .expect("decode service should join")
+            .expect("decode service should stop");
     }
 
     #[test]
@@ -1755,6 +1785,7 @@ mod tests {
     }
 
     fn render_to_buffer_with_size(app: &mut App, width: u16, height: u16) -> (RootView, Buffer) {
+        let _ = app.prepare_current_body_display(std::time::Instant::now());
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         let mut ui = RootView::new();
@@ -2531,7 +2562,7 @@ impl View for DetailView {
                 frame.render_widget(paragraph, self.area());
             }
             DetailContent::Body(body_key) => {
-                if app.ensure_body_text_cached(body_key) {
+                if app.body_render_text(body_key).is_some() {
                     let text_revision = app.body_text_revision();
                     let cached = *self.body_measurement.borrow();
                     let total_lines = match cached {
@@ -2544,9 +2575,9 @@ impl View for DetailView {
                         }
                         _ => {
                             let total_lines = app
-                                .cached_body_render_text(body_key)
-                                .map(|detail_text| {
-                                    detail_text_paragraph(detail_text, focused)
+                                .body_render_text(body_key)
+                                .map(|body_text| {
+                                    detail_text_paragraph(body_render_text(body_text), focused)
                                         .line_count(self.area().width)
                                 })
                                 .unwrap_or_default()
@@ -2570,9 +2601,10 @@ impl View for DetailView {
                         .min(app.detail_panel.scroll.max_offset);
                     app.detail_panel.scroll.offset = offset;
 
-                    if let Some(detail_text) = app.cached_body_render_text(body_key) {
+                    if let Some(body_text) = app.body_render_text(body_key) {
                         frame.render_widget(
-                            detail_text_paragraph(detail_text, focused).scroll((offset, 0)),
+                            detail_text_paragraph(body_render_text(body_text), focused)
+                                .scroll((offset, 0)),
                             self.area(),
                         );
                     }
@@ -2656,6 +2688,13 @@ fn detail_text_paragraph<'a>(text: impl Into<Text<'a>>, focused: bool) -> Paragr
     Paragraph::new(text)
         .block(detail_panel_block(focused))
         .wrap(Wrap { trim: false })
+}
+
+fn body_render_text(body_text: BodyRenderText<'_>) -> &str {
+    match body_text {
+        BodyRenderText::Loading => BODY_LOADING_TEXT,
+        BodyRenderText::Text(text) => text,
+    }
 }
 
 fn should_render_active_body_editor(app: &mut App) -> bool {

@@ -16,7 +16,7 @@ use super::{
     services::{ServiceKind, ServiceSupervisor},
 };
 use crate::{
-    app::App,
+    app::{App, BodyDisplayPreparation},
     capture::{
         CaptureDirtySignal, CaptureMetrics, CaptureMetricsSnapshot, CaptureRecord, DecodeMetrics,
         DecodeMetricsSnapshot, DecodeResult,
@@ -217,11 +217,25 @@ impl AppRuntime {
                 }
                 _ = frame_tick.tick() => {
                     if dirty {
-                        self.tui.draw(&mut self.ui, &mut self.app)
-                            .context("failed to draw terminal frame")?;
-                        dirty = false;
+                        let now = Instant::now();
+                        let body = self.app.prepare_current_body_display(now);
+                        render_dirty_frame(
+                            &mut dirty,
+                            body,
+                            now,
+                            self.policy.body_loading_grace,
+                            || {
+                                self.tui
+                                    .draw(&mut self.ui, &mut self.app)
+                                    .context("failed to draw terminal frame")
+                            },
+                        )?;
                     }
                 }
+            }
+
+            if dirty {
+                let _ = self.app.prepare_current_body_display(Instant::now());
             }
         }
     }
@@ -322,6 +336,32 @@ impl AppRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameRenderOutcome {
+    Deferred,
+    Drawn,
+}
+
+fn render_dirty_frame<E>(
+    dirty: &mut bool,
+    preparation: BodyDisplayPreparation,
+    now: Instant,
+    loading_grace: std::time::Duration,
+    draw: impl FnOnce() -> Result<(), E>,
+) -> Result<FrameRenderOutcome, E> {
+    if matches!(
+        preparation,
+        BodyDisplayPreparation::Pending { started_at }
+            if now.saturating_duration_since(started_at) < loading_grace
+    ) {
+        return Ok(FrameRenderOutcome::Deferred);
+    }
+
+    draw()?;
+    *dirty = false;
+    Ok(FrameRenderOutcome::Drawn)
+}
+
 pub(super) struct Tui {
     terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
 }
@@ -376,5 +416,72 @@ mod tests {
         assert_eq!(policy.max_events_per_turn, 256);
         assert_eq!(policy.event_budget, std::time::Duration::from_millis(2));
         assert!(policy.frame_interval >= std::time::Duration::from_millis(16));
+        assert_eq!(
+            policy.body_loading_grace,
+            std::time::Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn fast_body_result_draws_ready_frame_without_intermediate_loading_draw() {
+        let started_at = Instant::now();
+        let grace = std::time::Duration::from_millis(100);
+        let before_grace = started_at + std::time::Duration::from_millis(99);
+        let mut dirty = true;
+        let mut draws = 0;
+
+        let deferred = render_dirty_frame(
+            &mut dirty,
+            BodyDisplayPreparation::Pending { started_at },
+            before_grace,
+            grace,
+            || {
+                draws += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("deferral should not fail");
+        assert_eq!(deferred, FrameRenderOutcome::Deferred);
+        assert!(dirty);
+        assert_eq!(draws, 0);
+
+        let drawn = render_dirty_frame(
+            &mut dirty,
+            BodyDisplayPreparation::ReadyToRender,
+            before_grace,
+            grace,
+            || {
+                draws += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("ready draw should not fail");
+        assert_eq!(drawn, FrameRenderOutcome::Drawn);
+        assert!(!dirty);
+        assert_eq!(draws, 1);
+    }
+
+    #[test]
+    fn slow_body_draws_loading_once_grace_expires() {
+        let started_at = Instant::now();
+        let grace = std::time::Duration::from_millis(100);
+        let mut dirty = true;
+        let mut draws = 0;
+
+        let outcome = render_dirty_frame(
+            &mut dirty,
+            BodyDisplayPreparation::Pending { started_at },
+            started_at + grace,
+            grace,
+            || {
+                draws += 1;
+                Ok::<(), ()>(())
+            },
+        )
+        .expect("loading draw should not fail");
+
+        assert_eq!(outcome, FrameRenderOutcome::Drawn);
+        assert!(!dirty);
+        assert_eq!(draws, 1);
     }
 }

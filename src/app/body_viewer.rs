@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use edtui::{
@@ -26,6 +26,14 @@ use crate::capture::{
 
 pub(crate) const BODY_TEXT_TAB: &str = "    ";
 pub(crate) const BODY_TEXT_TAB_WIDTH: usize = BODY_TEXT_TAB.len();
+pub(crate) const BODY_LOADING_TEXT: &str = "(Loading body…)";
+const BODY_UNAVAILABLE_TEXT: &str = "(Body display unavailable: decoder queue is full)";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyDisplayPreparation {
+    ReadyToRender,
+    Pending { started_at: Instant },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BodyViewerKey {
@@ -750,28 +758,47 @@ impl App {
         })
     }
 
-    pub(crate) fn ensure_body_text_cached(&mut self, key: BodyViewerKey) -> bool {
-        if self.cached_body_text(key).is_some() {
-            return true;
+    pub(crate) fn prepare_current_body_display(&mut self, now: Instant) -> BodyDisplayPreparation {
+        if self.log_panel.visible || self.certificate_popup.visible || self.settings_popup.visible {
+            self.detail_panel.disable_pending_body_deferral();
+            return BodyDisplayPreparation::ReadyToRender;
+        }
+
+        let Some(key) = self.current_body_viewer_key() else {
+            return BodyDisplayPreparation::ReadyToRender;
+        };
+        if self.detail_panel.body_viewer.has_content_for(key) {
+            return BodyDisplayPreparation::ReadyToRender;
+        }
+
+        self.prepare_body_text(key, now);
+        self.detail_panel
+            .pending_body_started_at(key)
+            .map(|started_at| BodyDisplayPreparation::Pending { started_at })
+            .unwrap_or(BodyDisplayPreparation::ReadyToRender)
+    }
+
+    fn prepare_body_text(&mut self, key: BodyViewerKey, now: Instant) {
+        if self.detail_panel.has_body_text_state(key) {
+            return;
         }
 
         let (record, capture) = {
             let Some(record) = self.selected_capture_record() else {
-                return false;
+                return;
             };
             let capture = record.summary();
 
             if BodyViewerKey::with_revision(capture.sequence, key.tab(), capture.revision) != key {
-                return false;
+                return;
             }
             (record, capture)
         };
-        let (side, status, mode, headers) = match key.tab() {
+        let (side, status, mode) = match key.tab() {
             MainDisplayTab::RequestBody => (
                 BodySide::Request,
                 &capture.request_body,
                 DecodeDisplayMode::Request,
-                capture.request.headers.clone(),
             ),
             MainDisplayTab::ResponseBody => (
                 BodySide::Response,
@@ -781,21 +808,41 @@ impl App {
                 } else {
                     DecodeDisplayMode::Response
                 },
-                capture
+            ),
+            MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return,
+        };
+
+        if !matches!(
+            status.stream,
+            BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
+        ) {
+            self.detail_panel.cache_body_text(
+                key,
+                format!("(Body streaming… {} bytes observed)", status.observed_bytes),
+            );
+            return;
+        }
+
+        if status.observed_bytes == 0 {
+            let text = if mode == DecodeDisplayMode::MapLocal {
+                String::new()
+            } else {
+                "(No body)".to_string()
+            };
+            self.detail_panel.cache_body_text(key, text);
+            return;
+        }
+
+        if let Some(client) = self.decode_client.as_ref() {
+            let headers = match key.tab() {
+                MainDisplayTab::RequestBody => capture.request.headers.clone(),
+                MainDisplayTab::ResponseBody => capture
                     .response
                     .as_ref()
                     .map(|response| response.headers.clone())
                     .unwrap_or_else(|| record.empty_headers()),
-            ),
-            MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return false,
-        };
-
-        let text = if !matches!(
-            status.stream,
-            BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
-        ) {
-            format!("(Body streaming… {} bytes observed)", status.observed_bytes)
-        } else if let Some(client) = self.decode_client.as_ref() {
+                MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader => return,
+            };
             let requested = client.request(
                 DecodeKey {
                     sequence: key.sequence(),
@@ -807,19 +854,25 @@ impl App {
                 headers,
             );
             if requested {
-                "(Loading body…)".to_string()
+                self.detail_panel.set_body_text_pending(key, now);
             } else {
-                "(Body display unavailable: decoder queue is full)".to_string()
+                self.detail_panel
+                    .set_body_text_unavailable(key, BODY_UNAVAILABLE_TEXT);
             }
-        } else {
-            let Some(text) = body_text_for_record(&record, key.tab()) else {
-                return false;
-            };
-            text
-        };
+            return;
+        }
 
-        self.detail_panel.cache_body_text(key, text);
-        true
+        if let Some(text) = body_text_for_record(&record, key.tab()) {
+            self.detail_panel.cache_body_text(key, text);
+        }
+    }
+
+    pub(crate) fn body_render_text(&self, key: BodyViewerKey) -> Option<super::BodyRenderText<'_>> {
+        self.detail_panel.body_render_text(key)
+    }
+
+    fn body_text_is_ready(&self, key: BodyViewerKey) -> bool {
+        self.cached_body_text(key).is_some()
     }
 
     pub(crate) fn refresh_selected_live_body(&mut self) -> bool {
@@ -857,7 +910,9 @@ impl App {
             BodySide::Response => MainDisplayTab::ResponseBody,
         };
         let key = BodyViewerKey::with_revision(result.key.sequence, tab, result.key.revision);
-        if self.current_body_viewer_key() != Some(key) {
+        if self.current_body_viewer_key() != Some(key)
+            || !self.detail_panel.body_text_is_pending(key)
+        {
             return false;
         }
         self.detail_panel.cache_body_text(key, result.text);
@@ -868,6 +923,7 @@ impl App {
         self.detail_panel.cached_body_text(key)
     }
 
+    #[cfg(test)]
     pub(crate) fn cached_body_render_text(&self, key: BodyViewerKey) -> Option<&str> {
         self.detail_panel.cached_body_render_text(key)
     }
@@ -878,7 +934,8 @@ impl App {
 
     fn current_body_text(&mut self) -> Option<(BodyViewerKey, String)> {
         let key = self.current_body_viewer_key()?;
-        if !self.ensure_body_text_cached(key) {
+        self.prepare_body_text(key, Instant::now());
+        if !self.body_text_is_ready(key) {
             return None;
         }
 
