@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashSet};
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
@@ -21,6 +21,8 @@ pub(super) struct RequestListView {
 struct RequestTreeRenderCache {
     revision: Option<u64>,
     items: Vec<TreeItem<'static, String>>,
+    opened: HashSet<Vec<String>>,
+    visible_rows: usize,
 }
 
 impl RequestListView {
@@ -43,18 +45,35 @@ impl View for RequestListView {
 
     fn render(&self, frame: &mut Frame, app: &mut App) {
         let revision = app.request_tree_revision();
-        if self.cache.borrow().revision != Some(revision) {
+        let tree_changed = self.cache.borrow().revision != Some(revision);
+        if tree_changed {
             let items = build_request_tree_items(app);
-            *self.cache.borrow_mut() = RequestTreeRenderCache {
-                revision: Some(revision),
-                items,
+            let mut cache = self.cache.borrow_mut();
+            cache.revision = Some(revision);
+            cache.items = items;
+        }
+        let opened_changed = {
+            let cache = self.cache.borrow();
+            cache.opened != *app.request_list.state.opened()
+        };
+        if tree_changed || opened_changed {
+            let visible_rows = {
+                let cache = self.cache.borrow();
+                app.request_list.state.flatten(&cache.items).len()
             };
+            let mut cache = self.cache.borrow_mut();
+            cache.opened.clone_from(app.request_list.state.opened());
+            cache.visible_rows = visible_rows;
         }
         let cache = self.cache.borrow();
         let focused = app.is_panel_focused(PanelFocus::RequestList);
+        let block = panel_block("Requests", focused);
+        let viewport_rows = usize::from(block.inner(self.area).height);
+        app.request_list
+            .update_scroll_bounds(cache.visible_rows, viewport_rows);
         let tree = Tree::new(&cache.items)
             .expect("request tree identifiers are unique")
-            .block(panel_block("Requests", focused))
+            .block(block)
             .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray))
             .node_closed_symbol("▶ ")
             .node_open_symbol("▼ ")

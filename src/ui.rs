@@ -2083,6 +2083,112 @@ mod tests {
     }
 
     #[test]
+    fn request_tree_mouse_scroll_stops_at_last_full_viewport() {
+        let mut app = App::new(ui_settings(true));
+        for sequence in 0..12 {
+            app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
+        }
+        let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+
+        for _ in 0..20 {
+            ui.handle_mouse(
+                mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),
+                &mut app,
+            );
+        }
+
+        assert_eq!(app.request_list.state.get_offset(), 6);
+        let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+        let viewport = ui.request_list.area().inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let first_visible = find_buffer_text(&buffer, viewport, "item5")
+            .expect("the final viewport should start at item5");
+        let last_visible = find_buffer_text(&buffer, viewport, "item11")
+            .expect("the final viewport should end at item11");
+
+        assert_eq!(first_visible.y, viewport.y);
+        assert_eq!(last_visible.y, viewport.bottom() - 1);
+    }
+
+    #[test]
+    fn request_tree_mouse_scroll_keeps_short_content_at_top() {
+        let mut app = App::new(ui_settings(true));
+        app.add_request(captured(0, "https://a.com/item0"));
+        app.add_request(captured(1, "https://a.com/item1"));
+        let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+
+        for _ in 0..5 {
+            ui.handle_mouse(
+                mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),
+                &mut app,
+            );
+        }
+
+        assert_eq!(app.request_list.state.get_offset(), 0);
+    }
+
+    #[test]
+    fn request_tree_page_down_uses_viewport_scroll_limit() {
+        let mut app = App::new(ui_settings(true));
+        for sequence in 0..12 {
+            app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
+        }
+        let (_ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+
+        for _ in 0..20 {
+            app.handle_key_event(key(KeyCode::PageDown));
+        }
+
+        assert_eq!(app.request_list.state.get_offset(), 6);
+    }
+
+    #[test]
+    fn request_tree_taller_viewport_reclamps_scroll_offset() {
+        let mut app = App::new(ui_settings(true));
+        for sequence in 0..12 {
+            app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
+        }
+        let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+        for _ in 0..20 {
+            ui.handle_mouse(
+                mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),
+                &mut app,
+            );
+        }
+        assert!(app.request_list.state.get_offset() > 0);
+
+        let (_ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 20);
+
+        assert_eq!(app.request_list.state.get_offset(), 0);
+    }
+
+    #[test]
+    fn request_tree_fold_reclamps_scroll_offset_to_visible_rows() {
+        let mut app = App::new(ui_settings(true));
+        for sequence in 0..12 {
+            app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
+        }
+        app.add_request(captured(12, "https://b.com/item12"));
+        let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+        for _ in 0..20 {
+            ui.handle_mouse(
+                mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),
+                &mut app,
+            );
+        }
+        assert!(app.request_list.state.get_offset() > 0);
+
+        app.request_list
+            .state
+            .close(&["origin:https://a.com".to_string()]);
+        let (_ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+
+        assert_eq!(app.request_list.state.get_offset(), 0);
+    }
+
+    #[test]
     fn mouse_movement_and_scroll_do_not_move_panel_focus() {
         let mut app = App::new(ui_settings(true));
         let ui = laid_out_ui(&app);

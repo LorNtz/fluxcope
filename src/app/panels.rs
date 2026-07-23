@@ -79,6 +79,7 @@ impl ScrollState {
 pub struct RequestListPanel {
     pub state: TreeState<String>,
     pub(in crate::app) auto_expand: bool,
+    max_scroll_offset: usize,
 }
 
 impl RequestListPanel {
@@ -86,6 +87,7 @@ impl RequestListPanel {
         Self {
             state: TreeState::default(),
             auto_expand: setting.auto_expand,
+            max_scroll_offset: 0,
         }
     }
 
@@ -107,7 +109,23 @@ impl RequestListPanel {
         self.state.click_at(position)
     }
 
+    pub(crate) fn update_scroll_bounds(&mut self, visible_rows: usize, viewport_rows: usize) {
+        self.max_scroll_offset = if viewport_rows == 0 {
+            0
+        } else {
+            visible_rows.saturating_sub(viewport_rows)
+        };
+        let overflow = self
+            .state
+            .get_offset()
+            .saturating_sub(self.max_scroll_offset);
+        self.state.scroll_up(overflow);
+    }
+
     pub fn scroll_down(&mut self) -> bool {
+        if self.state.get_offset() >= self.max_scroll_offset {
+            return false;
+        }
         self.state.scroll_down(1)
     }
 
