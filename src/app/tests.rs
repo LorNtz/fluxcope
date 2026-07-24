@@ -265,6 +265,30 @@ fn detail_focus_uses_h_l_to_switch_tabs() {
 }
 
 #[test]
+fn detail_tabs_restore_their_own_scroll_offsets() {
+    let mut app = App::new(ui_settings(true));
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.scroll.offset = 3;
+
+    app.handle_key_event(key(KeyCode::Char('l')));
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestBody);
+    assert_eq!(app.detail_panel.scroll.offset, 0);
+    app.detail_panel.scroll.offset = 5;
+
+    app.handle_key_event(key(KeyCode::Char('l')));
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::ResponseHeader);
+    assert_eq!(app.detail_panel.scroll.offset, 0);
+
+    app.handle_key_event(key(KeyCode::Char('h')));
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestBody);
+    assert_eq!(app.detail_panel.scroll.offset, 5);
+
+    app.handle_key_event(key(KeyCode::Char('h')));
+    assert_eq!(app.detail_panel.active_tab, MainDisplayTab::RequestHeader);
+    assert_eq!(app.detail_panel.scroll.offset, 3);
+}
+
+#[test]
 fn detail_body_enter_activates_viewer_and_esc_exits() {
     let mut app = App::new(ui_settings(true));
     let mut req = captured("https://some.host.com/api");
@@ -933,6 +957,48 @@ fn panel_keys_apply_only_to_focused_panel() {
 }
 
 #[test]
+fn request_switch_preserves_detail_scroll_and_clears_request_scoped_state() {
+    let mut app = App::new(ui_settings(true));
+
+    let mut first = captured_with_sequence(0, "https://some.host.com/api/a");
+    first.req_body = Some("first".to_string());
+    let mut second = captured_with_sequence(1, "https://some.host.com/api/b");
+    second.req_body = Some("second".to_string());
+    app.add_request(first);
+    app.add_request(second);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    render_app(&mut app);
+    let first_key = app.current_body_viewer_key().expect("first body key");
+    assert!(app.cached_body_text(first_key).is_some());
+    app.detail_panel.scroll.offset = 3;
+    app.detail_panel.selected_header_row = Some(2);
+
+    app.next();
+
+    assert_eq!(
+        app.selected_request_sequence(),
+        Some(CaptureSequence::new(1))
+    );
+    assert_eq!(app.detail_panel.scroll.offset, 3);
+    assert_eq!(app.detail_panel.selected_header_row, None);
+    assert!(app.cached_body_text(first_key).is_none());
+
+    render_app(&mut app);
+    assert!(app.enter_current_body_viewer());
+    assert!(app.detail_panel.body_viewer.is_active());
+    app.detail_panel.scroll.offset = 2;
+
+    app.previous();
+
+    assert_eq!(
+        app.selected_request_sequence(),
+        Some(CaptureSequence::new(0))
+    );
+    assert_eq!(app.detail_panel.scroll.offset, 2);
+    assert!(!app.detail_panel.body_viewer.is_active());
+}
+
+#[test]
 fn request_tree_entry_from_captured_request_splits_absolute_url() {
     let entry = RequestTreeEntry::from(&captured_with_sequence(
         7,
@@ -1492,6 +1558,8 @@ fn clear_requests_drops_records_and_resets_tree_state() {
     app.add_request(captured_with_sequence(0, "https://some.host.com/api/a"));
     app.add_request(captured_with_sequence(1, "https://some.host.com/api/b"));
     app.detail_panel.scroll.offset = 1;
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.detail_panel.scroll.offset = 2;
     assert!(app.capture_retained_bytes() > 0);
 
     app.clear_requests();
@@ -1500,6 +1568,8 @@ fn clear_requests_drops_records_and_resets_tree_state() {
     assert_eq!(app.capture_retained_bytes(), 0);
     assert!(app.request_list.state.selected().is_empty());
     assert!(app.request_list.state.opened().is_empty());
+    assert_eq!(app.detail_panel.scroll.offset, 0);
+    app.detail_panel.select_tab(MainDisplayTab::RequestHeader);
     assert_eq!(app.detail_panel.scroll.offset, 0);
 }
 

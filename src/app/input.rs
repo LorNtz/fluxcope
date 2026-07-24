@@ -180,10 +180,10 @@ impl App {
                 self.enter_current_body_viewer();
             }
             KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down | KeyCode::PageDown => {
-                self.detail_panel.scroll.scroll_down();
+                self.detail_panel.scroll_down();
             }
             KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up | KeyCode::PageUp => {
-                self.detail_panel.scroll.scroll_up();
+                self.detail_panel.scroll_up();
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 self.detail_panel.previous_tab();

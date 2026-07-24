@@ -207,7 +207,10 @@ impl View for StatusView {
 mod tests {
     use super::*;
     use crate::app::{format_request_body, format_response_body};
-    use crate::capture::{CaptureSequence, CapturedExchange, DecodePolicy, start_decode_service};
+    use crate::capture::{
+        BodySide, CaptureSequence, CapturedExchange, DecodeDisplayMode, DecodeKey, DecodePolicy,
+        DecodeResult, start_decode_service,
+    };
     use crate::settings::{ProxyPresetSettings, ProxySettings, RequestListSettings, UiSettings};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
     use http::Method;
@@ -335,6 +338,7 @@ mod tests {
         app.add_request(req);
         app.focus_panel(PanelFocus::Detail);
         app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        app.detail_panel.scroll.offset = 4;
         app.set_decode_client(service.client.clone());
 
         let (ui, buffer) = render_to_buffer(&mut app);
@@ -345,6 +349,33 @@ mod tests {
         );
         assert!(app.cached_body_text(key).is_none());
         assert!(!app.enter_current_body_viewer());
+        assert_eq!(app.detail_panel.scroll.offset, 4);
+
+        render_to_buffer_with_size(&mut app, 12, 5);
+        assert_eq!(app.detail_panel.scroll.max_offset, 0);
+        assert_eq!(app.detail_panel.scroll.offset, 4);
+        app.detail_panel.scroll_down();
+        app.detail_panel.scroll_up();
+        assert_eq!(app.detail_panel.scroll.offset, 4);
+
+        let completed_body = (0..20)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(app.apply_decode_result(DecodeResult {
+            key: DecodeKey {
+                sequence: CaptureSequence::new(0),
+                side: BodySide::Request,
+                revision: 0,
+                mode: DecodeDisplayMode::Request,
+            },
+            text: completed_body,
+            limited: false,
+            error: None,
+        }));
+        render_to_buffer(&mut app);
+        assert!(app.detail_panel.scroll.max_offset >= 4);
+        assert_eq!(app.detail_panel.scroll.offset, 4);
 
         shutdown.cancel();
         service
@@ -2291,6 +2322,68 @@ mod tests {
     }
 
     #[test]
+    fn mouse_request_switch_preserves_detail_viewport_position() {
+        let mut first = captured(0, "https://a.com/api/first");
+        let mut second = captured(1, "https://a.com/api/second");
+        first.req_headers = (0..10)
+            .map(|index| (format!("x-row-{index}"), format!("first-{index}")))
+            .collect();
+        second.req_headers = (0..10)
+            .map(|index| (format!("x-row-{index}"), format!("second-{index}")))
+            .collect();
+        let mut app = App::new(ui_settings(true));
+        app.add_request(first);
+        app.add_request(second);
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let second_request = find_buffer_text(&buffer, ui.request_list.area(), "second")
+            .expect("second request should be visible");
+        app.detail_panel.scroll.offset = 4;
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                second_request.x,
+                second_request.y,
+            ),
+            &mut app,
+        );
+
+        assert_eq!(
+            app.selected_request_sequence(),
+            Some(CaptureSequence::new(1))
+        );
+        assert_eq!(app.detail_panel.scroll.offset, 4);
+
+        let (ui, buffer) = render_to_buffer(&mut app);
+        let content_area = detail_content_area(ui.right_panel.detail.area());
+        let matching_row = find_buffer_text(&buffer, content_area, "second-2")
+            .expect("matching header row should be rendered");
+        assert_eq!(matching_row.y, content_area.y);
+    }
+
+    #[test]
+    fn request_switch_clamps_preserved_detail_offset_to_shorter_content() {
+        let mut first = captured(0, "https://a.com/api/first");
+        first.req_headers = (0..10)
+            .map(|index| (format!("x-row-{index}"), format!("first-{index}")))
+            .collect();
+        let second = captured(1, "https://a.com/api/second");
+        let mut app = App::new(ui_settings(true));
+        app.add_request(first);
+        app.add_request(second);
+        render_to_buffer(&mut app);
+        app.detail_panel.scroll.offset = 6;
+
+        app.next();
+
+        assert_eq!(app.detail_panel.scroll.offset, 6);
+        render_to_buffer(&mut app);
+        assert_eq!(app.detail_panel.scroll.max_offset, 0);
+        assert_eq!(app.detail_panel.scroll.offset, 0);
+    }
+
+    #[test]
     fn mouse_click_selects_detail_tab_on_panel_border() {
         let mut app = App::new(ui_settings(true));
         app.detail_panel.scroll.offset = 3;
@@ -2310,6 +2403,29 @@ mod tests {
         assert_eq!(app.detail_panel.active_tab, MainDisplayTab::ResponseHeader);
         assert_eq!(app.detail_panel.scroll.offset, 0);
         assert!(app.is_panel_focused(PanelFocus::Detail));
+
+        app.detail_panel.scroll.offset = 2;
+        let request_header =
+            tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::RequestHeader);
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                request_header.x,
+                request_header.y,
+            ),
+            &mut app,
+        );
+        assert_eq!(app.detail_panel.scroll.offset, 3);
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                position.x,
+                position.y,
+            ),
+            &mut app,
+        );
+        assert_eq!(app.detail_panel.scroll.offset, 2);
     }
 
     #[test]
@@ -2376,6 +2492,43 @@ mod tests {
         assert!(find_buffer_text(&buffer, text_area, "alpha beta").is_some());
         assert!(find_buffer_text(&buffer, detail_area, "Normal").is_some());
         assert!(app.detail_panel.body_viewer.editor_mut().is_some());
+    }
+
+    #[test]
+    fn body_editor_render_keeps_plain_body_tab_scroll_offset() {
+        let mut app = App::new(ui_settings(true));
+        let mut req = captured(0, "https://a.com/api");
+        req.req_body = Some("alpha\nbeta\ngamma".to_string());
+        app.add_request(req);
+        app.focus_panel(PanelFocus::Detail);
+        app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+        render_to_buffer(&mut app);
+        app.detail_panel.scroll.offset = 4;
+        assert!(app.enter_current_body_viewer());
+
+        let (ui, _) = render_to_buffer(&mut app);
+        let response_header =
+            tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                response_header.x,
+                response_header.y,
+            ),
+            &mut app,
+        );
+        let request_body =
+            tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::RequestBody);
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                request_body.x,
+                request_body.y,
+            ),
+            &mut app,
+        );
+
+        assert_eq!(app.detail_panel.scroll.offset, 4);
     }
 
     #[test]
@@ -2656,19 +2809,19 @@ impl View for DetailView {
                     .line_count(self.area().width)
                     .try_into()
                     .unwrap_or(u16::MAX);
-                app.detail_panel.scroll.max_offset = total_lines.saturating_sub(self.area().height);
-                paragraph = paragraph.scroll((
-                    app.detail_panel
-                        .scroll
-                        .offset
-                        .min(app.detail_panel.scroll.max_offset),
-                    0,
-                ));
+                let offset = app
+                    .detail_panel
+                    .update_scroll_bounds(total_lines.saturating_sub(self.area().height));
+                paragraph = paragraph.scroll((offset, 0));
 
                 frame.render_widget(paragraph, self.area());
             }
             DetailContent::Body(body_key) => {
                 if app.body_render_text(body_key).is_some() {
+                    let body_is_loading = matches!(
+                        app.body_render_text(body_key),
+                        Some(BodyRenderText::Loading)
+                    );
                     let text_revision = app.body_text_revision();
                     let cached = *self.body_measurement.borrow();
                     let total_lines = match cached {
@@ -2698,14 +2851,13 @@ impl View for DetailView {
                             total_lines
                         }
                     };
-                    app.detail_panel.scroll.max_offset =
-                        total_lines.saturating_sub(self.area().height);
-                    let offset = app
-                        .detail_panel
-                        .scroll
-                        .offset
-                        .min(app.detail_panel.scroll.max_offset);
-                    app.detail_panel.scroll.offset = offset;
+                    let offset = if body_is_loading {
+                        app.detail_panel.suspend_scroll_bounds();
+                        0
+                    } else {
+                        app.detail_panel
+                            .update_scroll_bounds(total_lines.saturating_sub(self.area().height))
+                    };
 
                     if let Some(body_text) = app.body_render_text(body_key) {
                         frame.render_widget(
@@ -2761,13 +2913,9 @@ impl View for DetailView {
                     .and_then(|cache| cache.render.as_ref())
                     .expect("header render should be cached");
                 let total_lines: u16 = table.lines.len().try_into().unwrap_or(u16::MAX);
-                app.detail_panel.scroll.max_offset = total_lines.saturating_sub(table_area.height);
                 let offset = app
                     .detail_panel
-                    .scroll
-                    .offset
-                    .min(app.detail_panel.scroll.max_offset);
-                app.detail_panel.scroll.offset = offset;
+                    .update_scroll_bounds(total_lines.saturating_sub(table_area.height));
 
                 frame.render_widget(
                     Paragraph::new(borrowed_lines(&table.lines))
@@ -2785,7 +2933,10 @@ impl View for DetailView {
             frame,
             self.area(),
             app.detail_panel.scroll.max_offset,
-            app.detail_panel.scroll.offset,
+            app.detail_panel
+                .scroll
+                .offset
+                .min(app.detail_panel.scroll.max_offset),
         );
     }
 }
@@ -2816,8 +2967,7 @@ fn should_render_active_body_editor(app: &mut App) -> bool {
 }
 
 fn render_body_editor(frame: &mut Frame, app: &mut App, focused: bool, area: Rect) {
-    app.detail_panel.scroll.max_offset = 0;
-    app.detail_panel.scroll.offset = 0;
+    app.detail_panel.suspend_scroll_bounds();
 
     if let Some(editor) = app.detail_panel.body_viewer.editor_mut() {
         frame.render_widget(
@@ -2991,7 +3141,7 @@ impl MouseHandler for DetailView {
                 if app.detail_panel.body_viewer.is_active() {
                     app.detail_panel.body_viewer.scroll_down();
                 } else {
-                    app.detail_panel.scroll.scroll_down();
+                    app.detail_panel.scroll_down();
                 }
                 true
             }
@@ -2999,7 +3149,7 @@ impl MouseHandler for DetailView {
                 if app.detail_panel.body_viewer.is_active() {
                     app.detail_panel.body_viewer.scroll_up();
                 } else {
-                    app.detail_panel.scroll.scroll_up();
+                    app.detail_panel.scroll_up();
                 }
                 true
             }

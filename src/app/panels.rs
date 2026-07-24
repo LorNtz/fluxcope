@@ -24,6 +24,7 @@ impl MainDisplayTab {
         Self::ResponseHeader,
         Self::ResponseBody,
     ];
+    const COUNT: usize = Self::ALL.len();
 
     pub fn all() -> &'static [Self] {
         &Self::ALL
@@ -39,10 +40,12 @@ impl MainDisplayTab {
     }
 
     pub fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|tab| *tab == self)
-            .unwrap_or_default()
+        match self {
+            Self::RequestHeader => 0,
+            Self::RequestBody => 1,
+            Self::ResponseHeader => 2,
+            Self::ResponseBody => 3,
+        }
     }
 
     pub fn is_body(self) -> bool {
@@ -137,6 +140,9 @@ impl RequestListPanel {
 pub struct DetailPanel {
     pub active_tab: MainDisplayTab,
     pub scroll: ScrollState,
+    // The active tab uses `scroll`; its saved slot is refreshed when the tab changes.
+    tab_scroll_offsets: [u16; MainDisplayTab::COUNT],
+    scroll_bounds_valid: bool,
     pub selected_header_row: Option<usize>,
     pub body_viewer: BodyViewer,
     body_text: BodyTextState,
@@ -148,6 +154,8 @@ impl DetailPanel {
         Self {
             active_tab: MainDisplayTab::RequestHeader,
             scroll: ScrollState::new(),
+            tab_scroll_offsets: [0; MainDisplayTab::COUNT],
+            scroll_bounds_valid: true,
             selected_header_row: None,
             body_viewer: BodyViewer::new(),
             body_text: BodyTextState::Idle,
@@ -175,17 +183,50 @@ impl DetailPanel {
 
     pub fn select_tab(&mut self, tab: MainDisplayTab) {
         if self.active_tab != tab {
+            self.tab_scroll_offsets[self.active_tab.index()] = self.scroll.offset;
             self.active_tab = tab;
-            self.reset_content_position();
+            self.scroll.offset = self.tab_scroll_offsets[tab.index()];
+            self.scroll.max_offset = 0;
+            self.reset_request_content();
         }
     }
 
     pub fn reset_content_position(&mut self) {
         self.scroll.reset();
+        self.tab_scroll_offsets.fill(0);
+        self.reset_request_content();
+    }
+
+    pub(in crate::app) fn reset_request_content(&mut self) {
+        self.scroll_bounds_valid = false;
         self.selected_header_row = None;
         self.body_viewer.reset();
         self.body_text = BodyTextState::Idle;
         self.body_text_revision = self.body_text_revision.wrapping_add(1);
+    }
+
+    pub fn scroll_down(&mut self) {
+        if self.scroll_bounds_valid {
+            self.scroll.scroll_down();
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        if self.scroll_bounds_valid {
+            self.scroll.scroll_up();
+        }
+    }
+
+    pub(crate) fn update_scroll_bounds(&mut self, max_offset: u16) -> u16 {
+        self.scroll.max_offset = max_offset;
+        self.scroll.offset = self.scroll.offset.min(max_offset);
+        self.scroll_bounds_valid = true;
+        self.scroll.offset
+    }
+
+    pub(crate) fn suspend_scroll_bounds(&mut self) {
+        self.scroll.max_offset = 0;
+        self.scroll_bounds_valid = false;
     }
 
     pub(in crate::app) fn cached_body_text(&self, key: BodyViewerKey) -> Option<&str> {

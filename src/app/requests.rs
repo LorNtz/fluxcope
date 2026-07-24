@@ -207,7 +207,7 @@ impl App {
 
     pub fn apply_request_list_change(&mut self, changed: bool) {
         if changed {
-            self.detail_panel.reset_content_position();
+            self.detail_panel.reset_request_content();
         }
     }
 
