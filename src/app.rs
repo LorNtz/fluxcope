@@ -38,9 +38,9 @@ pub use settings_popup::{
     SettingsTopic,
 };
 pub(crate) use settings_popup::{
-    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS,
-    RuleEditField, RuleEditorState, SelectTarget, SettingsKeyHint, SettingsScrollRequest,
-    SettingsSelectId,
+    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PrefilterPatternEditState, ProxyRuleTable, ProxyWidget,
+    RULE_EDITOR_KEY_HINTS, RecordingWidget, RuleEditField, RuleEditorState, SelectTarget,
+    SettingsKeyHint, SettingsScrollRequest, SettingsSelectId,
 };
 
 pub(crate) fn benchmark_request_tree(captures: Vec<crate::capture::CapturedExchange>) -> usize {

@@ -16,14 +16,14 @@ use crate::{
         BodySide, BodyTaskTracker, CaptureHandle, CapturePublisher, RequestCaptureInput,
         ResponseCaptureInput, drain_body, tee_body,
     },
-    mapping::MappingStore,
     recording::RecordingState,
+    request_policy::RequestPolicyStore,
 };
 
 pub struct LogHandler {
     publisher: CapturePublisher,
     body_tasks: BodyTaskTracker,
-    mapping_store: MappingStore,
+    request_policy_store: RequestPolicyStore,
     recording: RecordingState,
     current_request: Option<CaptureHandle>,
 }
@@ -32,13 +32,13 @@ impl LogHandler {
     pub(crate) fn new(
         publisher: CapturePublisher,
         body_tasks: BodyTaskTracker,
-        mapping_store: MappingStore,
+        request_policy_store: RequestPolicyStore,
         recording: RecordingState,
     ) -> Self {
         Self {
             publisher,
             body_tasks,
-            mapping_store,
+            request_policy_store,
             recording,
             current_request: None,
         }
@@ -51,41 +51,48 @@ impl LogHandler {
         }
 
         let (mut parts, body) = req.into_parts();
-        let mapping = self.mapping_store.current();
-        let mut decision = mapping.map_request(&parts.uri);
+        let policy = self.request_policy_store.current();
         let recording = self.recording.is_enabled();
-        let original_uri =
-            (recording || decision.mapped_uri.is_some() || decision.local_path.is_some())
-                .then(|| parts.uri.to_string());
+        let (mut decision, urls) = policy.evaluate(&parts.uri, recording).into_parts();
+        let recording_evaluation = urls.recording();
+        if let Some(recording) = recording_evaluation.filter(|recording| !recording.included) {
+            log::info!(
+                "request not recorded by URL prefilter: {} {}",
+                parts.method,
+                recording.effective_url
+            );
+        }
 
         if let Some(mapped_uri) = decision.mapped_uri.take() {
             log::info!(
                 "map remote: {} -> {}",
-                original_uri.as_deref().unwrap_or_default(),
+                urls.original_url()
+                    .expect("mapped requests retain their original URL"),
                 mapped_uri
             );
             parts.uri = mapped_uri;
         }
-        let capture = recording.then(|| {
-            let effective_uri = parts.uri.to_string();
-            let local_path = decision
-                .local_path
-                .as_ref()
-                .map(|path| path.display().to_string());
-            self.publisher.try_start(RequestCaptureInput {
-                method: parts.method.clone(),
-                original_uri: original_uri.as_deref().unwrap_or_default(),
-                effective_uri: &effective_uri,
-                local_path: local_path.as_deref(),
-                headers: &parts.headers,
-            })
-        });
-        let capture = capture.flatten();
+        let capture = recording_evaluation
+            .filter(|recording| recording.included)
+            .and_then(|recording| {
+                let local_path = decision
+                    .local_path
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                self.publisher.try_start(RequestCaptureInput {
+                    method: parts.method.clone(),
+                    original_uri: recording.original_url,
+                    effective_uri: recording.effective_url,
+                    local_path: local_path.as_deref(),
+                    headers: &parts.headers,
+                })
+            });
 
         if let Some(local_path) = decision.local_path {
             log::info!(
                 "map local: {} -> {}",
-                original_uri.as_deref().unwrap_or_default(),
+                urls.original_url()
+                    .expect("mapped requests retain their original URL"),
                 local_path.display()
             );
             if let Some(capture) = capture.as_ref() {
@@ -125,7 +132,7 @@ impl Clone for LogHandler {
         Self {
             publisher: self.publisher.clone(),
             body_tasks: self.body_tasks.clone(),
-            mapping_store: self.mapping_store.clone(),
+            request_policy_store: self.request_policy_store.clone(),
             recording: self.recording.clone(),
             current_request: None,
         }
@@ -290,10 +297,11 @@ mod tests {
     use super::*;
     use crate::{
         capture::{BodyStreamState, CapturePolicy, CaptureRecord, CaptureSequence},
-        mapping::MappingEngine,
+        request_policy::RequestPolicy,
         settings::{
-            ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule, ProxyMapRemoteSettings,
-            ProxyPresetSettings, ProxySettings,
+            AppSettings, ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule,
+            ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
+            RecordingPrefilterPatternSettings, RecordingPrefilterSettings,
         },
     };
     use tokio::sync::mpsc;
@@ -307,13 +315,14 @@ mod tests {
     }
 
     impl Harness {
-        fn new(mapping_store: MappingStore, recording: RecordingState) -> Self {
+        fn new(request_policy_store: RequestPolicyStore, recording: RecordingState) -> Self {
             let policy = CapturePolicy::default();
             let (tx, captures) = mpsc::channel(policy.queue_capacity);
             let publisher = CapturePublisher::new(tx, policy);
             let shutdown = CancellationToken::new();
             let tasks = BodyTaskTracker::new(shutdown.clone());
-            let handler = LogHandler::new(publisher, tasks.clone(), mapping_store, recording);
+            let handler =
+                LogHandler::new(publisher, tasks.clone(), request_policy_store, recording);
             Self {
                 handler,
                 captures,
@@ -340,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloned_handlers_capture_concurrent_requests_independently_in_capture_order() {
-        let mut harness = Harness::new(MappingStore::default(), RecordingState::default());
+        let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
         let mut slow_handler = harness.handler.clone();
         let mut fast_handler = harness.handler.clone();
 
@@ -388,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn remote_mapping_rewrites_forwarded_uri_but_captures_both_uris() {
         let mut harness = Harness::new(
-            mapping_store(
+            request_policy_store(
                 vec![remote_rule("https://a.com", "http://b.test.com")],
                 vec![],
             ),
@@ -420,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_response_chunk_is_forwarded_before_source_eof() {
-        let mut harness = Harness::new(MappingStore::default(), RecordingState::default());
+        let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
         let forwarded = forward_request(&mut harness.handler, "https://example.com/").await;
         consume_request_body(forwarded).await;
         let (mut source, body) = Body::channel();
@@ -445,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn recording_off_preserves_mapping_without_publishing_capture() {
         let mut harness = Harness::new(
-            mapping_store(
+            request_policy_store(
                 vec![remote_rule("https://a.com", "http://b.test.com")],
                 vec![],
             ),
@@ -472,11 +481,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unmatched_prefilter_request_forwards_bodies_without_publishing_capture() {
+        let mut harness = Harness::new(
+            prefilter_store(vec![], vec![], vec!["https://wanted.example.com/*"]),
+            RecordingState::default(),
+        );
+        let request = request(
+            "POST",
+            "https://other.example.com/api?token=visible",
+            Body::from("request payload"),
+        );
+
+        let forwarded = match harness.handler.capture_request(request).await {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(_) => panic!("unmatched request should forward"),
+        };
+        assert_eq!(
+            hudsucker::hyper::body::to_bytes(forwarded.into_body())
+                .await
+                .expect("request body should forward")
+                .as_ref(),
+            b"request payload"
+        );
+        let response = harness
+            .handler
+            .capture_response(test_response(200, "response payload"));
+        assert_eq!(
+            hudsucker::hyper::body::to_bytes(response.into_body())
+                .await
+                .expect("response body should forward")
+                .as_ref(),
+            b"response payload"
+        );
+        assert!(harness.captures.try_recv().is_err());
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn prefilter_matches_explicit_default_https_port_without_changing_captured_url() {
+        let mut harness = Harness::new(
+            prefilter_store(vec![], vec![], vec!["*://*.xiaojukeji.com/*"]),
+            RecordingState::default(),
+        );
+        let uri = "https://omgup.xiaojukeji.com:443/api/ministat/x?count=1&e=tech_socket_error";
+
+        let forwarded = match harness
+            .handler
+            .capture_request(request("POST", uri, Body::empty()))
+            .await
+        {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(_) => panic!("matched request should forward"),
+        };
+        assert_eq!(forwarded.uri().to_string(), uri);
+        consume_request_body(forwarded).await;
+        consume_response_body(harness.handler.capture_response(test_response(200, "ok"))).await;
+
+        let capture = harness.next_capture().await;
+        assert_eq!(capture.summary().request.display_uri(), uri);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn prefilter_matches_effective_url_after_remote_mapping_with_query() {
+        let mut harness = Harness::new(
+            prefilter_store(
+                vec![remote_rule("https://a.com", "http://b.test.com")],
+                vec![],
+                vec!["http://b.test.com:80/interested*?client=*"],
+            ),
+            RecordingState::default(),
+        );
+        let request = request(
+            "GET",
+            "https://a.com/interested/orders?client=wirelens",
+            Body::empty(),
+        );
+
+        let forwarded = match harness.handler.capture_request(request).await {
+            RequestOrResponse::Request(request) => request,
+            RequestOrResponse::Response(_) => panic!("remote mapping should forward"),
+        };
+        assert_eq!(
+            forwarded.uri().to_string(),
+            "http://b.test.com/interested/orders?client=wirelens"
+        );
+        consume_request_body(forwarded).await;
+        consume_response_body(harness.handler.capture_response(test_response(200, "ok"))).await;
+
+        let capture = harness.next_capture().await;
+        assert_eq!(
+            capture.summary().request.mapped_uri(),
+            Some("http://b.test.com/interested/orders?client=wirelens")
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unmatched_prefilter_request_still_uses_map_local() {
+        let path = temp_file_path("filtered.json");
+        fs::write(&path, br#"{"mapped":true}"#).expect("test file should be written");
+        let mut harness = Harness::new(
+            prefilter_store(
+                vec![],
+                vec![local_rule(
+                    "https://a.com/some/api",
+                    &path.to_string_lossy(),
+                )],
+                vec!["https://wanted.example.com/*"],
+            ),
+            RecordingState::default(),
+        );
+
+        let response = match harness
+            .handler
+            .capture_request(request(
+                "POST",
+                "https://a.com/some/api?x=1",
+                Body::from("ignored by map local"),
+            ))
+            .await
+        {
+            RequestOrResponse::Request(_) => panic!("map local should return a response"),
+            RequestOrResponse::Response(response) => response,
+        };
+
+        assert_eq!(
+            hudsucker::hyper::body::to_bytes(response.into_body())
+                .await
+                .expect("mapped response should stream")
+                .as_ref(),
+            br#"{"mapped":true}"#
+        );
+        assert!(harness.captures.try_recv().is_err());
+        let _ = fs::remove_file(path);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
     async fn local_mapping_streams_file_and_captures_exact_bytes() {
         let path = temp_file_path("api.json");
         fs::write(&path, br#"{"ok":true}"#).expect("test file should be written");
         let mut harness = Harness::new(
-            mapping_store(
+            request_policy_store(
                 vec![],
                 vec![local_rule(
                     "https://a.com/some/api",
@@ -517,7 +664,7 @@ mod tests {
         let path = temp_file_path("missing.json");
         let _ = fs::remove_file(&path);
         let mut harness = Harness::new(
-            mapping_store(
+            request_policy_store(
                 vec![],
                 vec![local_rule("https://a.com/missing", &path.to_string_lossy())],
             ),
@@ -585,10 +732,18 @@ mod tests {
             .expect("test response should be valid")
     }
 
-    fn mapping_store(
+    fn request_policy_store(
         remote_rules: Vec<ProxyMapRemoteRule>,
         local_rules: Vec<ProxyMapLocalRule>,
-    ) -> MappingStore {
+    ) -> RequestPolicyStore {
+        prefilter_store(remote_rules, local_rules, vec![])
+    }
+
+    fn prefilter_store(
+        remote_rules: Vec<ProxyMapRemoteRule>,
+        local_rules: Vec<ProxyMapLocalRule>,
+        include_url_patterns: Vec<&str>,
+    ) -> RequestPolicyStore {
         let proxy = ProxySettings {
             enable: true,
             active_preset: Some("dev".to_string()),
@@ -604,7 +759,21 @@ mod tests {
                 },
             }],
         };
-        MappingStore::new(MappingEngine::compile(Some(&proxy)))
+        let settings = AppSettings {
+            proxy: Some(proxy),
+            recording: crate::settings::RecordingSettings {
+                prefilter: RecordingPrefilterSettings {
+                    enable: true,
+                    include_url_patterns: include_url_patterns
+                        .into_iter()
+                        .map(RecordingPrefilterPatternSettings::new)
+                        .collect(),
+                },
+                ..crate::settings::RecordingSettings::default()
+            },
+            ..AppSettings::default()
+        };
+        RequestPolicyStore::new(RequestPolicy::compile(&settings).policy)
     }
 
     fn remote_rule(from: &str, to: &str) -> ProxyMapRemoteRule {

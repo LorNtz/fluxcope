@@ -193,11 +193,13 @@ impl log::Log for AppLogger {
             return;
         }
 
-        let record = self.format_record(record);
-        if self.tx.try_send(record).is_err() {
-            self.metrics
-                .producer_dropped
-                .fetch_add(1, Ordering::Relaxed);
+        match self.tx.try_reserve() {
+            Ok(permit) => permit.send(self.format_record(record)),
+            Err(_) => {
+                self.metrics
+                    .producer_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -289,11 +291,11 @@ mod tests {
 
     #[test]
     fn saturated_producer_queue_drops_without_waiting() {
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         let metrics = Arc::new(LoggingMetrics::default());
         let logger = AppLogger {
             tx,
-            max_record_bytes: 128,
+            max_record_bytes: 64,
             metrics: Arc::clone(&metrics),
         };
         let first = Record::builder()
@@ -304,12 +306,19 @@ mod tests {
         let second = Record::builder()
             .level(Level::Info)
             .target("wirelens::test")
-            .args(format_args!("second"))
+            .args(format_args!(
+                "this record is deliberately long enough to require truncation if formatted"
+            ))
             .build();
 
         logger.log(&first);
         logger.log(&second);
 
         assert_eq!(metrics.snapshot().producer_dropped, 1);
+        assert_eq!(metrics.snapshot().records_truncated, 0);
+        assert_eq!(
+            rx.try_recv().unwrap().as_str(),
+            "INFO - [wirelens::test] first"
+        );
     }
 }

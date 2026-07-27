@@ -3,9 +3,9 @@ use crate::app::ProxyRow;
 use crate::app::{
     ActionDialog, App, BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyRenderText, BodyViewerKey,
     FieldEditKind, MainDisplayTab, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus, PopupFocus,
-    ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS, RequestTreeNodeSnapshot, RuleEditField,
-    RuleEditorState, SelectTarget, SettingsKeyHint, SettingsPaneFocus, SettingsPopup,
-    SettingsScrollRequest, SettingsSelectId, SettingsTopic,
+    ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS, RecordingWidget, RequestTreeNodeSnapshot,
+    RuleEditField, RuleEditorState, SelectTarget, SettingsKeyHint, SettingsPaneFocus,
+    SettingsPopup, SettingsScrollRequest, SettingsSelectId, SettingsTopic,
 };
 use crate::select::{SelectItem, SelectState};
 use crate::select_widget::SelectWidget;
@@ -33,6 +33,8 @@ mod certificate_popup;
 use certificate_popup::render_certificate_popup;
 mod log_view;
 use log_view::LogView;
+mod recording_settings;
+use recording_settings::{PrefilterTableWidget, prefilter_table_widget};
 mod request_list;
 use request_list::RequestListView;
 #[cfg(test)]
@@ -211,7 +213,10 @@ mod tests {
         BodySide, CaptureSequence, CapturedExchange, DecodeDisplayMode, DecodeKey, DecodePolicy,
         DecodeResult, start_decode_service,
     };
-    use crate::settings::{ProxyPresetSettings, ProxySettings, RequestListSettings, UiSettings};
+    use crate::settings::{
+        ProxyPresetSettings, ProxySettings, RecordingPrefilterPatternSettings, RequestListSettings,
+        UiSettings,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
     use http::Method;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -449,6 +454,149 @@ mod tests {
         assert!(rendered.contains("Settings"));
         assert!(rendered.contains("Server"));
         assert!(rendered.contains("Proxy port"));
+    }
+
+    #[test]
+    fn settings_popup_recording_topic_renders_prefilter_controls_and_patterns() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
+            "https://api.example.com/*?client=*",
+        )];
+
+        let (_ui, buffer) = render_to_buffer(&mut app);
+        let rendered = (0..buffer.area.height)
+            .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("URL Prefilter"), "{rendered}");
+        assert!(rendered.contains("URL prefilter enabled"), "{rendered}");
+        assert!(rendered.contains("Included URL Patterns"), "{rendered}");
+        assert!(rendered.contains("On"), "{rendered}");
+        assert!(rendered.contains("[✓]"), "{rendered}");
+        assert!(
+            rendered.contains("https://api.example.com/*?client=*"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn settings_popup_mouse_selects_prefilter_pattern_row() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .include_url_patterns = vec![
+            RecordingPrefilterPatternSettings::new("https://first.example.com/*"),
+            RecordingPrefilterPatternSettings::new("https://second.example.com/*"),
+        ];
+        let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let content_area = settings_content_test_area(buffer.area);
+        let second_pattern =
+            find_buffer_text(&buffer, content_area, "https://second.example.com/*")
+                .expect("second prefilter pattern should render");
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                second_pattern.x,
+                second_pattern.y,
+            ),
+            &mut app,
+        );
+
+        assert_eq!(app.settings_popup.active_prefilter_pattern(), Some(1));
+        assert!(
+            app.settings_popup
+                .draft()
+                .recording
+                .prefilter
+                .include_url_patterns[1]
+                .enable
+        );
+    }
+
+    #[test]
+    fn settings_popup_mouse_toggles_prefilter_pattern_checkbox() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
+            "https://api.example.com/*",
+        )];
+        let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let content_area = settings_content_test_area(buffer.area);
+        let pattern = find_buffer_text(&buffer, content_area, "https://api.example.com/*")
+            .expect("prefilter pattern should render");
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                pattern.x.saturating_sub(5),
+                pattern.y,
+            ),
+            &mut app,
+        );
+
+        assert_eq!(app.settings_popup.active_prefilter_pattern(), Some(0));
+        assert!(
+            !app.settings_popup
+                .draft()
+                .recording
+                .prefilter
+                .include_url_patterns[0]
+                .enable
+        );
+    }
+
+    #[test]
+    fn settings_popup_mouse_wheel_scrolls_overflowing_prefilter_table() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .include_url_patterns = (0..10)
+            .map(|index| {
+                RecordingPrefilterPatternSettings::new(format!(
+                    "https://api.example.com/v{index}/*"
+                ))
+            })
+            .collect();
+        let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let content_area = settings_content_test_area(buffer.area);
+        let title = find_buffer_text(&buffer, content_area, "Included URL Patterns")
+            .expect("prefilter table should render");
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::ScrollDown,
+                content_area.x.saturating_add(2),
+                title.y.saturating_add(2),
+            ),
+            &mut app,
+        );
+
+        assert_eq!(app.settings_popup.prefilter_table_scroll_offset(), 1);
     }
 
     #[test]
@@ -957,7 +1105,7 @@ mod tests {
 
         let (_ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
         let content_area = settings_content_test_area(buffer.area);
-        let max_height = settings_rule_table_max_height(content_area.height);
+        let max_height = settings_table_max_height(content_area.height);
         find_buffer_text(&buffer, content_area, "Map Remote Rules")
             .expect("remote rule table should render");
         let preset = active_preset(app.settings_popup.draft()).expect("active preset should exist");
@@ -985,8 +1133,7 @@ mod tests {
         let content_area = settings_content_test_area(buffer.area);
         let remote_title = find_buffer_text(&buffer, content_area, "Map Remote Rules")
             .expect("remote rule table should render");
-        let max_height =
-            settings_rule_table_max_height(settings_content_test_area(buffer.area).height);
+        let max_height = settings_table_max_height(settings_content_test_area(buffer.area).height);
         let rendered = (0..buffer.area.height)
             .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
             .collect::<Vec<_>>()
@@ -1052,7 +1199,7 @@ mod tests {
         let content_area = settings_content_test_area(buffer.area);
         let remote_title = find_buffer_text(&buffer, content_area, "Map Remote Rules")
             .expect("remote rule table should render");
-        let max_height = settings_rule_table_max_height(content_area.height);
+        let max_height = settings_table_max_height(content_area.height);
         let scrollbar_column =
             rule_table_scrollbar_column(&buffer, content_area, "Map Remote Rules")
                 .expect("remote rule table scrollbar column should render");
@@ -1850,7 +1997,7 @@ mod tests {
         root_area: Rect,
     ) -> Vec<SettingsContentItem<'a>> {
         let table_max_height =
-            settings_rule_table_max_height(settings_content_test_area(root_area).height);
+            settings_table_max_height(settings_content_test_area(root_area).height);
         settings_content_items_with_error(popup, table_max_height)
     }
 
@@ -3289,12 +3436,12 @@ fn settings_popup_area(area: Rect) -> Rect {
     centered_rect(width, height, area)
 }
 
-const SETTINGS_RULE_TABLE_MAX_HEIGHT_PERCENT: u16 = 50;
+const SETTINGS_TABLE_MAX_HEIGHT_PERCENT: u16 = 50;
 const SETTINGS_TABLE_MIN_HEIGHT: u16 = 4;
 
-fn settings_rule_table_max_height(viewport_height: u16) -> u16 {
+fn settings_table_max_height(viewport_height: u16) -> u16 {
     let proportional = u16::try_from(
-        u32::from(viewport_height) * u32::from(SETTINGS_RULE_TABLE_MAX_HEIGHT_PERCENT) / 100,
+        u32::from(viewport_height) * u32::from(SETTINGS_TABLE_MAX_HEIGHT_PERCENT) / 100,
     )
     .unwrap_or(u16::MAX);
     proportional.max(SETTINGS_TABLE_MIN_HEIGHT)
@@ -3439,9 +3586,11 @@ fn render_settings_content(frame: &mut Frame, popup: &mut SettingsPopup, area: R
     }
 
     let scroll_request = popup.take_scroll_request();
-    let table_max_height = settings_rule_table_max_height(area.height);
-    if popup.topic == SettingsTopic::Proxy {
-        sync_settings_rule_table_views(popup, table_max_height);
+    let table_max_height = settings_table_max_height(area.height);
+    match popup.topic {
+        SettingsTopic::Recording => sync_prefilter_table_view(popup, table_max_height),
+        SettingsTopic::Proxy => sync_settings_rule_table_views(popup, table_max_height),
+        _ => {}
     }
     let items = settings_content_items_with_error(popup, table_max_height);
     let field_layout = settings_field_layout(&items);
@@ -3496,6 +3645,12 @@ fn sync_settings_rule_table_views(popup: &mut SettingsPopup, table_max_height: u
         let height = settings_table_height(row_count, table_max_height);
         popup.sync_rule_table_view(table, settings_table_visible_rows(height));
     }
+}
+
+fn sync_prefilter_table_view(popup: &mut SettingsPopup, table_max_height: u16) {
+    let row_count = popup.prefilter_pattern_count();
+    let height = settings_table_height(row_count, table_max_height);
+    popup.sync_prefilter_table_view(settings_table_visible_rows(height));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3753,6 +3908,49 @@ impl Widget for SettingsFieldRowOverlayWidget<'_, '_> {
     }
 }
 
+enum SettingsFullWidthTable<'a> {
+    Proxy(ProxyRuleTableWidget<'a>),
+    Prefilter(PrefilterTableWidget<'a>),
+}
+
+impl SettingsFullWidthTable<'_> {
+    fn height(&self) -> u16 {
+        match self {
+            Self::Proxy(table) => table.height(),
+            Self::Prefilter(table) => table.height(),
+        }
+    }
+
+    fn render(&self, scroll_view: &mut ScrollView, area: Rect) {
+        match self {
+            Self::Proxy(table) => scroll_view.render_widget(table, area),
+            Self::Prefilter(table) => scroll_view.render_widget(table, area),
+        }
+    }
+
+    fn focused_area(&self, area: Rect) -> Rect {
+        match self {
+            Self::Proxy(table) => table.active_rule_area(area).unwrap_or(area),
+            Self::Prefilter(table) => table.active_pattern_area(area).unwrap_or(area),
+        }
+    }
+
+    fn scroll_hit(&self, area: Rect, position: Position) -> Option<SettingsTableHit> {
+        match self {
+            Self::Proxy(table) => {
+                let viewport = table.viewport(area.height);
+                (area.contains(position) && viewport.overflowing(table.row_count()))
+                    .then_some(SettingsTableHit::Proxy(table.table))
+            }
+            Self::Prefilter(table) => {
+                let viewport = table.viewport(area.height);
+                (area.contains(position) && viewport.overflowing(table.row_count()))
+                    .then_some(SettingsTableHit::Prefilter)
+            }
+        }
+    }
+}
+
 enum SettingsContentItem<'a> {
     Line(Line<'static>),
     Divider {
@@ -3762,9 +3960,9 @@ enum SettingsContentItem<'a> {
         row: usize,
         field: SettingsFieldRow<'a>,
     },
-    FullWidthRuleTable {
+    FullWidthTable {
         row: usize,
-        table: ProxyRuleTableWidget<'a>,
+        table: SettingsFullWidthTable<'a>,
     },
 }
 
@@ -3774,7 +3972,7 @@ impl SettingsContentItem<'_> {
             Self::Line(_) => 1,
             Self::Divider { .. } => SETTINGS_DIVIDER_HEIGHT,
             Self::Field { field, .. } => field.height(layout, width),
-            Self::FullWidthRuleTable { table, .. } => table.height(),
+            Self::FullWidthTable { table, .. } => table.height(),
         }
     }
 
@@ -3785,7 +3983,7 @@ impl SettingsContentItem<'_> {
             Self::Field { field, .. } => {
                 scroll_view.render_widget(SettingsFieldRowWidget { row: field, layout }, area)
             }
-            Self::FullWidthRuleTable { table, .. } => scroll_view.render_widget(table, area),
+            Self::FullWidthTable { table, .. } => table.render(scroll_view, area),
         }
     }
 
@@ -3811,20 +4009,20 @@ impl SettingsContentItem<'_> {
     fn field_label_width(&self) -> Option<u16> {
         match self {
             Self::Field { field, .. } => Some(field.label_width()),
-            Self::Line(_) | Self::Divider { .. } | Self::FullWidthRuleTable { .. } => None,
+            Self::Line(_) | Self::Divider { .. } | Self::FullWidthTable { .. } => None,
         }
     }
 
     fn focus_row(&self) -> Option<usize> {
         match self {
-            Self::Field { row, .. } | Self::FullWidthRuleTable { row, .. } => Some(*row),
+            Self::Field { row, .. } | Self::FullWidthTable { row, .. } => Some(*row),
             Self::Line(_) | Self::Divider { .. } => None,
         }
     }
 
     fn focused_area(&self, area: Rect) -> Rect {
         match self {
-            Self::FullWidthRuleTable { table, .. } => table.active_rule_area(area).unwrap_or(area),
+            Self::FullWidthTable { table, .. } => table.focused_area(area),
             Self::Line(_) | Self::Divider { .. } | Self::Field { .. } => area,
         }
     }
@@ -4033,6 +4231,34 @@ impl<'items, 'content> SettingsContentLayout<'items, 'content> {
     }
 }
 
+fn inspect_settings_content_at_mouse<R>(
+    popup: &SettingsPopup,
+    viewport: Rect,
+    mouse: MouseEvent,
+    inspect: impl FnOnce(&SettingsContentLayout<'_, '_>, Position) -> R,
+) -> R {
+    let table_max_height = settings_table_max_height(viewport.height);
+    let items = settings_content_items_with_error(popup, table_max_height);
+    let field_layout = settings_field_layout(&items);
+    let content_width =
+        settings_content_width_for_viewport(&items, field_layout, viewport.width, viewport.height);
+    let content_layout =
+        SettingsContentLayout::new(&items, field_layout, content_width, viewport.height);
+    let scroll_y = if content_layout.scrolling_enabled {
+        popup.scroll.offset().y
+    } else {
+        0
+    };
+    let local_position = Position::new(
+        mouse.column.saturating_sub(viewport.x),
+        mouse
+            .row
+            .saturating_sub(viewport.y)
+            .saturating_add(scroll_y),
+    );
+    inspect(&content_layout, local_position)
+}
+
 fn settings_select_layout(
     items: &[SettingsContentItem<'_>],
     target: Option<SelectTarget>,
@@ -4109,12 +4335,30 @@ fn settings_content_items<'a>(
             ));
             items
         }
-        SettingsTopic::Recording => vec![checkbox_row(
-            popup,
-            0,
-            popup.draft().recording.start_record_on_launch,
-            "Start recording on launch",
-        )],
+        SettingsTopic::Recording => vec![
+            checkbox_row(
+                popup,
+                RecordingWidget::StartRecordingOnLaunch.row(),
+                popup.draft().recording.start_record_on_launch,
+                "Start recording on launch",
+            ),
+            SettingsContentItem::Divider {
+                title: "URL Prefilter",
+            },
+            checkbox_row(
+                popup,
+                RecordingWidget::PrefilterEnabled.row(),
+                popup.draft().recording.prefilter.enable,
+                "URL prefilter enabled",
+            ),
+            SettingsContentItem::FullWidthTable {
+                row: RecordingWidget::IncludeUrlPatterns.row(),
+                table: SettingsFullWidthTable::Prefilter(prefilter_table_widget(
+                    popup,
+                    table_max_height,
+                )),
+            },
+        ],
         SettingsTopic::Interface => vec![checkbox_row(
             popup,
             0,
@@ -4315,14 +4559,14 @@ fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsCont
                 preset.is_some_and(|preset| preset.map_remote.enable),
                 "Map remote enabled",
             ),
-            ProxyWidget::RemoteRules => SettingsContentItem::FullWidthRuleTable {
+            ProxyWidget::RemoteRules => SettingsContentItem::FullWidthTable {
                 row,
-                table: proxy_rule_table_widget(
+                table: SettingsFullWidthTable::Proxy(proxy_rule_table_widget(
                     popup,
                     ProxyRuleTable::Remote,
                     preset,
                     table_max_height,
-                ),
+                )),
             },
             ProxyWidget::MapLocalEnabled => checkbox_row(
                 popup,
@@ -4330,14 +4574,14 @@ fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsCont
                 preset.is_some_and(|preset| preset.map_local.enable),
                 "Map local enabled",
             ),
-            ProxyWidget::LocalRules => SettingsContentItem::FullWidthRuleTable {
+            ProxyWidget::LocalRules => SettingsContentItem::FullWidthTable {
                 row,
-                table: proxy_rule_table_widget(
+                table: SettingsFullWidthTable::Proxy(proxy_rule_table_widget(
                     popup,
                     ProxyRuleTable::Local,
                     preset,
                     table_max_height,
-                ),
+                )),
             },
         };
         items.push(item);
@@ -4988,6 +5232,9 @@ fn handle_settings_popup_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect
     if handle_proxy_preset_select_mouse(mouse, app, root_area) {
         return true;
     }
+    if handle_prefilter_table_mouse(mouse, app, root_area) {
+        return true;
+    }
 
     match mouse.kind {
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
@@ -4996,6 +5243,12 @@ fn handle_settings_popup_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect
         }
         _ => true,
     }
+}
+
+#[derive(Clone, Copy)]
+enum SettingsTableHit {
+    Prefilter,
+    Proxy(ProxyRuleTable),
 }
 
 fn handle_settings_content_scroll_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) {
@@ -5007,59 +5260,46 @@ fn handle_settings_content_scroll_mouse(mouse: MouseEvent, app: &mut App, root_a
         return;
     }
 
-    let (table_hit, scrolling_enabled) = {
-        let position = Position::new(mouse.column, mouse.row);
-        let table_max_height = settings_rule_table_max_height(viewport.height);
-        let items = settings_content_items_with_error(&app.settings_popup, table_max_height);
-        let field_layout = settings_field_layout(&items);
-        let content_width = settings_content_width_for_viewport(
-            &items,
-            field_layout,
-            viewport.width,
-            viewport.height,
-        );
-        let content_layout =
-            SettingsContentLayout::new(&items, field_layout, content_width, viewport.height);
-        let scrolling_enabled = content_layout.scrolling_enabled;
+    let position = Position::new(mouse.column, mouse.row);
+    let (table_hit, scrolling_enabled) = inspect_settings_content_at_mouse(
+        &app.settings_popup,
+        viewport,
+        mouse,
+        |content_layout, local_position| {
+            let scrolling_enabled = content_layout.scrolling_enabled;
 
-        let table_hit = if app.settings_popup.topic == SettingsTopic::Proxy
-            && app.settings_popup.active_select_target().is_none()
-            && app.settings_popup.unsaved_dialog().is_none()
-            && app.settings_popup.rule_editor().is_none()
-            && viewport.contains(position)
-        {
-            let scroll_y = if scrolling_enabled {
-                app.settings_popup.scroll.offset().y
+            let table_hit = if matches!(
+                app.settings_popup.topic,
+                SettingsTopic::Recording | SettingsTopic::Proxy
+            ) && app.settings_popup.active_select_target().is_none()
+                && app.settings_popup.unsaved_dialog().is_none()
+                && app.settings_popup.rule_editor().is_none()
+                && viewport.contains(position)
+            {
+                content_layout.item_areas().find_map(|(item, area)| {
+                    let SettingsContentItem::FullWidthTable { table, .. } = item else {
+                        return None;
+                    };
+                    table.scroll_hit(area, local_position)
+                })
             } else {
-                0
+                None
             };
-            let local_position = Position::new(
-                mouse.column.saturating_sub(viewport.x),
-                mouse
-                    .row
-                    .saturating_sub(viewport.y)
-                    .saturating_add(scroll_y),
-            );
-            content_layout.item_areas().find_map(|(item, area)| {
-                let SettingsContentItem::FullWidthRuleTable { table, .. } = item else {
-                    return None;
-                };
-                let viewport = table.viewport(area.height);
-                (area.contains(local_position) && viewport.overflowing(table.row_count()))
-                    .then_some(table.table)
-            })
-        } else {
-            None
-        };
 
-        (table_hit, scrolling_enabled)
-    };
+            (table_hit, scrolling_enabled)
+        },
+    );
 
     if let Some(table) = table_hit {
-        let changed = if scroll_down {
-            app.settings_popup.scroll_rule_table_down(table)
-        } else {
-            app.settings_popup.scroll_rule_table_up(table)
+        let changed = match (table, scroll_down) {
+            (SettingsTableHit::Prefilter, true) => app.settings_popup.scroll_prefilter_table_down(),
+            (SettingsTableHit::Prefilter, false) => app.settings_popup.scroll_prefilter_table_up(),
+            (SettingsTableHit::Proxy(table), true) => {
+                app.settings_popup.scroll_rule_table_down(table)
+            }
+            (SettingsTableHit::Proxy(table), false) => {
+                app.settings_popup.scroll_rule_table_up(table)
+            }
         };
         if changed {
             return;
@@ -5075,6 +5315,53 @@ fn handle_settings_content_scroll_mouse(mouse: MouseEvent, app: &mut App, root_a
     } else {
         app.settings_popup.scroll.set_offset(Position::ORIGIN);
     }
+}
+
+fn handle_prefilter_table_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) -> bool {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        || app.settings_popup.topic != SettingsTopic::Recording
+        || app.settings_popup.unsaved_dialog().is_some()
+        || app.settings_popup.prefilter_pattern_edit().is_some()
+    {
+        return false;
+    }
+
+    let layout = settings_popup_layout(root_area);
+    let viewport = layout.content_viewport;
+    let position = Position::new(mouse.column, mouse.row);
+    if viewport.is_empty() || !viewport.contains(position) {
+        return false;
+    }
+
+    let hit = inspect_settings_content_at_mouse(
+        &app.settings_popup,
+        viewport,
+        mouse,
+        |content_layout, local_position| {
+            content_layout.item_areas().find_map(|(item, area)| {
+                let SettingsContentItem::FullWidthTable {
+                    table: SettingsFullWidthTable::Prefilter(table),
+                    ..
+                } = item
+                else {
+                    return None;
+                };
+                if !area.contains(local_position) {
+                    return None;
+                }
+                table.pattern_hit(area, local_position)
+            })
+        },
+    );
+
+    if let Some((index, toggle)) = hit {
+        app.settings_popup.select_prefilter_pattern(index);
+        if toggle {
+            app.settings_popup.toggle_prefilter_pattern(index);
+        }
+        return true;
+    }
+    false
 }
 
 fn handle_proxy_preset_select_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) -> bool {
@@ -5106,51 +5393,37 @@ fn handle_proxy_preset_select_mouse(mouse: MouseEvent, app: &mut App, root_area:
         return false;
     }
 
-    let table_max_height = settings_rule_table_max_height(viewport.height);
-    let items = settings_content_items_with_error(&app.settings_popup, table_max_height);
-    let field_layout = settings_field_layout(&items);
-    let content_width =
-        settings_content_width_for_viewport(&items, field_layout, viewport.width, viewport.height);
-    let content_layout =
-        SettingsContentLayout::new(&items, field_layout, content_width, viewport.height);
-    let content_height = content_layout.buffer_height;
-    let scroll_y = if content_layout.scrolling_enabled {
-        app.settings_popup.scroll.offset().y
-    } else {
-        0
-    };
-    let local_position = Position::new(
-        mouse.column.saturating_sub(viewport.x),
-        mouse
-            .row
-            .saturating_sub(viewport.y)
-            .saturating_add(scroll_y),
-    );
-    let active_select = app
-        .settings_popup
-        .active_select_target()
-        .and_then(|target| {
-            settings_select_layout(
-                &items,
-                Some(target),
-                field_layout,
-                content_width,
-                content_height,
-            )
-        });
-    let clicked_select = settings_select_layout_at_position(
-        &items,
-        local_position,
-        field_layout,
-        content_width,
-        content_height,
+    let (active_select, clicked_select, local_position) = inspect_settings_content_at_mouse(
+        &app.settings_popup,
+        viewport,
+        mouse,
+        |content_layout, local_position| {
+            let active_select = app
+                .settings_popup
+                .active_select_target()
+                .and_then(|target| {
+                    settings_select_layout(
+                        content_layout.items,
+                        Some(target),
+                        content_layout.field_layout,
+                        content_layout.content_width,
+                        content_layout.buffer_height,
+                    )
+                });
+            let clicked_select = settings_select_layout_at_position(
+                content_layout.items,
+                local_position,
+                content_layout.field_layout,
+                content_layout.content_width,
+                content_layout.buffer_height,
+            );
+            (active_select, clicked_select, local_position)
+        },
     );
     let box_hit = active_select.is_some_and(|select| select.box_contains(local_position));
     let dropdown_hit = active_select.is_some_and(|select| select.dropdown_contains(local_position));
     let option_hit = active_select.and_then(|select| select.layout.option_at(local_position));
     let clicked_select_target = clicked_select.map(|select| select.target);
-    drop(items);
-
     match mouse.kind {
         MouseEventKind::ScrollDown if dropdown_hit => {
             app.settings_popup.scroll_active_select_down();

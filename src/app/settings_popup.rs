@@ -10,6 +10,9 @@ use tui_scrollview::ScrollViewState;
 
 use super::settings_draft::SettingsDraft;
 
+mod recording;
+pub(crate) use recording::{PrefilterPatternEditState, RecordingWidget};
+
 pub(crate) const PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -608,6 +611,14 @@ enum EditMode {
         from_cursor: usize,
         to_cursor: usize,
     },
+    PrefilterTable {
+        selected_pattern: usize,
+    },
+    PrefilterEditor {
+        index: usize,
+        value: String,
+        cursor: usize,
+    },
     Field {
         kind: FieldEditKind,
         value: String,
@@ -657,6 +668,7 @@ pub struct SettingsPopup {
     mode: EditMode,
     field_hint: Option<FieldEditHint>,
     scroll_request: Option<SettingsScrollRequest>,
+    prefilter_table: SettingsTableState,
     remote_rule_table: SettingsTableState,
     local_rule_table: SettingsTableState,
 }
@@ -674,6 +686,7 @@ impl SettingsPopup {
             mode: EditMode::Browse,
             field_hint: None,
             scroll_request: None,
+            prefilter_table: SettingsTableState::default(),
             remote_rule_table: SettingsTableState::default(),
             local_rule_table: SettingsTableState::default(),
         }
@@ -689,7 +702,7 @@ impl SettingsPopup {
         self.mode = EditMode::Browse;
         self.field_hint = None;
         self.scroll_request = None;
-        self.reset_rule_table_scrolls();
+        self.reset_table_scrolls();
     }
 
     pub fn close(&mut self) {
@@ -698,7 +711,7 @@ impl SettingsPopup {
         self.mode = EditMode::Browse;
         self.field_hint = None;
         self.scroll_request = None;
-        self.reset_rule_table_scrolls();
+        self.reset_table_scrolls();
     }
 
     pub fn draft(&self) -> &AppSettings {
@@ -761,6 +774,8 @@ impl SettingsPopup {
         match self.mode {
             EditMode::UnsavedConfirm => &[],
             EditMode::Field { .. } => SETTINGS_FIELD_EDIT_KEY_HINTS,
+            EditMode::PrefilterEditor { .. } => SETTINGS_FIELD_EDIT_KEY_HINTS,
+            EditMode::PrefilterTable { .. } => self.prefilter_table_key_hints(),
             EditMode::Select { .. } => SETTINGS_SELECT_KEY_HINTS,
             EditMode::RuleTable { table, .. } | EditMode::RuleEditor { table, .. } => {
                 self.rule_table_key_hints(table)
@@ -776,9 +791,14 @@ impl SettingsPopup {
 
         match self.topic {
             SettingsTopic::Server | SettingsTopic::Certificate => SETTINGS_FIELD_BROWSE_KEY_HINTS,
-            SettingsTopic::Recording | SettingsTopic::Interface => {
-                SETTINGS_CHECKBOX_BROWSE_KEY_HINTS
-            }
+            SettingsTopic::Recording => match self.selected_recording_widget() {
+                Some(
+                    RecordingWidget::StartRecordingOnLaunch | RecordingWidget::PrefilterEnabled,
+                ) => SETTINGS_CHECKBOX_BROWSE_KEY_HINTS,
+                Some(RecordingWidget::IncludeUrlPatterns) => SETTINGS_RULE_TABLE_BROWSE_KEY_HINTS,
+                None => SETTINGS_BROWSE_KEY_HINTS,
+            },
+            SettingsTopic::Interface => SETTINGS_CHECKBOX_BROWSE_KEY_HINTS,
             SettingsTopic::Proxy => match self.selected_proxy_widget() {
                 Some(ProxyWidget::Preset) => SETTINGS_SELECT_BROWSE_KEY_HINTS,
                 Some(ProxyWidget::PresetName) => SETTINGS_FIELD_BROWSE_KEY_HINTS,
@@ -807,6 +827,8 @@ impl SettingsPopup {
         match self.mode {
             EditMode::UnsavedConfirm => self.handle_unsaved_confirm_key(key),
             EditMode::Field { .. } => self.handle_field_key(key),
+            EditMode::PrefilterTable { .. } => self.handle_prefilter_table_key(key),
+            EditMode::PrefilterEditor { .. } => self.handle_prefilter_editor_key(key),
             EditMode::Select { .. } => self.handle_select_key(key),
             EditMode::RuleTable { .. } => self.handle_rule_table_key(key),
             EditMode::RuleEditor { .. } => self.handle_rule_editor_key(key),
@@ -832,7 +854,9 @@ impl SettingsPopup {
                 SettingsPopupAction::None
             }
             KeyCode::Char('a') if self.focus == SettingsPaneFocus::Content => {
-                self.add_rule_from_key();
+                if !self.add_prefilter_pattern_from_browse() {
+                    self.add_rule_from_key();
+                }
                 SettingsPopupAction::None
             }
             KeyCode::Char('d') if self.focus == SettingsPaneFocus::Content => {
@@ -1078,7 +1102,7 @@ impl SettingsPopup {
         self.selected_row = 0;
         self.scroll = ScrollViewState::default();
         self.scroll_request = None;
-        self.reset_rule_table_scrolls();
+        self.reset_table_scrolls();
         self.mode = EditMode::Browse;
         self.draft.clear_error();
         self.field_hint = None;
@@ -1181,6 +1205,7 @@ impl SettingsPopup {
                     self.draft.certificate.pem_filename.clone(),
                 );
             }
+            (SettingsTopic::Recording, _) => self.start_recording_selected_edit(),
             (SettingsTopic::Proxy, _) => match self.selected_proxy_widget() {
                 Some(ProxyWidget::Preset) => self.start_proxy_preset_select(),
                 Some(ProxyWidget::PresetName) => {
@@ -1508,7 +1533,7 @@ impl SettingsPopup {
             proxy.active_preset = Some(name);
             self.draft.clear_error();
             self.field_hint = None;
-            self.reset_rule_table_scrolls();
+            self.reset_table_scrolls();
             self.clamp_selected_row();
         }
     }
@@ -1665,10 +1690,7 @@ impl SettingsPopup {
     fn toggle_selected_checkbox(&mut self) {
         self.clamp_selected_row();
         match (self.topic, self.selected_row) {
-            (SettingsTopic::Recording, 0) => {
-                self.draft.recording.start_record_on_launch =
-                    !self.draft.recording.start_record_on_launch;
-            }
+            (SettingsTopic::Recording, _) => self.toggle_selected_recording_checkbox(),
             (SettingsTopic::Interface, 0) => {
                 self.draft.ui.request_list.auto_expand = !self.draft.ui.request_list.auto_expand;
             }
@@ -1882,7 +1904,8 @@ impl SettingsPopup {
         self.rule_table_state_mut(table).clamp(row_count);
     }
 
-    fn reset_rule_table_scrolls(&mut self) {
+    fn reset_table_scrolls(&mut self) {
+        self.prefilter_table.reset();
         self.remote_rule_table.reset();
         self.local_rule_table.reset();
     }
@@ -2009,7 +2032,7 @@ impl SettingsPopup {
         match self.topic {
             SettingsTopic::Server => 1,
             SettingsTopic::Certificate => 2,
-            SettingsTopic::Recording => 1,
+            SettingsTopic::Recording => RecordingWidget::all().len(),
             SettingsTopic::Interface => 1,
             SettingsTopic::Proxy => self.visible_proxy_widgets().len(),
         }

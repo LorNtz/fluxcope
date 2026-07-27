@@ -40,6 +40,7 @@ unicode-width = "0.2"
 edtui = { version = "=0.9.9", default-features = false, features = ["arboard", "mouse-support"] }
 tui-scrollview = "=0.5.1"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
+globset = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"

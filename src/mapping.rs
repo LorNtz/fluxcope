@@ -1,35 +1,7 @@
 use crate::settings::{ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings, ProxySettings};
 use http::Uri;
-use parking_lot::RwLock;
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, env, path::PathBuf};
 use url::Url;
-
-#[derive(Clone)]
-pub struct MappingStore {
-    current: Arc<RwLock<Arc<MappingEngine>>>,
-}
-
-impl MappingStore {
-    pub fn new(engine: MappingEngine) -> Self {
-        Self {
-            current: Arc::new(RwLock::new(Arc::new(engine))),
-        }
-    }
-
-    pub fn current(&self) -> Arc<MappingEngine> {
-        Arc::clone(&self.current.read())
-    }
-
-    pub fn replace(&self, engine: MappingEngine) {
-        *self.current.write() = Arc::new(engine);
-    }
-}
-
-impl Default for MappingStore {
-    fn default() -> Self {
-        Self::new(MappingEngine::default())
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct MappingEngine {
@@ -93,8 +65,13 @@ impl MappingEngine {
         }
     }
 
+    #[cfg(test)]
     pub fn diagnostics(&self) -> &[MappingDiagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn take_diagnostics(&mut self) -> Vec<MappingDiagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 }
 
@@ -856,35 +833,5 @@ mod tests {
             decision(&engine, "https://a.com/api?q=1")
         );
         assert_eq!(engine.diagnostics().len(), 1);
-    }
-
-    #[test]
-    fn mapping_store_replaces_engine_for_future_requests() {
-        let store = MappingStore::default();
-        let uri = "https://a.com/api".parse().expect("test URI should parse");
-        assert_eq!(
-            MappingDecision::default(),
-            store.current().map_request(&uri)
-        );
-
-        let proxy = proxy_with_preset(ProxyPresetSettings {
-            name: "dev".to_string(),
-            map_remote: ProxyMapRemoteSettings {
-                enable: true,
-                rules: vec![remote_rule("https://a.com", "http://b.test.com")],
-            },
-            map_local: ProxyMapLocalSettings::default(),
-        });
-
-        store.replace(MappingEngine::compile(Some(&proxy)));
-
-        assert_eq!(
-            store
-                .current()
-                .map_request(&uri)
-                .mapped_uri
-                .map(|uri| uri.to_string()),
-            Some("http://b.test.com/api".to_string())
-        );
     }
 }

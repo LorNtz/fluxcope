@@ -7,6 +7,7 @@ mod logging;
 mod mapping;
 mod proxy_handler;
 mod recording;
+mod request_policy;
 mod runtime;
 mod select;
 mod select_widget;

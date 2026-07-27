@@ -68,12 +68,93 @@ impl Default for CertificateSettings {
 #[serde(default)]
 pub struct RecordingSettings {
     pub start_record_on_launch: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "RecordingPrefilterSettings::is_default"
+    )]
+    pub prefilter: RecordingPrefilterSettings,
 }
 
 impl Default for RecordingSettings {
     fn default() -> Self {
         Self {
             start_record_on_launch: true,
+            prefilter: RecordingPrefilterSettings::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct RecordingPrefilterSettings {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_url_patterns: Vec<RecordingPrefilterPatternSettings>,
+}
+
+impl RecordingPrefilterSettings {
+    fn is_default(settings: &Self) -> bool {
+        settings == &Self::default()
+    }
+
+    fn disabled() -> Self {
+        Self {
+            enable: false,
+            include_url_patterns: Vec::new(),
+        }
+    }
+}
+
+impl Default for RecordingPrefilterSettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            include_url_patterns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RecordingPrefilterPatternSettings {
+    pub pattern: String,
+    pub enable: bool,
+}
+
+impl RecordingPrefilterPatternSettings {
+    pub(crate) fn new(pattern: impl Into<String>) -> Self {
+        Self {
+            pattern: pattern.into(),
+            enable: true,
+        }
+    }
+}
+
+impl Default for RecordingPrefilterPatternSettings {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordingPrefilterPatternSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum PatternRepresentation {
+            Legacy(String),
+            Detailed {
+                pattern: String,
+                #[serde(default = "default_true")]
+                enable: bool,
+            },
+        }
+
+        match PatternRepresentation::deserialize(deserializer)? {
+            PatternRepresentation::Legacy(pattern) => Ok(Self::new(pattern)),
+            PatternRepresentation::Detailed { pattern, enable } => Ok(Self { pattern, enable }),
         }
     }
 }
@@ -211,6 +292,12 @@ impl Default for ProxyMapLocalRule {
 pub struct SettingsManager {
     path: PathBuf,
     settings: AppSettings,
+    load_diagnostics: Vec<SettingsLoadDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsLoadDiagnostic {
+    pub message: String,
 }
 
 impl SettingsManager {
@@ -225,19 +312,26 @@ impl SettingsManager {
             let manager = Self {
                 path,
                 settings: AppSettings::default(),
+                load_diagnostics: Vec::new(),
             };
             manager.save()?;
             return Ok(manager);
         }
 
         let content = fs::read_to_string(&path)?;
-        let settings = if content.trim().is_empty() {
-            AppSettings::default()
+        let (settings, load_diagnostics) = if content.trim().is_empty() {
+            (AppSettings::default(), Vec::new())
         } else {
-            serde_yaml::from_str(&content).map_err(yaml_error)?
+            deserialize_settings_tolerantly(&content)?
         };
-        let manager = Self { path, settings };
-        manager.save()?;
+        let manager = Self {
+            path,
+            settings,
+            load_diagnostics,
+        };
+        if manager.load_diagnostics.is_empty() {
+            manager.save()?;
+        }
 
         Ok(manager)
     }
@@ -271,6 +365,11 @@ impl SettingsManager {
         &self.settings
     }
 
+    pub(crate) fn take_load_diagnostics(&mut self) -> Vec<SettingsLoadDiagnostic> {
+        std::mem::take(&mut self.load_diagnostics)
+    }
+
+    #[cfg(test)]
     pub fn proxy_settings(&self) -> Option<&ProxySettings> {
         self.settings.proxy.as_ref()
     }
@@ -301,7 +400,8 @@ impl SettingsManager {
         }
 
         let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
-        if let Some(previous) = read_yaml_value(&self.path)? {
+        if let Some(mut previous) = read_yaml_value(&self.path)? {
+            let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
             preserve_semantic_noop_entries(&mut value, &previous, settings)?;
         }
 
@@ -341,6 +441,76 @@ fn yaml_error(error: serde_yaml::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+fn deserialize_settings_tolerantly(
+    content: &str,
+) -> io::Result<(AppSettings, Vec<SettingsLoadDiagnostic>)> {
+    let mut sanitized: serde_yaml::Value = serde_yaml::from_str(content).map_err(yaml_error)?;
+    let mut diagnostics = remove_malformed_prefilter_pattern_entries(&mut sanitized);
+    match serde_yaml::from_value(sanitized.clone()) {
+        Ok(settings) => Ok((settings, diagnostics)),
+        Err(original_error) => {
+            let Some(error) = replace_malformed_prefilter(&mut sanitized)? else {
+                return Err(yaml_error(original_error));
+            };
+            let settings = serde_yaml::from_value(sanitized).map_err(yaml_error)?;
+            diagnostics.push(SettingsLoadDiagnostic {
+                message: format!("recording.prefilter is malformed and has been disabled: {error}"),
+            });
+            Ok((settings, diagnostics))
+        }
+    }
+}
+
+fn remove_malformed_prefilter_pattern_entries(
+    value: &mut serde_yaml::Value,
+) -> Vec<SettingsLoadDiagnostic> {
+    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+    let Some(patterns) = value
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(key("recording")))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(|recording| recording.get_mut(key("prefilter")))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(|prefilter| prefilter.get_mut(key("include_url_patterns")))
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return Vec::new();
+    };
+
+    let mut diagnostics = Vec::new();
+    let mut valid_patterns = Vec::with_capacity(patterns.len());
+    for (index, value) in std::mem::take(patterns).into_iter().enumerate() {
+        match serde_yaml::from_value::<RecordingPrefilterPatternSettings>(value.clone()) {
+            Ok(_) => valid_patterns.push(value),
+            Err(error) => diagnostics.push(SettingsLoadDiagnostic {
+                message: format!(
+                    "recording.prefilter.include_url_patterns[{index}] ignored malformed pattern entry: {error}"
+                ),
+            }),
+        }
+    }
+    *patterns = valid_patterns;
+    diagnostics
+}
+
+fn replace_malformed_prefilter(value: &mut serde_yaml::Value) -> io::Result<Option<String>> {
+    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+    let Some(prefilter) = value
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(key("recording")))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(|recording| recording.get_mut(key("prefilter")))
+    else {
+        return Ok(None);
+    };
+    let Err(error) = serde_yaml::from_value::<RecordingPrefilterSettings>(prefilter.clone()) else {
+        return Ok(None);
+    };
+    *prefilter =
+        serde_yaml::to_value(RecordingPrefilterSettings::disabled()).map_err(yaml_error)?;
+    Ok(Some(error.to_string()))
+}
+
 fn default_true() -> bool {
     true
 }
@@ -371,14 +541,13 @@ fn preserve_semantic_noop_entries(
     let inserted_all = missing
         .iter()
         .all(|entry| insert_config_entry(&mut batch, &entry.path, entry.value.clone()));
-    if inserted_all {
-        let batch_settings: AppSettings =
-            serde_yaml::from_value(batch.clone()).map_err(yaml_error)?;
-        if batch_settings == *settings {
-            *value = batch;
-            reorder_mappings_like_previous(value, previous);
-            return Ok(());
-        }
+    if inserted_all
+        && let Ok(batch_settings) = serde_yaml::from_value::<AppSettings>(batch.clone())
+        && batch_settings == *settings
+    {
+        *value = batch;
+        reorder_mappings_like_previous(value, previous);
+        return Ok(());
     }
 
     for entry in missing {
@@ -387,8 +556,10 @@ fn preserve_semantic_noop_entries(
             continue;
         }
 
-        let candidate_settings: AppSettings =
-            serde_yaml::from_value(candidate.clone()).map_err(yaml_error)?;
+        let Ok(candidate_settings) = serde_yaml::from_value::<AppSettings>(candidate.clone())
+        else {
+            continue;
+        };
         if candidate_settings == *settings {
             *value = candidate;
         }
@@ -620,9 +791,13 @@ mod tests {
         );
         assert!(manager.recording_settings().start_record_on_launch);
         assert!(saved.recording.start_record_on_launch);
+        assert!(saved.recording.prefilter.enable);
+        assert!(saved.recording.prefilter.include_url_patterns.is_empty());
         assert!(!saved.ui.request_list.auto_expand);
         assert!(saved.proxy.is_none());
-        assert!(!fs::read_to_string(&path)?.contains("proxy:"));
+        let content = fs::read_to_string(&path)?;
+        assert!(!content.contains("proxy:"));
+        assert!(!content.contains("prefilter:"));
 
         let _ = fs::remove_file(path);
         Ok(())
@@ -722,6 +897,191 @@ mod tests {
             serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
         assert!(!saved.recording.start_record_on_launch);
 
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_prefilter_patterns_and_preserves_flags_and_order() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            r#"
+recording:
+  prefilter:
+    enable: false
+    include_url_patterns:
+      - "https://api.example.com/*"
+      - pattern: "*://cdn.example.com/assets/*"
+        enable: false
+      - pattern: "https://static.example.com/*"
+"#,
+        )?;
+
+        let manager = SettingsManager::load_from_path(&path)?;
+
+        assert!(!manager.recording_settings().prefilter.enable);
+        assert_eq!(
+            manager.recording_settings().prefilter.include_url_patterns,
+            vec![
+                RecordingPrefilterPatternSettings::new("https://api.example.com/*"),
+                RecordingPrefilterPatternSettings {
+                    pattern: "*://cdn.example.com/assets/*".to_string(),
+                    enable: false,
+                },
+                RecordingPrefilterPatternSettings::new("https://static.example.com/*"),
+            ]
+        );
+        let saved = fs::read_to_string(&path)?;
+        let first = saved
+            .find("https://api.example.com/*")
+            .expect("first pattern should be serialized");
+        let second = saved
+            .find("*://cdn.example.com/assets/*")
+            .expect("second pattern should be serialized");
+        let third = saved
+            .find("https://static.example.com/*")
+            .expect("third pattern should be serialized");
+        assert!(first < second && second < third);
+        assert_eq!(saved.matches("pattern:").count(), 3);
+        assert_eq!(saved.matches("enable: true").count(), 2);
+        assert_eq!(saved.matches("enable: false").count(), 2);
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_malformed_prefilter_pattern_entries_and_reports_their_indexes() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = r#"recording:
+  prefilter:
+    include_url_patterns:
+      - enable: true
+      - pattern: "https://api.example.com/*"
+        enable: false
+      - 42
+      - "https://legacy.example.com/*"
+"#;
+        fs::write(&path, content)?;
+
+        let mut manager = SettingsManager::load_from_path(&path)?;
+
+        assert_eq!(
+            manager.recording_settings().prefilter.include_url_patterns,
+            vec![
+                RecordingPrefilterPatternSettings {
+                    pattern: "https://api.example.com/*".to_string(),
+                    enable: false,
+                },
+                RecordingPrefilterPatternSettings::new("https://legacy.example.com/*"),
+            ]
+        );
+        let diagnostics = manager.take_load_diagnostics();
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].message.contains("[0]"));
+        assert!(diagnostics[1].message.contains("[2]"));
+        assert_eq!(fs::read_to_string(&path)?, content);
+
+        manager.update(|settings| settings.server.port = 9018)?;
+        let repaired = yaml_from_path(&path)?;
+        let recording =
+            mapping_entry(&repaired, "recording").expect("recording settings should be serialized");
+        let prefilter =
+            mapping_entry(recording, "prefilter").expect("prefilter should be serialized");
+        let patterns = sequence_entry(prefilter, "include_url_patterns")
+            .expect("prefilter patterns should be serialized");
+        assert_eq!(patterns.len(), 2);
+        assert!(
+            patterns
+                .iter()
+                .all(|pattern| mapping_keys(pattern) == vec!["pattern", "enable"])
+        );
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_explicit_default_prefilter_fields() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            "recording:\n  prefilter:\n    enable: true\n    include_url_patterns: []\n",
+        )?;
+
+        SettingsManager::load_from_path(&path)?;
+
+        let saved = fs::read_to_string(&path)?;
+        assert!(saved.contains("prefilter:"));
+        assert!(saved.contains("enable: true"));
+        assert!(saved.contains("include_url_patterns: []"));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_prefilter_is_disabled_without_rewriting_file() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = "server:\n  port: 9017\nrecording:\n  prefilter: invalid\n";
+        fs::write(&path, content)?;
+
+        let mut manager = SettingsManager::load_from_path(&path)?;
+
+        assert_eq!(manager.server_port(), 9017);
+        assert!(!manager.recording_settings().prefilter.enable);
+        assert!(
+            manager
+                .recording_settings()
+                .prefilter
+                .include_url_patterns
+                .is_empty()
+        );
+        let diagnostics = manager.take_load_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("has been disabled"));
+        assert_eq!(fs::read_to_string(&path)?, content);
+
+        manager.update(|settings| settings.server.port = 9018)?;
+        let repaired = fs::read_to_string(&path)?;
+        assert!(repaired.contains("port: 9018"));
+        assert!(repaired.contains("prefilter:"));
+        assert!(repaired.contains("enable: false"));
+        assert!(!repaired.contains("prefilter: invalid"));
+
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_unrelated_setting_still_fails_when_prefilter_is_malformed() -> io::Result<()> {
+        let path = temp_config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &path,
+            "server:\n  port: invalid\nrecording:\n  prefilter: invalid\n",
+        )?;
+
+        let error = SettingsManager::load_from_path(&path)
+            .err()
+            .expect("invalid server setting should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let _ = fs::remove_file(path);
         Ok(())
     }

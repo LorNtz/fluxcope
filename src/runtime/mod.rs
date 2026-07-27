@@ -27,9 +27,11 @@ use crate::{
         start_decode_service,
     },
     logging::AppLogger,
-    mapping::{MappingEngine, MappingStore},
     proxy_handler::LogHandler,
     recording::RecordingState,
+    request_policy::{
+        RequestPolicy, RequestPolicyDiagnostic, RequestPolicyDiagnosticSeverity, RequestPolicyStore,
+    },
     settings::{AppSettings, SettingsManager},
 };
 use event_loop::{AppRuntime, Tui};
@@ -41,7 +43,7 @@ fn proxy_bind_addr(port: u16) -> SocketAddr {
 }
 
 pub async fn run() -> Result<()> {
-    let settings = SettingsManager::load().context("failed to load Wirelens settings")?;
+    let mut settings = SettingsManager::load().context("failed to load Wirelens settings")?;
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
     let shutdown = CancellationToken::new();
@@ -54,16 +56,17 @@ pub async fn run() -> Result<()> {
     .map_err(|error| anyhow!("failed to install application logger: {error}"))?;
     log::info!("Application started");
     log::info!("Loaded settings from {}", settings.path().display());
+    for diagnostic in settings.take_load_diagnostics() {
+        log::error!("{}", diagnostic.message);
+    }
 
     let proxy_port = settings.server_port();
     let proxy_addr = proxy_bind_addr(proxy_port);
     verify_proxy_port_available(proxy_addr)?;
 
-    let mapping_engine = MappingEngine::compile(settings.proxy_settings());
-    for diagnostic in mapping_engine.diagnostics() {
-        log::warn!("{}", diagnostic.message);
-    }
-    let mapping_store = MappingStore::new(mapping_engine);
+    let compiled_policy = RequestPolicy::compile(settings.settings());
+    log_request_policy_diagnostics(&compiled_policy.diagnostics);
+    let request_policy_store = RequestPolicyStore::new(compiled_policy.policy);
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
     let (capture_tx, capture_rx) =
         mpsc::channel::<std::sync::Arc<CaptureRecord>>(policy.capture.queue_capacity);
@@ -108,7 +111,7 @@ pub async fn run() -> Result<()> {
         ca,
         capture_publisher,
         body_tasks.clone(),
-        mapping_store.clone(),
+        request_policy_store.clone(),
         recording.clone(),
         shutdown.child_token(),
     )?;
@@ -152,7 +155,7 @@ pub async fn run() -> Result<()> {
         decode.metrics,
         tui,
         settings,
-        mapping_store,
+        request_policy_store,
         policy.render,
         services,
         shutdown,
@@ -174,7 +177,7 @@ fn start_proxy(
     ca: ca::CaData,
     capture_publisher: CapturePublisher,
     body_tasks: BodyTaskTracker,
-    mapping_store: MappingStore,
+    request_policy_store: RequestPolicyStore,
     recording: RecordingState,
     shutdown: CancellationToken,
 ) -> Result<JoinHandle<Result<()>>> {
@@ -192,7 +195,7 @@ fn start_proxy(
         .with_http_handler(LogHandler::new(
             capture_publisher,
             body_tasks,
-            mapping_store,
+            request_policy_store,
             recording,
         ))
         .build();
@@ -296,15 +299,26 @@ fn format_url_host(ip: IpAddr) -> String {
 
 fn save_settings_draft(
     settings: &mut SettingsManager,
-    mapping_store: &MappingStore,
+    request_policy_store: &RequestPolicyStore,
     draft: AppSettings,
 ) -> io::Result<AppSettings> {
+    let compiled_policy = RequestPolicy::compile(&draft);
     settings.update(|current| {
         *current = draft.clone();
     })?;
     let saved = settings.settings().clone();
-    mapping_store.replace(MappingEngine::compile(saved.proxy.as_ref()));
+    request_policy_store.replace(compiled_policy.policy);
+    log_request_policy_diagnostics(&compiled_policy.diagnostics);
     Ok(saved)
+}
+
+fn log_request_policy_diagnostics(diagnostics: &[RequestPolicyDiagnostic]) {
+    for diagnostic in diagnostics {
+        match diagnostic.severity {
+            RequestPolicyDiagnosticSeverity::Warning => log::warn!("{}", diagnostic.message),
+            RequestPolicyDiagnosticSeverity::Error => log::error!("{}", diagnostic.message),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,7 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn save_settings_draft_persists_and_replaces_mapping_engine() -> io::Result<()> {
+    fn save_settings_draft_persists_and_replaces_request_policy() -> io::Result<()> {
+        use crate::settings::{
+            ProxyMapRemoteRule, ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
+            RecordingPrefilterPatternSettings,
+        };
+
         static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
         let unique = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -335,14 +354,50 @@ mod tests {
             fs::create_dir_all(parent)?;
         }
         let mut manager = SettingsManager::load_from_path(&path)?;
-        let store = MappingStore::default();
+        let store = RequestPolicyStore::default();
         let mut draft = AppSettings::default();
         draft.server.port = 9013;
+        draft.recording.prefilter.include_url_patterns =
+            vec![RecordingPrefilterPatternSettings::new(
+                "http://mapped.example.com:80/*",
+            )];
+        draft.proxy = Some(ProxySettings {
+            enable: true,
+            active_preset: Some("test".to_string()),
+            presets: vec![ProxyPresetSettings {
+                name: "test".to_string(),
+                map_remote: ProxyMapRemoteSettings {
+                    enable: true,
+                    rules: vec![ProxyMapRemoteRule {
+                        from: "https://api.example.com".to_string(),
+                        to: "http://mapped.example.com".to_string(),
+                        enable: true,
+                    }],
+                },
+                ..ProxyPresetSettings::default()
+            }],
+        });
 
         let saved = save_settings_draft(&mut manager, &store, draft)?;
 
         assert_eq!(9013, saved.server.port);
         assert!(fs::read_to_string(&path)?.contains("9013"));
+        let original_uri = "https://api.example.com/orders?x=1"
+            .parse()
+            .expect("test URI should parse");
+        let (mapping, urls) = store.current().evaluate(&original_uri, true).into_parts();
+        assert_eq!(
+            mapping.mapped_uri.map(|uri| uri.to_string()),
+            Some("http://mapped.example.com/orders?x=1".to_string())
+        );
+        let recording = urls
+            .recording()
+            .expect("recording evaluation should be available");
+        assert_eq!(
+            recording.effective_url,
+            "http://mapped.example.com/orders?x=1"
+        );
+        assert!(recording.included);
 
         let _ = fs::remove_file(path);
         Ok(())

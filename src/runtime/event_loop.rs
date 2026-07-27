@@ -22,7 +22,7 @@ use crate::{
         DecodeMetricsSnapshot, DecodeResult,
     },
     logging::{LogRecord, LoggingMetrics, LoggingMetricsSnapshot, LoggingStatus},
-    mapping::MappingStore,
+    request_policy::RequestPolicyStore,
     settings::SettingsManager,
     ui::RootView,
 };
@@ -44,7 +44,7 @@ pub(super) struct AppRuntime {
     last_decode_metrics: DecodeMetricsSnapshot,
     tui: Tui,
     settings: SettingsManager,
-    mapping_store: MappingStore,
+    request_policy_store: RequestPolicyStore,
     policy: RenderPolicy,
     services: ServiceSupervisor,
     shutdown: CancellationToken,
@@ -64,7 +64,7 @@ impl AppRuntime {
         decode_metrics: Arc<DecodeMetrics>,
         tui: Tui,
         settings: SettingsManager,
-        mapping_store: MappingStore,
+        request_policy_store: RequestPolicyStore,
         policy: RenderPolicy,
         services: ServiceSupervisor,
         shutdown: CancellationToken,
@@ -86,7 +86,7 @@ impl AppRuntime {
             last_decode_metrics: DecodeMetricsSnapshot::default(),
             tui,
             settings,
-            mapping_store,
+            request_policy_store,
             policy,
             services,
             shutdown,
@@ -287,7 +287,7 @@ impl AppRuntime {
             return false;
         };
 
-        match save_settings_draft(&mut self.settings, &self.mapping_store, draft) {
+        match save_settings_draft(&mut self.settings, &self.request_policy_store, draft) {
             Ok(saved) => {
                 self.app.finish_settings_save(saved);
                 log::info!("Settings saved");
