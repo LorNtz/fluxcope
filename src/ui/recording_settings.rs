@@ -13,13 +13,14 @@ use tui_textarea::{CursorMove, TextArea};
 use crate::app::{PrefilterPatternEditState, SettingsPopup};
 use crate::settings::RecordingPrefilterPatternSettings;
 
-use super::{SettingsTableViewport, fit_input_value, settings_table_height};
+use super::{RuleParentState, SettingsTableViewport, fit_input_value, settings_table_height};
 
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
 
 pub(super) struct PrefilterTableWidget<'a> {
     patterns: &'a [RecordingPrefilterPatternSettings],
+    parent_state: RuleParentState,
     selected: bool,
     active_pattern: Option<usize>,
     edit: Option<PrefilterPatternEditState<'a>>,
@@ -98,11 +99,13 @@ impl Widget for &PrefilterTableWidget<'_> {
         } else {
             inner.width
         };
+        let header_style = Style::default().fg(Color::DarkGray);
         render_prefilter_table_columns(
             "On",
             "Pattern",
             Rect::new(inner.x, inner.y, table_width, 1),
-            Style::default().fg(Color::DarkGray),
+            header_style,
+            header_style,
             buf,
         );
 
@@ -127,16 +130,19 @@ impl Widget for &PrefilterTableWidget<'_> {
                 break;
             }
             let row_area = Rect::new(inner.x, y, table_width, 1);
-            let style = if self.active_pattern == Some(index) {
+            let row_selected = self.active_pattern == Some(index);
+            let row_style = if row_selected {
                 Style::default().bg(Color::White).fg(Color::DarkGray)
             } else {
                 Style::default()
             };
+            let checkbox_style = self.parent_state.checkbox_style(row_style, row_selected);
             if let Some(edit) = self.edit.filter(|edit| edit.index == index) {
+                buf.set_style(row_area, row_style);
                 render_prefilter_checkbox(
                     pattern_mark(self.patterns[index].enable),
                     row_area,
-                    style,
+                    checkbox_style,
                     buf,
                 );
                 render_pattern_editor(edit, prefilter_pattern_area(row_area), buf);
@@ -146,7 +152,8 @@ impl Widget for &PrefilterTableWidget<'_> {
                 pattern_mark(self.patterns[index].enable),
                 &self.patterns[index].pattern,
                 row_area,
-                style,
+                row_style,
+                checkbox_style,
                 buf,
             );
         }
@@ -178,33 +185,33 @@ fn render_prefilter_table_columns(
     on: &str,
     pattern: &str,
     area: Rect,
-    style: Style,
+    row_style: Style,
+    checkbox_style: Style,
     buf: &mut Buffer,
 ) {
-    render_prefilter_checkbox(on, area, style, buf);
+    buf.set_style(area, row_style);
+    render_prefilter_checkbox(on, area, checkbox_style, buf);
     let pattern_area = prefilter_pattern_area(area);
     if pattern_area.is_empty() {
         return;
     }
     Paragraph::new(Line::styled(
         fit_input_value(pattern, usize::from(pattern_area.width)),
-        style,
+        row_style,
     ))
     .render(pattern_area, buf);
 }
 
 fn render_prefilter_checkbox(mark: &str, area: Rect, style: Style, buf: &mut Buffer) {
-    buf.set_style(area, style);
-    Paragraph::new(Line::styled(mark, style)).render(
-        Rect::new(
-            area.x,
-            area.y,
-            area.width
-                .min(u16::try_from(PREFILTER_ON_COLUMN_WIDTH).unwrap_or(u16::MAX)),
-            1,
-        ),
-        buf,
+    let checkbox_area = Rect::new(
+        area.x,
+        area.y,
+        area.width
+            .min(u16::try_from(PREFILTER_ON_COLUMN_WIDTH).unwrap_or(u16::MAX)),
+        1,
     );
+    buf.set_style(checkbox_area, style);
+    Paragraph::new(Line::styled(mark, style)).render(checkbox_area, buf);
 }
 
 fn prefilter_pattern_area(area: Rect) -> Rect {
@@ -242,6 +249,7 @@ pub(super) fn prefilter_table_widget(
 ) -> PrefilterTableWidget<'_> {
     PrefilterTableWidget {
         patterns: &popup.draft().recording.prefilter.include_url_patterns,
+        parent_state: RuleParentState::from_enabled(popup.draft().recording.prefilter.enable),
         selected: popup.prefilter_table_is_selected(),
         active_pattern: popup.active_prefilter_pattern(),
         edit: popup.prefilter_pattern_edit(),

@@ -488,6 +488,103 @@ mod tests {
     }
 
     #[test]
+    fn prefilter_checkbox_muting_tracks_prefilter_instead_of_launch_recording() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        let recording = &mut app.settings_popup.draft_mut_for_tests().recording;
+        recording.start_record_on_launch = false;
+        recording.prefilter.enable = true;
+        recording.prefilter.include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
+            "https://api.example.com/*",
+        )];
+
+        let (_ui, enabled_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let enabled_area = settings_content_test_area(enabled_buffer.area);
+        let enabled_pattern =
+            find_buffer_text(&enabled_buffer, enabled_area, "https://api.example.com/*")
+                .expect("prefilter pattern should render");
+        let enabled_checkbox =
+            table_checkbox_on_value_row(&enabled_buffer, enabled_area, enabled_pattern);
+
+        assert_eq!(enabled_buffer[enabled_checkbox].fg, Color::Reset);
+        assert_eq!(enabled_buffer[enabled_pattern].fg, Color::Reset);
+
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .enable = false;
+        let (_ui, disabled_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let disabled_area = settings_content_test_area(disabled_buffer.area);
+        let disabled_pattern =
+            find_buffer_text(&disabled_buffer, disabled_area, "https://api.example.com/*")
+                .expect("prefilter pattern should render");
+        let disabled_checkbox =
+            table_checkbox_on_value_row(&disabled_buffer, disabled_area, disabled_pattern);
+
+        assert_eq!(disabled_buffer[disabled_checkbox].fg, Color::DarkGray);
+        assert_eq!(disabled_buffer[disabled_pattern].fg, Color::Reset);
+    }
+
+    #[test]
+    fn selected_and_edited_suppressed_prefilter_checkbox_stays_distinct() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Recording);
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .enable = false;
+        let mut pattern = RecordingPrefilterPatternSettings::new("https://api.example.com/*");
+        pattern.enable = false;
+        app.settings_popup
+            .draft_mut_for_tests()
+            .recording
+            .prefilter
+            .include_url_patterns = vec![pattern];
+        app.settings_popup.select_prefilter_pattern(0);
+
+        let (_ui, selected_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let selected_area = settings_content_test_area(selected_buffer.area);
+        let selected_pattern =
+            find_buffer_text(&selected_buffer, selected_area, "https://api.example.com/*")
+                .expect("selected prefilter pattern should render");
+        let selected_checkbox =
+            table_checkbox_on_value_row(&selected_buffer, selected_area, selected_pattern);
+
+        assert_eq!(
+            buffer_row(
+                &selected_buffer,
+                selected_checkbox.y,
+                selected_checkbox.x,
+                3
+            ),
+            "[ ]"
+        );
+        assert_eq!(selected_buffer[selected_checkbox].fg, Color::Gray);
+        assert_eq!(selected_buffer[selected_checkbox].bg, Color::White);
+        assert_eq!(selected_buffer[selected_pattern].fg, Color::DarkGray);
+        assert_eq!(selected_buffer[selected_pattern].bg, Color::White);
+
+        app.handle_key_event(key(KeyCode::Enter));
+        assert!(app.settings_popup.prefilter_pattern_edit().is_some());
+        let (_ui, edited_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let edited_area = settings_content_test_area(edited_buffer.area);
+        let edited_pattern =
+            find_buffer_text(&edited_buffer, edited_area, "https://api.example.com/*")
+                .expect("edited prefilter pattern should render");
+        let edited_checkbox =
+            table_checkbox_on_value_row(&edited_buffer, edited_area, edited_pattern);
+
+        assert_eq!(edited_buffer[edited_checkbox].fg, Color::Gray);
+        assert_eq!(edited_buffer[edited_checkbox].bg, Color::White);
+    }
+
+    #[test]
     fn settings_popup_mouse_selects_prefilter_pattern_row() {
         let mut app = App::new(ui_settings(true));
         app.open_settings_popup();
@@ -1329,6 +1426,126 @@ mod tests {
     }
 
     #[test]
+    fn mapping_disabled_mutes_remote_and_local_rule_checkboxes_only() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        let mut proxy = proxy_settings_with_rule_counts(1, 1);
+        proxy.enable = false;
+        app.settings_popup.draft_mut_for_tests().proxy = Some(proxy);
+
+        let (_ui, remote_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let remote_area = settings_content_test_area(remote_buffer.area);
+        let remote_value = find_buffer_text(&remote_buffer, remote_area, "http://localhost:3000")
+            .expect("remote mapping rule should render");
+        let remote_checkbox =
+            table_checkbox_on_value_row(&remote_buffer, remote_area, remote_value);
+
+        assert_eq!(remote_buffer[remote_checkbox].fg, Color::DarkGray);
+        assert_eq!(remote_buffer[remote_value].fg, Color::Reset);
+
+        app.settings_popup
+            .select_proxy_row_for_tests(ProxyRow::LocalHeader);
+        focus_settings_content(&mut app);
+        let (_ui, local_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let local_area = settings_content_test_area(local_buffer.area);
+        let local_value = find_buffer_text(&local_buffer, local_area, "~/fixtures/app0.js")
+            .expect("local mapping rule should render");
+        let local_checkbox = table_checkbox_on_value_row(&local_buffer, local_area, local_value);
+
+        assert_eq!(local_buffer[local_checkbox].fg, Color::DarkGray);
+        assert_eq!(local_buffer[local_value].fg, Color::Reset);
+    }
+
+    #[test]
+    fn mapping_section_toggle_mutes_only_its_own_rule_checkboxes() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        let mut proxy = proxy_settings_with_rule_counts(1, 1);
+        proxy.presets[0].map_remote.enable = false;
+        app.settings_popup.draft_mut_for_tests().proxy = Some(proxy);
+
+        let (_ui, remote_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let remote_area = settings_content_test_area(remote_buffer.area);
+        let remote_value = find_buffer_text(&remote_buffer, remote_area, "http://localhost:3000")
+            .expect("remote mapping rule should render");
+        let remote_checkbox =
+            table_checkbox_on_value_row(&remote_buffer, remote_area, remote_value);
+
+        assert_eq!(remote_buffer[remote_checkbox].fg, Color::DarkGray);
+
+        app.settings_popup
+            .select_proxy_row_for_tests(ProxyRow::LocalHeader);
+        focus_settings_content(&mut app);
+        let (_ui, local_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let local_area = settings_content_test_area(local_buffer.area);
+        let local_value = find_buffer_text(&local_buffer, local_area, "~/fixtures/app0.js")
+            .expect("local mapping rule should render");
+        let local_checkbox = table_checkbox_on_value_row(&local_buffer, local_area, local_value);
+
+        assert_eq!(local_buffer[local_checkbox].fg, Color::Reset);
+    }
+
+    #[test]
+    fn local_mapping_section_toggle_mutes_only_local_rule_checkboxes() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        let mut proxy = proxy_settings_with_rule_counts(1, 1);
+        proxy.presets[0].map_local.enable = false;
+        app.settings_popup.draft_mut_for_tests().proxy = Some(proxy);
+
+        let (_ui, remote_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let remote_area = settings_content_test_area(remote_buffer.area);
+        let remote_value = find_buffer_text(&remote_buffer, remote_area, "http://localhost:3000")
+            .expect("remote mapping rule should render");
+        let remote_checkbox =
+            table_checkbox_on_value_row(&remote_buffer, remote_area, remote_value);
+
+        assert_eq!(remote_buffer[remote_checkbox].fg, Color::Reset);
+
+        app.settings_popup
+            .select_proxy_row_for_tests(ProxyRow::LocalHeader);
+        focus_settings_content(&mut app);
+        let (_ui, local_buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let local_area = settings_content_test_area(local_buffer.area);
+        let local_value = find_buffer_text(&local_buffer, local_area, "~/fixtures/app0.js")
+            .expect("local mapping rule should render");
+        let local_checkbox = table_checkbox_on_value_row(&local_buffer, local_area, local_value);
+
+        assert_eq!(local_buffer[local_checkbox].fg, Color::DarkGray);
+    }
+
+    #[test]
+    fn selected_suppressed_mapping_checkbox_stays_distinct() {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        let mut proxy = proxy_settings_with_rule_counts(1, 1);
+        proxy.enable = false;
+        app.settings_popup.draft_mut_for_tests().proxy = Some(proxy);
+        focus_settings_content(&mut app);
+        app.settings_popup
+            .select_proxy_row_for_tests(ProxyRow::RemoteRule(0));
+
+        let (_ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+        let content_area = settings_content_test_area(buffer.area);
+        let value = find_buffer_text(&buffer, content_area, "http://localhost:3000")
+            .expect("selected remote mapping rule should render");
+        let checkbox = table_checkbox_on_value_row(&buffer, content_area, value);
+
+        assert_eq!(buffer[checkbox].fg, Color::Gray);
+        assert_eq!(buffer[checkbox].bg, Color::White);
+        assert_eq!(buffer[value].fg, Color::DarkGray);
+        assert_eq!(buffer[value].bg, Color::White);
+    }
+
+    #[test]
     fn settings_popup_proxy_page_without_presets_renders_empty_state_only() {
         let mut app = App::new(ui_settings(true));
         app.open_settings_popup();
@@ -2070,6 +2287,17 @@ mod tests {
         }
 
         None
+    }
+
+    fn table_checkbox_on_value_row(buffer: &Buffer, area: Rect, value: Position) -> Position {
+        for x in area.x..value.x {
+            let mark = buffer_row(buffer, value.y, x, 3);
+            if mark == "[✓]" || mark == "[ ]" {
+                return Position::new(x, value.y);
+            }
+        }
+
+        panic!("table checkbox should render on the value row");
     }
 
     fn assert_centered_divider_with_padding(
@@ -4808,6 +5036,30 @@ impl SettingsTableViewport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleParentState {
+    Enabled,
+    Disabled,
+}
+
+impl RuleParentState {
+    fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn checkbox_style(self, row_style: Style, row_selected: bool) -> Style {
+        match (self, row_selected) {
+            (Self::Enabled, _) => row_style,
+            (Self::Disabled, true) => row_style.fg(Color::Gray),
+            (Self::Disabled, false) => row_style.fg(Color::DarkGray),
+        }
+    }
+}
+
 fn settings_table_height(row_count: usize, max_height: u16) -> u16 {
     let natural_height = 3u16.saturating_add(u16::try_from(row_count.max(1)).unwrap_or(u16::MAX));
     natural_height.min(max_height.max(SETTINGS_TABLE_MIN_HEIGHT))
@@ -4820,6 +5072,7 @@ fn settings_table_visible_rows(height: u16) -> usize {
 struct ProxyRuleTableWidget<'a> {
     table: ProxyRuleTable,
     rows: Option<ProxyRuleTableRows<'a>>,
+    parent_state: RuleParentState,
     selected: bool,
     active_rule: Option<usize>,
     scroll_offset: usize,
@@ -4922,7 +5175,8 @@ impl ProxyRuleTableWidget<'_> {
             if y >= inner.bottom() {
                 break;
             }
-            let style = if self.active_rule == Some(index) {
+            let row_selected = self.active_rule == Some(index);
+            let row_style = if row_selected {
                 Style::default().bg(Color::White).fg(Color::DarkGray)
             } else {
                 Style::default()
@@ -4930,9 +5184,14 @@ impl ProxyRuleTableWidget<'_> {
             let Some(row) = rows.row(index) else {
                 continue;
             };
-            let line = format_rule_table_row(&row, table_width);
-            Paragraph::new(Line::styled(line, style))
-                .render(Rect::new(inner.x, y, table_width, 1), buf);
+            let line = format_rule_table_row(
+                &row,
+                table_width,
+                row_style,
+                self.parent_state,
+                row_selected,
+            );
+            Paragraph::new(line).render(Rect::new(inner.x, y, table_width, 1), buf);
         }
 
         if overflowing {
@@ -4964,6 +5223,15 @@ fn proxy_rule_table_widget<'a>(
     preset: Option<&'a crate::settings::ProxyPresetSettings>,
     max_height: u16,
 ) -> ProxyRuleTableWidget<'a> {
+    let mapping_enabled = popup
+        .draft()
+        .proxy
+        .as_ref()
+        .is_some_and(|proxy| proxy.enable);
+    let section_enabled = preset.is_some_and(|preset| match table {
+        ProxyRuleTable::Remote => preset.map_remote.enable,
+        ProxyRuleTable::Local => preset.map_local.enable,
+    });
     let rows = preset.map(|preset| match table {
         ProxyRuleTable::Remote => ProxyRuleTableRows::Remote(&preset.map_remote.rules),
         ProxyRuleTable::Local => ProxyRuleTableRows::Local(&preset.map_local.rules),
@@ -4972,6 +5240,7 @@ fn proxy_rule_table_widget<'a>(
     ProxyRuleTableWidget {
         table,
         rows,
+        parent_state: RuleParentState::from_enabled(mapping_enabled && section_enabled),
         selected: popup.proxy_table_is_selected(table),
         active_rule: popup.active_proxy_table_rule(table),
         scroll_offset: popup.rule_table_scroll_offset(table),
@@ -4984,15 +5253,22 @@ fn format_rule_table_header(content_width: u16) -> String {
     format!("{:<4} {:<from_width$} {:<to_width$}", "On", "From", "To")
 }
 
-fn format_rule_table_row(row: &ProxyRuleTableRow<'_>, content_width: u16) -> String {
+fn format_rule_table_row(
+    row: &ProxyRuleTableRow<'_>,
+    content_width: u16,
+    row_style: Style,
+    parent_state: RuleParentState,
+    row_selected: bool,
+) -> Line<'static> {
     let (from_width, to_width) = rule_table_column_widths(content_width);
-    let mark = if row.enabled { "[✓]" } else { "[ ]" };
-    format!(
-        "{:<4} {} {}",
-        mark,
-        fit_input_value(row.from, from_width),
-        fit_input_value(row.to, to_width)
-    )
+    let mark = if row.enabled { "[✓] " } else { "[ ] " };
+    Line::from(vec![
+        Span::styled(mark, parent_state.checkbox_style(row_style, row_selected)),
+        Span::styled(" ", row_style),
+        Span::styled(fit_input_value(row.from, from_width), row_style),
+        Span::styled(" ", row_style),
+        Span::styled(fit_input_value(row.to, to_width), row_style),
+    ])
 }
 
 fn rule_table_column_widths(content_width: u16) -> (usize, usize) {
