@@ -2,9 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::settings::RecordingPrefilterPatternSettings;
 
-use super::{
-    EditMode, SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsTopic, edit_text_value,
-};
+use super::field_editor::edit_text_value;
+use super::{EditMode, SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsTopic};
 
 const PREFILTER_TABLE_KEY_HINTS: &[SettingsKeyHint] = &[
     SettingsKeyHint {

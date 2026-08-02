@@ -1345,7 +1345,7 @@ impl SettingsControlView for SettingsCheckboxControl {
 }
 
 fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsContentItem<'_>> {
-    let preset = active_preset(popup.draft());
+    let preset = popup.active_proxy_preset();
     let widgets = popup.visible_proxy_widgets();
     if widgets.is_empty() {
         return vec![SettingsContentItem::Line(Line::from(
@@ -1870,14 +1870,6 @@ fn rule_table_column_widths(content_width: u16) -> (usize, usize) {
     let width = (available / 2).max(1);
 
     (width, width)
-}
-
-fn active_preset(
-    settings: &crate::settings::AppSettings,
-) -> Option<&crate::settings::ProxyPresetSettings> {
-    let proxy = settings.proxy.as_ref()?;
-    let active = proxy.active_preset.as_deref()?;
-    proxy.presets.iter().find(|preset| preset.name == active)
 }
 
 fn render_rule_editor_popup(frame: &mut Frame, editor: RuleEditorState<'_>, parent: Rect) {

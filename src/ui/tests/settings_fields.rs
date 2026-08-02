@@ -514,7 +514,10 @@ fn settings_popup_rule_tables_cap_height_from_viewport_height() {
     let max_height = settings_table_max_height(content_area.height);
     find_buffer_text(&buffer, content_area, "Map Remote Rules")
         .expect("remote rule table should render");
-    let preset = active_preset(app.settings_popup.draft()).expect("active preset should exist");
+    let preset = app
+        .settings_popup
+        .active_proxy_preset()
+        .expect("active preset should exist");
     let table = proxy_rule_table_widget(
         &app.settings_popup,
         ProxyRuleTable::Remote,
