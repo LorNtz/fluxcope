@@ -17,8 +17,6 @@ use edtui::{
 use ratatui::layout::{Position, Rect};
 
 use super::{App, panels::MainDisplayTab};
-#[cfg(test)]
-use crate::capture::CapturedExchange;
 use crate::capture::{
     BodySide, BodyStreamState, CaptureRecord, CaptureSequence, DecodeDisplayMode, DecodeKey,
     DecodeResult,
@@ -997,21 +995,10 @@ fn binary_body_summary(bytes: &[u8], observed_bytes: u64) -> String {
     )
 }
 
-pub(crate) fn format_request_body(body: Option<&str>, headers: &[(String, String)]) -> String {
+fn format_request_body(body: Option<&str>, headers: &[(String, String)]) -> String {
     match body {
         Some("") => "(Empty body)".to_string(),
         Some(body) if is_form_data(headers) => format_form_body(body),
-        Some(body) => format_json_body(body),
-        None => "(No body)".to_string(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn format_response_body(req: &CapturedExchange) -> String {
-    match req.res_body.as_deref() {
-        Some(body) if req.local_path.is_some() => body.to_string(),
-        None if req.local_path.is_some() => String::new(),
-        Some("") => "(Empty body)".to_string(),
         Some(body) => format_json_body(body),
         None => "(No body)".to_string(),
     }
@@ -1264,4 +1251,84 @@ fn plain_char(key: KeyEvent) -> Option<char> {
 
 fn is_plain_key(key: KeyEvent) -> bool {
     key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::{CaptureRecord, CaptureSequence, CapturedExchange};
+    use http::Method;
+    use std::sync::Arc;
+
+    fn completed_record(
+        request_body: Option<&str>,
+        response_body: Option<&str>,
+        request_headers: Vec<(String, String)>,
+        local_path: Option<&str>,
+    ) -> Arc<CaptureRecord> {
+        CaptureRecord::from_completed(CapturedExchange {
+            sequence: CaptureSequence::new(0),
+            method: Method::POST,
+            uri: "https://example.com/api".to_string(),
+            mapped_uri: None,
+            local_path: local_path.map(str::to_string),
+            status: Some(200),
+            req_headers: request_headers,
+            res_headers: Vec::new(),
+            req_body: request_body.map(str::to_string),
+            res_body: response_body.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn map_local_response_body_preserves_raw_text() {
+        let raw_body = "{\n  \"z\": 1,\n  \"a\": 2\n}\n";
+        let record = completed_record(None, Some(raw_body), Vec::new(), Some("/tmp/api.json"));
+
+        assert_eq!(
+            body_text_for_record(&record, MainDisplayTab::ResponseBody).as_deref(),
+            Some(raw_body)
+        );
+    }
+
+    #[test]
+    fn non_local_response_body_uses_json_formatting() {
+        let raw_body = r#"{"z":1,"a":2}"#;
+        let record = completed_record(None, Some(raw_body), Vec::new(), None);
+
+        assert_ne!(
+            body_text_for_record(&record, MainDisplayTab::ResponseBody).as_deref(),
+            Some(raw_body)
+        );
+    }
+
+    #[test]
+    fn form_request_body_decodes_percent_encoded_utf8_text() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let record = completed_record(
+            Some("name=%E4%B8%AD%E6%96%87&city=%E5%8C%97%E4%BA%AC"),
+            None,
+            headers,
+            None,
+        );
+
+        assert_eq!(
+            body_text_for_record(&record, MainDisplayTab::RequestBody).as_deref(),
+            Some("name: 中文\ncity: 北京")
+        );
+    }
+
+    #[test]
+    fn request_and_response_json_bodies_use_the_same_formatting() {
+        let raw_body = r#"{"z":1,"a":2}"#;
+        let record = completed_record(Some(raw_body), Some(raw_body), Vec::new(), None);
+
+        assert_eq!(
+            body_text_for_record(&record, MainDisplayTab::RequestBody),
+            body_text_for_record(&record, MainDisplayTab::ResponseBody)
+        );
+    }
 }

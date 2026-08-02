@@ -44,6 +44,7 @@ globset = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3"
 
 [[bench]]
 name = "core_paths"

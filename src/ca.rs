@@ -127,38 +127,34 @@ fn create_ca() -> Result<Certificate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_certificate_persistence() {
-        let cert_dir = temp_cert_dir();
+        let cert_dir = tempfile::tempdir().expect("temporary CA directory should be created");
         let pem_filename = "wirelens-ca.pem";
 
-        // Clean up before test
-        let _ = fs::remove_dir_all(&cert_dir);
-
         // First run - should create new certificate
-        let ca1 =
-            create_or_load_ca(&cert_dir, pem_filename).expect("first CA creation should succeed");
+        let ca1 = create_or_load_ca(cert_dir.path(), pem_filename)
+            .expect("first CA creation should succeed");
         let cert_pem1 = ca1.cert_pem();
 
         // Verify files were created
         assert!(
-            cert_dir.join(CA_CERT_FILE).exists(),
+            cert_dir.path().join(CA_CERT_FILE).exists(),
             "Certificate DER file should exist"
         );
         assert!(
-            cert_dir.join(CA_KEY_FILE).exists(),
+            cert_dir.path().join(CA_KEY_FILE).exists(),
             "Key DER file should exist"
         );
         assert!(
-            cert_dir.join(pem_filename).exists(),
+            cert_dir.path().join(pem_filename).exists(),
             "Certificate PEM file should exist"
         );
 
         // Second run - should load existing certificate
-        let ca2 = create_or_load_ca(&cert_dir, pem_filename).expect("persisted CA should load");
+        let ca2 =
+            create_or_load_ca(cert_dir.path(), pem_filename).expect("persisted CA should load");
         let cert_pem2 = ca2.cert_pem();
 
         // Certificates should match
@@ -170,34 +166,20 @@ mod tests {
         // DER bytes should also match
         assert_eq!(ca1.cert_der(), ca2.cert_der(), "DER bytes should match");
         assert_eq!(ca1.key_der(), ca2.key_der(), "Key DER bytes should match");
-
-        // Clean up
-        let _ = fs::remove_dir_all(&cert_dir);
     }
 
     #[test]
     fn incomplete_persisted_authority_is_fatal() {
-        let cert_dir = temp_cert_dir();
+        let cert_dir = tempfile::tempdir().expect("temporary CA directory should be created");
         let pem_filename = "wirelens-ca.pem";
-        fs::create_dir_all(&cert_dir).expect("test CA directory should be created");
-        fs::write(cert_dir.join(CA_CERT_FILE), b"incomplete")
+        fs::write(cert_dir.path().join(CA_CERT_FILE), b"incomplete")
             .expect("partial CA file should be written");
 
-        let error = create_or_load_ca(&cert_dir, pem_filename)
+        let error = create_or_load_ca(cert_dir.path(), pem_filename)
             .err()
             .expect("partial persisted CA should fail");
 
         assert!(error.to_string().contains("failed to load CA"));
-        assert!(!cert_dir.join(CA_KEY_FILE).exists());
-        let _ = fs::remove_dir_all(&cert_dir);
-    }
-
-    fn temp_cert_dir() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-
-        std::env::temp_dir().join(format!("wirelens-ca-{nanos}"))
+        assert!(!cert_dir.path().join(CA_KEY_FILE).exists());
     }
 }

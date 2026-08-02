@@ -324,10 +324,7 @@ fn log_request_policy_diagnostics(diagnostics: &[RequestPolicyDiagnostic]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::fs;
 
     #[test]
     fn proxy_bind_address_uses_ipv4_unspecified_address() {
@@ -344,15 +341,8 @@ mod tests {
             RecordingPrefilterPatternSettings,
         };
 
-        static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
-        let unique = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "wirelens-runtime-settings-{}-{unique}/config.yml",
-            std::process::id()
-        ));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config.yml");
         let mut manager = SettingsManager::load_from_path(&path)?;
         let store = RequestPolicyStore::default();
         let mut draft = AppSettings::default();
@@ -398,8 +388,6 @@ mod tests {
             "http://mapped.example.com/orders?x=1"
         );
         assert!(recording.included);
-
-        let _ = fs::remove_file(path);
         Ok(())
     }
 }

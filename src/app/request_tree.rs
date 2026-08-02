@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::capture::CapturedExchange;
 use crate::capture::{CaptureSequence, CaptureSummary};
 use std::{
     collections::{HashMap, HashSet},
@@ -379,18 +377,18 @@ impl<'a> DeleteSelectionContext<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestTreeEntry {
-    pub origin: String,
-    pub segments: Vec<String>,
+pub(in crate::app) struct RequestTreeEntry {
+    pub(in crate::app) origin: String,
+    segments: Vec<String>,
     request_sequence: CaptureSequence,
 }
 
 impl RequestTreeEntry {
-    pub fn request_identifier(&self) -> String {
+    fn request_identifier(&self) -> String {
         request_identifier(self.request_sequence)
     }
 
-    pub fn request_path(&self) -> Vec<String> {
+    pub(in crate::app) fn request_path(&self) -> Vec<String> {
         let mut path = self.parent_path();
         path.push(self.request_identifier());
         path
@@ -415,29 +413,6 @@ impl RequestTreeEntry {
             path.push(segment_identifier(segment));
         }
         path
-    }
-}
-
-#[cfg(test)]
-impl From<&CapturedExchange> for RequestTreeEntry {
-    fn from(req: &CapturedExchange) -> Self {
-        let display_uri = request_display_uri(req);
-        let (origin, segments) = Url::parse(display_uri)
-            .ok()
-            .filter(Url::has_host)
-            .map(|url| {
-                (
-                    absolute_url_origin(&url),
-                    path_segments_with_query(url.path(), url.query()),
-                )
-            })
-            .unwrap_or_else(|| fallback_origin_and_segments(req));
-
-        Self {
-            origin,
-            segments,
-            request_sequence: req.sequence,
-        }
     }
 }
 
@@ -506,29 +481,6 @@ fn absolute_url_origin(url: &Url) -> String {
     }
 }
 
-#[cfg(test)]
-fn request_display_uri(req: &CapturedExchange) -> &str {
-    req.display_uri()
-}
-
-#[cfg(test)]
-fn fallback_origin_and_segments(req: &CapturedExchange) -> (String, Vec<String>) {
-    let origin = request_header(req, "host")
-        .map(|host| format!("https://{host}"))
-        .unwrap_or_else(|| "(unknown host)".to_string());
-    let display_uri = request_display_uri(req);
-    let (path, query) = display_uri
-        .split_once('?')
-        .map_or((display_uri, None), |(path, query)| (path, Some(query)));
-
-    (origin, path_segments_with_query(path, query))
-}
-
-#[cfg(test)]
-fn request_header<'a>(req: &'a CapturedExchange, name: &str) -> Option<&'a str> {
-    request_header_slice(&req.req_headers, name)
-}
-
 fn request_header_slice<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -555,4 +507,73 @@ fn path_segments_with_query(path: &str, query: Option<&str>) -> Vec<String> {
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::{CaptureRecord, CapturedExchange};
+    use http::Method;
+
+    fn captured(sequence: u64, uri: &str) -> CapturedExchange {
+        CapturedExchange {
+            sequence: CaptureSequence::new(sequence),
+            method: Method::GET,
+            uri: uri.to_string(),
+            mapped_uri: None,
+            local_path: None,
+            status: None,
+            req_headers: vec![("host".to_string(), "fallback.example.com".to_string())],
+            res_headers: Vec::new(),
+            req_body: None,
+            res_body: None,
+        }
+    }
+
+    fn entry(capture: CapturedExchange) -> RequestTreeEntry {
+        let record = CaptureRecord::from_completed(capture);
+        RequestTreeEntry::from(&record.summary())
+    }
+
+    #[test]
+    fn capture_summary_splits_absolute_display_url() {
+        let entry = entry(captured(
+            7,
+            "https://some.host.com/api/v1/getUserInfo?a=1&b=2",
+        ));
+
+        assert_eq!(entry.origin, "https://some.host.com");
+        assert_eq!(entry.segments, ["api", "v1", "getUserInfo?a=1&b=2"]);
+        assert_eq!(
+            entry.request_path(),
+            [
+                "origin:https://some.host.com",
+                "segment:api",
+                "segment:v1",
+                "request:7"
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_summary_uses_effective_mapped_url() {
+        let mut capture = captured(7, "https://a.com/original/path?a=1");
+        capture.mapped_uri = Some("http://b.test.com/mapped/path?a=1".to_string());
+        let entry = entry(capture);
+
+        assert_eq!(entry.origin, "http://b.test.com");
+        assert_eq!(entry.segments, ["mapped", "path?a=1"]);
+        assert_eq!(
+            entry.request_path(),
+            ["origin:http://b.test.com", "segment:mapped", "request:7"]
+        );
+    }
+
+    #[test]
+    fn capture_summary_uses_host_header_for_origin_form_uri() {
+        let entry = entry(captured(0, "/common/getSomeOtherInfo"));
+
+        assert_eq!(entry.origin, "https://fallback.example.com");
+        assert_eq!(entry.segments, ["common", "getSomeOtherInfo"]);
+    }
 }
