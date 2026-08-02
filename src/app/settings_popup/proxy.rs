@@ -45,6 +45,7 @@ impl SettingsPopup {
     }
 
     pub(crate) fn start_select(&mut self, target: SelectTarget) {
+        self.bump_presentation_revision();
         self.focus_select_target(target);
         let items = self.select_items(target);
         if items.is_empty() {
@@ -107,6 +108,7 @@ impl SettingsPopup {
     pub(crate) fn close_active_select(&mut self) -> bool {
         if matches!(self.mode, EditMode::Select { .. }) {
             self.mode = EditMode::Browse;
+            self.bump_presentation_revision();
             return true;
         }
         false
@@ -126,6 +128,7 @@ impl SettingsPopup {
         if let Some(commit) = commit {
             let effect = self.apply_select_commit(target, commit);
             self.apply_select_commit_effect(effect, target, state);
+            self.bump_presentation_revision();
             true
         } else {
             self.mode = EditMode::Select { target, state };
@@ -156,6 +159,7 @@ impl SettingsPopup {
         }
         drop(items);
         self.mode = EditMode::Select { target, state };
+        self.bump_presentation_revision();
         true
     }
 
@@ -721,16 +725,19 @@ impl SettingsPopup {
     #[cfg(test)]
     pub(crate) fn add_remote_rule_after(&mut self, index: Option<usize>) {
         self.add_rule_after(ProxyRuleTable::Remote, index);
+        self.bump_presentation_revision();
     }
 
     #[cfg(test)]
     pub(crate) fn delete_remote_rule(&mut self, index: usize) {
         self.delete_rule(ProxyRuleTable::Remote, index);
+        self.bump_presentation_revision();
     }
 
     #[cfg(test)]
     pub(crate) fn move_remote_rule_down(&mut self, index: usize) {
         self.move_rule_down(ProxyRuleTable::Remote, index);
+        self.bump_presentation_revision();
     }
 
     #[cfg(test)]

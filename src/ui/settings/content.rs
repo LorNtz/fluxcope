@@ -11,7 +11,7 @@ use tui_scrollview::ScrollView;
 
 use crate::app::{ProxyRuleTable, SelectTarget};
 
-use super::prefilter::PrefilterTableWidget;
+use super::prefilter::{PrefilterTableHitRegion, PrefilterTableWidget};
 use super::tables::ProxyRuleTableWidget;
 use super::text::fit_input_value;
 use crate::ui::terminal_text::text_width;
@@ -20,6 +20,18 @@ use crate::ui::terminal_text::text_width;
 pub(super) enum SettingsTableHit {
     Prefilter,
     Proxy(ProxyRuleTable),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SettingsTableScrollRegion {
+    area: Rect,
+    hit: SettingsTableHit,
+}
+
+impl SettingsTableScrollRegion {
+    pub(super) fn hit_at(self, position: Position) -> Option<SettingsTableHit> {
+        self.area.contains(position).then_some(self.hit)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,18 +316,33 @@ impl SettingsFullWidthTable<'_> {
         }
     }
 
-    pub(super) fn scroll_hit(&self, area: Rect, position: Position) -> Option<SettingsTableHit> {
+    pub(super) fn scroll_region(&self, area: Rect) -> Option<SettingsTableScrollRegion> {
         match self {
             Self::Proxy(table) => {
                 let viewport = table.viewport(area.height);
-                (area.contains(position) && viewport.overflowing(table.row_count()))
-                    .then_some(SettingsTableHit::Proxy(table.table))
+                viewport
+                    .overflowing(table.row_count())
+                    .then_some(SettingsTableScrollRegion {
+                        area,
+                        hit: SettingsTableHit::Proxy(table.table),
+                    })
             }
             Self::Prefilter(table) => {
                 let viewport = table.viewport(area.height);
-                (area.contains(position) && viewport.overflowing(table.row_count()))
-                    .then_some(SettingsTableHit::Prefilter)
+                viewport
+                    .overflowing(table.row_count())
+                    .then_some(SettingsTableScrollRegion {
+                        area,
+                        hit: SettingsTableHit::Prefilter,
+                    })
             }
+        }
+    }
+
+    pub(super) fn prefilter_hit_region(&self, area: Rect) -> Option<PrefilterTableHitRegion> {
+        match self {
+            Self::Prefilter(table) => Some(table.hit_region(area)),
+            Self::Proxy(_) => None,
         }
     }
 }
@@ -401,7 +428,7 @@ impl SettingsContentItem<'_> {
         }
     }
 
-    fn select_layout(
+    pub(super) fn select_layout(
         &self,
         target: Option<SelectTarget>,
         area: Rect,
@@ -594,6 +621,7 @@ impl<'items, 'content> SettingsContentLayout<'items, 'content> {
     }
 }
 
+#[cfg(test)]
 pub(in crate::ui) fn settings_select_layout(
     items: &[SettingsContentItem<'_>],
     target: Option<SelectTarget>,
@@ -607,29 +635,6 @@ pub(in crate::ui) fn settings_select_layout(
         let row_area = Rect::new(0, y, content_width, height);
         let overlay_bounds = Rect::new(0, y, content_width, content_height.saturating_sub(y));
         if let Some(select) = item.select_layout(target, row_area, layout, overlay_bounds) {
-            return Some(select);
-        }
-        y = y.saturating_add(height);
-    }
-
-    None
-}
-
-pub(super) fn settings_select_layout_at_position(
-    items: &[SettingsContentItem<'_>],
-    position: Position,
-    layout: SettingsFieldLayout,
-    content_width: u16,
-    content_height: u16,
-) -> Option<SettingsSelectLayout> {
-    let mut y = 0;
-    for item in items {
-        let height = item.height(layout, content_width);
-        let row_area = Rect::new(0, y, content_width, height);
-        let overlay_bounds = Rect::new(0, y, content_width, content_height.saturating_sub(y));
-        if let Some(select) = item.select_layout(None, row_area, layout, overlay_bounds)
-            && select.box_contains(position)
-        {
             return Some(select);
         }
         y = y.saturating_add(height);

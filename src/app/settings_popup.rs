@@ -670,6 +670,7 @@ pub struct SettingsPopup {
     prefilter_table: SettingsTableState,
     remote_rule_table: SettingsTableState,
     local_rule_table: SettingsTableState,
+    presentation_revision: u64,
 }
 
 impl SettingsPopup {
@@ -688,10 +689,12 @@ impl SettingsPopup {
             prefilter_table: SettingsTableState::default(),
             remote_rule_table: SettingsTableState::default(),
             local_rule_table: SettingsTableState::default(),
+            presentation_revision: 0,
         }
     }
 
     pub fn open(&mut self, settings: AppSettings) {
+        self.bump_presentation_revision();
         self.visible = true;
         self.focus = SettingsPaneFocus::Topics;
         self.topic = SettingsTopic::Server;
@@ -705,6 +708,7 @@ impl SettingsPopup {
     }
 
     pub fn close(&mut self) {
+        self.bump_presentation_revision();
         self.visible = false;
         self.draft.reset();
         self.mode = EditMode::Browse;
@@ -760,6 +764,7 @@ impl SettingsPopup {
     }
 
     pub fn mark_save_failed(&mut self, message: String) {
+        self.bump_presentation_revision();
         self.mode = EditMode::Browse;
         self.draft.set_error(message);
         self.visible = true;
@@ -771,6 +776,14 @@ impl SettingsPopup {
 
     pub(crate) fn take_scroll_request(&mut self) -> Option<SettingsScrollRequest> {
         self.scroll_request.take()
+    }
+
+    pub(crate) fn presentation_revision(&self) -> u64 {
+        self.presentation_revision
+    }
+
+    pub(super) fn bump_presentation_revision(&mut self) {
+        self.presentation_revision = self.presentation_revision.wrapping_add(1);
     }
 
     pub(super) fn reset_table_scrolls(&mut self) {
@@ -791,11 +804,13 @@ impl SettingsPopup {
 
     #[cfg(test)]
     pub(crate) fn draft_mut_for_tests(&mut self) -> &mut AppSettings {
+        self.bump_presentation_revision();
         &mut self.draft
     }
 
     #[cfg(test)]
     pub(crate) fn select_topic_for_tests(&mut self, topic: SettingsTopic) {
         self.select_topic(topic);
+        self.bump_presentation_revision();
     }
 }

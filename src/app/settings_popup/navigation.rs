@@ -66,7 +66,7 @@ impl SettingsPopup {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
-        match self.mode {
+        let action = match self.mode {
             EditMode::UnsavedConfirm => self.handle_unsaved_confirm_key(key),
             EditMode::Field { .. } => self.handle_field_key(key),
             EditMode::PrefilterTable { .. } => self.handle_prefilter_table_key(key),
@@ -75,7 +75,9 @@ impl SettingsPopup {
             EditMode::RuleTable { .. } => self.handle_rule_table_key(key),
             EditMode::RuleEditor { .. } => self.handle_rule_editor_key(key),
             EditMode::Browse => self.handle_browse_key(key),
-        }
+        };
+        self.bump_presentation_revision();
+        action
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> SettingsPopupAction {

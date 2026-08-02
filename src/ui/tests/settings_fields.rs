@@ -425,8 +425,8 @@ fn settings_popup_checkbox_field_renders_label_then_checkbox_with_green_selectio
 fn settings_popup_short_content_ignores_mouse_scroll() {
     let mut app = App::new(ui_settings(true));
     app.open_settings_popup();
-    let ui = laid_out_ui(&app);
-    let content_area = settings_content_test_area(Rect::new(0, 0, 100, 12));
+    let (ui, buffer) = render_to_buffer(&mut app);
+    let content_area = settings_content_test_area(buffer.area);
 
     ui.handle_mouse(
         mouse(MouseEventKind::ScrollDown, content_area.x, content_area.y),
@@ -666,8 +666,7 @@ fn settings_popup_mouse_scroll_does_not_snap_back_to_selected_row() {
     app.settings_popup
         .select_topic_for_tests(SettingsTopic::Proxy);
     app.settings_popup.draft_mut_for_tests().proxy = Some(proxy_settings_with_rule_counts(3, 3));
-    let (_ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
-    let ui = laid_out_ui(&app);
+    let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
     let content_area = settings_content_test_area(Rect::new(0, 0, 100, 12));
 
     ui.handle_mouse(

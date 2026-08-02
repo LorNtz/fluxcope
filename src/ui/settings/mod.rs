@@ -22,8 +22,9 @@ use content::{
 mod controls;
 mod dialogs;
 use dialogs::{render_action_dialog, render_rule_editor_popup};
+mod hit_regions;
+use hit_regions::SettingsHitRegions;
 mod mouse;
-pub(super) use mouse::handle_settings_popup_mouse;
 mod pages;
 use pages::settings_content_items_with_error as build_settings_content_items;
 mod prefilter;
@@ -70,6 +71,7 @@ pub(super) struct SettingsPopupLayout {
     area: Rect,
     topics: Rect,
     content_panel: Rect,
+    #[cfg(test)]
     pub(super) content_viewport: Rect,
 }
 
@@ -83,6 +85,7 @@ pub(super) fn settings_popup_layout(area: Rect) -> SettingsPopupLayout {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(18), Constraint::Min(20)])
         .split(inner);
+    #[cfg(test)]
     let content_viewport = chunks[1].inner(Margin {
         vertical: 1,
         horizontal: 1,
@@ -92,11 +95,51 @@ pub(super) fn settings_popup_layout(area: Rect) -> SettingsPopupLayout {
         area: popup_area,
         topics: chunks[0],
         content_panel: chunks[1],
+        #[cfg(test)]
         content_viewport,
     }
 }
 
-pub(super) fn render_settings_popup(frame: &mut Frame, app: &mut App) {
+pub(super) struct SettingsPopupView {
+    hit_regions: Option<SettingsHitRegions>,
+}
+
+impl SettingsPopupView {
+    pub(super) fn new() -> Self {
+        Self { hit_regions: None }
+    }
+
+    pub(super) fn render(&mut self, frame: &mut Frame, app: &mut App) {
+        self.hit_regions = render_settings_popup(frame, app);
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.hit_regions = None;
+    }
+
+    pub(super) fn handle_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        app: &mut App,
+        root_area: Rect,
+    ) -> bool {
+        let Some(hit_regions) = self
+            .hit_regions
+            .as_ref()
+            .filter(|regions| regions.matches(root_area, &app.settings_popup))
+        else {
+            return true;
+        };
+
+        if mouse::handle_settings_popup_mouse(mouse, app, hit_regions) {
+            self.hit_regions = None;
+        }
+        true
+    }
+}
+
+fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHitRegions> {
+    let root_area = frame.area();
     let layout = settings_popup_layout(frame.area());
     let area = layout.area;
     frame.render_widget(Clear, area);
@@ -124,7 +167,12 @@ pub(super) fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     frame.render_widget(block, area);
 
     render_settings_topics(frame, &app.settings_popup, layout.topics);
-    render_settings_content(frame, &mut app.settings_popup, layout.content_panel);
+    let hit_regions = render_settings_content(
+        frame,
+        &mut app.settings_popup,
+        layout.content_panel,
+        root_area,
+    );
 
     if let Some(dialog) = app.settings_popup.unsaved_dialog() {
         render_action_dialog(frame, &dialog, area);
@@ -133,6 +181,8 @@ pub(super) fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     if let Some(editor) = app.settings_popup.rule_editor() {
         render_rule_editor_popup(frame, editor, area);
     }
+
+    hit_regions
 }
 
 fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
@@ -190,7 +240,12 @@ fn render_settings_topics(frame: &mut Frame, popup: &SettingsPopup, area: Rect) 
     );
 }
 
-fn render_settings_content(frame: &mut Frame, popup: &mut SettingsPopup, area: Rect) {
+fn render_settings_content(
+    frame: &mut Frame,
+    popup: &mut SettingsPopup,
+    area: Rect,
+    root_area: Rect,
+) -> Option<SettingsHitRegions> {
     frame.render_widget(
         base_panel_block(popup.focus == SettingsPaneFocus::Content),
         area,
@@ -200,7 +255,7 @@ fn render_settings_content(frame: &mut Frame, popup: &mut SettingsPopup, area: R
         horizontal: 1,
     });
     if area.is_empty() {
-        return;
+        return None;
     }
 
     let scroll_request = popup.take_scroll_request();
@@ -210,44 +265,49 @@ fn render_settings_content(frame: &mut Frame, popup: &mut SettingsPopup, area: R
         SettingsTopic::Proxy => sync_settings_rule_table_views(popup, table_max_height),
         _ => {}
     }
-    let items = build_settings_content_items(popup, table_max_height);
-    let field_layout = calculate_settings_field_layout(&items);
-    let content_width =
-        settings_content_width_for_viewport(&items, field_layout, area.width, area.height);
-    let content_layout =
-        SettingsContentLayout::new(&items, field_layout, content_width, area.height);
-    let scroll_target = match scroll_request {
-        Some(SettingsScrollRequest::EnsureSelectedVisible) => {
-            content_layout.scroll_y_for_selected(popup.selected_row, popup.scroll.offset().y)
-        }
-        None => None,
-    };
-    let scrolling_enabled = content_layout.scrolling_enabled;
-    let mut scroll_view = ScrollView::new(Size::new(
-        content_layout.content_width,
-        content_layout.buffer_height,
-    ))
-    .vertical_scrollbar_visibility(if scrolling_enabled {
-        ScrollbarVisibility::Always
-    } else {
-        ScrollbarVisibility::Never
-    })
-    .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
-
-    for (item, area) in content_layout.item_areas() {
-        item.render(&mut scroll_view, area, field_layout);
-    }
-
-    for (item, area) in content_layout.item_areas() {
-        let overlay_bounds = Rect::new(
-            0,
-            area.y,
+    let (scroll_target, scrolling_enabled, scroll_view, mut hit_regions) = {
+        let items = build_settings_content_items(popup, table_max_height);
+        let field_layout = calculate_settings_field_layout(&items);
+        let content_width =
+            settings_content_width_for_viewport(&items, field_layout, area.width, area.height);
+        let content_layout =
+            SettingsContentLayout::new(&items, field_layout, content_width, area.height);
+        let scroll_target = match scroll_request {
+            Some(SettingsScrollRequest::EnsureSelectedVisible) => {
+                content_layout.scroll_y_for_selected(popup.selected_row, popup.scroll.offset().y)
+            }
+            None => None,
+        };
+        let scrolling_enabled = content_layout.scrolling_enabled;
+        let mut scroll_view = ScrollView::new(Size::new(
             content_layout.content_width,
-            content_layout.buffer_height.saturating_sub(area.y),
-        );
-        item.render_overlay(&mut scroll_view, area, field_layout, overlay_bounds);
-    }
-    drop(items);
+            content_layout.buffer_height,
+        ))
+        .vertical_scrollbar_visibility(if scrolling_enabled {
+            ScrollbarVisibility::Always
+        } else {
+            ScrollbarVisibility::Never
+        })
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
+
+        for (item, area) in content_layout.item_areas() {
+            item.render(&mut scroll_view, area, field_layout);
+        }
+
+        for (item, area) in content_layout.item_areas() {
+            let overlay_bounds = Rect::new(
+                0,
+                area.y,
+                content_layout.content_width,
+                content_layout.buffer_height.saturating_sub(area.y),
+            );
+            item.render_overlay(&mut scroll_view, area, field_layout, overlay_bounds);
+        }
+        let hit_regions =
+            SettingsHitRegions::from_rendered(root_area, popup, area, &content_layout);
+
+        (scroll_target, scrolling_enabled, scroll_view, hit_regions)
+    };
     if let Some(y) = scroll_target {
         let offset = popup.scroll.offset();
         popup.scroll.set_offset(Position::new(offset.x, y));
@@ -255,6 +315,12 @@ fn render_settings_content(frame: &mut Frame, popup: &mut SettingsPopup, area: R
         popup.scroll.set_offset(Position::ORIGIN);
     }
     frame.render_stateful_widget(scroll_view, area, &mut popup.scroll);
+    hit_regions.set_scroll_y(if scrolling_enabled {
+        popup.scroll.offset().y
+    } else {
+        0
+    });
+    Some(hit_regions)
 }
 
 fn sync_settings_rule_table_views(popup: &mut SettingsPopup, table_max_height: u16) {

@@ -19,6 +19,29 @@ use super::text::fit_input_value;
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
 
+#[derive(Clone, Copy)]
+pub(super) struct PrefilterTableHitRegion {
+    area: Rect,
+    inner: Rect,
+    viewport: SettingsTableViewport,
+    row_count: usize,
+    checkbox_end: u16,
+}
+
+impl PrefilterTableHitRegion {
+    pub(super) fn pattern_hit(self, position: Position) -> Option<(usize, bool)> {
+        if !self.inner.contains(position) {
+            return None;
+        }
+
+        let index = self
+            .viewport
+            .visible_range(self.row_count)
+            .find(|index| self.viewport.row_y(self.area, *index) == Some(position.y))?;
+        Some((index, position.x < self.checkbox_end))
+    }
+}
+
 pub(in crate::ui) struct PrefilterTableWidget<'a> {
     patterns: &'a [RecordingPrefilterPatternSettings],
     parent_state: RuleParentState,
@@ -51,23 +74,22 @@ impl PrefilterTableWidget<'_> {
         SettingsTableViewport::new(self.row_count(), self.scroll_offset, height)
     }
 
-    pub(super) fn pattern_hit(&self, area: Rect, position: Position) -> Option<(usize, bool)> {
+    pub(super) fn hit_region(&self, area: Rect) -> PrefilterTableHitRegion {
         let inner = area.inner(Margin {
             horizontal: 1,
             vertical: 1,
         });
-        if !inner.contains(position) {
-            return None;
-        }
-
         let viewport = self.viewport(area.height);
-        let index = viewport
-            .visible_range(self.row_count())
-            .find(|index| viewport.row_y(area, *index) == Some(position.y))?;
         let checkbox_end = inner
             .x
             .saturating_add(u16::try_from(PREFILTER_ON_COLUMN_WIDTH).unwrap_or(u16::MAX));
-        Some((index, position.x < checkbox_end))
+        PrefilterTableHitRegion {
+            area,
+            inner,
+            viewport,
+            row_count: self.row_count(),
+            checkbox_end,
+        }
     }
 }
 

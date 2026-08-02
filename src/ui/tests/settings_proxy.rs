@@ -342,7 +342,7 @@ fn settings_popup_proxy_preset_select_handles_mouse_selection() {
     app.settings_popup.draft_mut_for_tests().proxy =
         Some(proxy_settings("dev", &["dev", "qa", "prod"]));
 
-    let ui = laid_out_ui(&app);
+    let (ui, _buffer) = render_to_buffer(&mut app);
     let root_area = Rect::new(0, 0, 100, 12);
     let content_area = settings_content_test_area(root_area);
     let content_width = content_area.width.saturating_sub(1).max(1);
@@ -374,7 +374,7 @@ fn settings_popup_proxy_preset_select_handles_mouse_selection() {
         &mut app,
     );
 
-    let ui = laid_out_ui(&app);
+    let (ui, _buffer) = render_to_buffer(&mut app);
     let items = settings_content_items_for_test(&app.settings_popup, root_area);
     let field_layout = settings_field_layout(&items);
     let content_height =
@@ -413,6 +413,70 @@ fn settings_popup_proxy_preset_select_handles_mouse_selection() {
             .as_ref()
             .and_then(|proxy| proxy.active_preset.as_deref()),
         Some("qa")
+    );
+}
+
+#[test]
+fn settings_popup_mouse_rejects_hit_regions_after_presentation_changes() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    app.settings_popup.draft_mut_for_tests().proxy = Some(proxy_settings(
+        "dev",
+        &["dev", "qa", "prod", "test", "staging", "local", "canary"],
+    ));
+
+    let (ui, buffer) = render_to_buffer(&mut app);
+    let content_area = settings_content_test_area(buffer.area);
+    let preset =
+        find_buffer_text(&buffer, content_area, "dev").expect("active proxy preset should render");
+    app.settings_popup.start_select(SelectTarget::ProxyPreset);
+    assert!(app.settings_popup.scroll_active_select_down());
+    assert_eq!(
+        app.settings_popup
+            .select_state(SelectTarget::ProxyPreset)
+            .expect("proxy preset select should be open")
+            .scroll_offset(),
+        1
+    );
+
+    ui.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), preset.x, preset.y),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.settings_popup
+            .select_state(SelectTarget::ProxyPreset)
+            .expect("stale hit regions should not reset the open select")
+            .scroll_offset(),
+        1
+    );
+}
+
+#[test]
+fn settings_popup_mouse_movement_preserves_rendered_hit_regions() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    app.settings_popup.draft_mut_for_tests().proxy = Some(proxy_settings("dev", &["dev", "qa"]));
+
+    let (ui, buffer) = render_to_buffer(&mut app);
+    let content_area = settings_content_test_area(buffer.area);
+    let preset =
+        find_buffer_text(&buffer, content_area, "dev").expect("active proxy preset should render");
+
+    ui.handle_mouse(mouse(MouseEventKind::Moved, preset.x, preset.y), &mut app);
+    ui.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), preset.x, preset.y),
+        &mut app,
+    );
+
+    assert_eq!(
+        app.settings_popup.active_select_target(),
+        Some(SelectTarget::ProxyPreset)
     );
 }
 

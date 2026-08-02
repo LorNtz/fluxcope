@@ -1,75 +1,70 @@
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Position;
 
-use crate::app::{App, SettingsPopup, SettingsTopic};
+use crate::app::{App, SettingsTopic};
 
-use super::content::{
-    SettingsContentItem, SettingsContentLayout, SettingsFullWidthTable, SettingsTableHit,
-    settings_content_width_for_viewport, settings_field_layout, settings_select_layout,
-    settings_select_layout_at_position,
-};
-use super::pages::settings_content_items_with_error;
-use super::{settings_popup_layout, settings_table_max_height};
+use super::content::SettingsTableHit;
+use super::hit_regions::SettingsHitRegions;
 
-pub(in crate::ui) fn handle_settings_popup_mouse(
+enum SettingsMouseInteraction {
+    Ignored,
+    Consumed,
+    Changed,
+}
+
+impl SettingsMouseInteraction {
+    fn from_changed(changed: bool) -> Self {
+        if changed {
+            Self::Changed
+        } else {
+            Self::Consumed
+        }
+    }
+
+    fn changed(&self) -> bool {
+        matches!(self, Self::Changed)
+    }
+}
+
+pub(super) fn handle_settings_popup_mouse(
     mouse: MouseEvent,
     app: &mut App,
-    root_area: Rect,
+    hit_regions: &SettingsHitRegions,
 ) -> bool {
-    if handle_proxy_preset_select_mouse(mouse, app, root_area) {
-        return true;
+    let select_interaction = handle_proxy_preset_select_mouse(mouse, app, hit_regions);
+    if !matches!(select_interaction, SettingsMouseInteraction::Ignored) {
+        return select_interaction.changed();
     }
-    if handle_prefilter_table_mouse(mouse, app, root_area) {
-        return true;
+    let prefilter_interaction = handle_prefilter_table_mouse(mouse, app, hit_regions);
+    if !matches!(prefilter_interaction, SettingsMouseInteraction::Ignored) {
+        return prefilter_interaction.changed();
     }
 
     match mouse.kind {
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-            handle_settings_content_scroll_mouse(mouse, app, root_area);
-            true
+            handle_settings_content_scroll_mouse(mouse, app, hit_regions)
         }
-        _ => true,
+        _ => false,
     }
 }
 
-fn handle_settings_content_scroll_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) {
+fn handle_settings_content_scroll_mouse(
+    mouse: MouseEvent,
+    app: &mut App,
+    hit_regions: &SettingsHitRegions,
+) -> bool {
     let scroll_down = matches!(mouse.kind, MouseEventKind::ScrollDown);
-    let layout = settings_popup_layout(root_area);
-    let viewport = layout.content_viewport;
+    let viewport = hit_regions.viewport();
     if viewport.is_empty() {
         app.settings_popup.scroll.set_offset(Position::ORIGIN);
-        return;
+        return false;
     }
 
     let position = Position::new(mouse.column, mouse.row);
-    let (table_hit, scrolling_enabled) = inspect_settings_content_at_mouse(
-        &app.settings_popup,
-        viewport,
-        mouse,
-        |content_layout, local_position| {
-            let scrolling_enabled = content_layout.scrolling_enabled;
-
-            let table_hit = if matches!(
-                app.settings_popup.topic,
-                SettingsTopic::Recording | SettingsTopic::Proxy
-            ) && app.settings_popup.active_select_target().is_none()
-                && app.settings_popup.unsaved_dialog().is_none()
-                && app.settings_popup.rule_editor().is_none()
-                && viewport.contains(position)
-            {
-                content_layout.item_areas().find_map(|(item, area)| {
-                    let SettingsContentItem::FullWidthTable { table, .. } = item else {
-                        return None;
-                    };
-                    table.scroll_hit(area, local_position)
-                })
-            } else {
-                None
-            };
-
-            (table_hit, scrolling_enabled)
-        },
-    );
+    let table_hit = viewport
+        .contains(position)
+        .then(|| hit_regions.table_hit(hit_regions.local_position(mouse)))
+        .flatten();
 
     if let Some(table) = table_hit {
         let changed = match (table, scroll_down) {
@@ -83,106 +78,66 @@ fn handle_settings_content_scroll_mouse(mouse: MouseEvent, app: &mut App, root_a
             }
         };
         if changed {
-            return;
+            return true;
         }
     }
 
-    if scrolling_enabled {
+    if hit_regions.scrolling_enabled() {
+        let previous_offset = app.settings_popup.scroll.offset();
         if scroll_down {
             app.settings_popup.scroll.scroll_down();
         } else {
             app.settings_popup.scroll.scroll_up();
         }
+        app.settings_popup.scroll.offset() != previous_offset
     } else {
         app.settings_popup.scroll.set_offset(Position::ORIGIN);
+        false
     }
 }
 
-fn inspect_settings_content_at_mouse<R>(
-    popup: &SettingsPopup,
-    viewport: Rect,
+fn handle_prefilter_table_mouse(
     mouse: MouseEvent,
-    inspect: impl FnOnce(&SettingsContentLayout<'_, '_>, Position) -> R,
-) -> R {
-    let table_max_height = settings_table_max_height(viewport.height);
-    let items = settings_content_items_with_error(popup, table_max_height);
-    let field_layout = settings_field_layout(&items);
-    let content_width =
-        settings_content_width_for_viewport(&items, field_layout, viewport.width, viewport.height);
-    let content_layout =
-        SettingsContentLayout::new(&items, field_layout, content_width, viewport.height);
-    let scroll_y = if content_layout.scrolling_enabled {
-        popup.scroll.offset().y
-    } else {
-        0
-    };
-    let local_position = Position::new(
-        mouse.column.saturating_sub(viewport.x),
-        mouse
-            .row
-            .saturating_sub(viewport.y)
-            .saturating_add(scroll_y),
-    );
-    inspect(&content_layout, local_position)
-}
-
-fn handle_prefilter_table_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) -> bool {
+    app: &mut App,
+    hit_regions: &SettingsHitRegions,
+) -> SettingsMouseInteraction {
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         || app.settings_popup.topic != SettingsTopic::Recording
         || app.settings_popup.unsaved_dialog().is_some()
         || app.settings_popup.prefilter_pattern_edit().is_some()
     {
-        return false;
+        return SettingsMouseInteraction::Ignored;
     }
 
-    let layout = settings_popup_layout(root_area);
-    let viewport = layout.content_viewport;
+    let viewport = hit_regions.viewport();
     let position = Position::new(mouse.column, mouse.row);
     if viewport.is_empty() || !viewport.contains(position) {
-        return false;
+        return SettingsMouseInteraction::Ignored;
     }
 
-    let hit = inspect_settings_content_at_mouse(
-        &app.settings_popup,
-        viewport,
-        mouse,
-        |content_layout, local_position| {
-            content_layout.item_areas().find_map(|(item, area)| {
-                let SettingsContentItem::FullWidthTable {
-                    table: SettingsFullWidthTable::Prefilter(table),
-                    ..
-                } = item
-                else {
-                    return None;
-                };
-                if !area.contains(local_position) {
-                    return None;
-                }
-                table.pattern_hit(area, local_position)
-            })
-        },
-    );
-
-    if let Some((index, toggle)) = hit {
+    if let Some((index, toggle)) = hit_regions.prefilter_hit(hit_regions.local_position(mouse)) {
         app.settings_popup.select_prefilter_pattern(index);
         if toggle {
             app.settings_popup.toggle_prefilter_pattern(index);
         }
-        return true;
+        return SettingsMouseInteraction::Changed;
     }
-    false
+    SettingsMouseInteraction::Ignored
 }
 
-fn handle_proxy_preset_select_mouse(mouse: MouseEvent, app: &mut App, root_area: Rect) -> bool {
+fn handle_proxy_preset_select_mouse(
+    mouse: MouseEvent,
+    app: &mut App,
+    hit_regions: &SettingsHitRegions,
+) -> SettingsMouseInteraction {
     if app.settings_popup.topic != SettingsTopic::Proxy
         || app.settings_popup.unsaved_dialog().is_some()
         || app.settings_popup.rule_editor().is_some()
     {
-        return false;
+        return SettingsMouseInteraction::Ignored;
     }
 
-    let layout = settings_popup_layout(root_area);
-    let viewport = layout.content_viewport;
+    let viewport = hit_regions.viewport();
     let position = Position::new(mouse.column, mouse.row);
     let select_open = app.settings_popup.active_select_target().is_some();
     let needs_select_layout = match mouse.kind {
@@ -191,76 +146,56 @@ fn handle_proxy_preset_select_mouse(mouse: MouseEvent, app: &mut App, root_area:
         _ => false,
     };
     if !needs_select_layout {
-        return false;
+        return SettingsMouseInteraction::Ignored;
     }
 
     if !viewport.contains(position) {
         if select_open && matches!(mouse.kind, MouseEventKind::Down(_)) {
-            app.settings_popup.close_active_select();
-            return true;
+            return SettingsMouseInteraction::from_changed(
+                app.settings_popup.close_active_select(),
+            );
         }
-        return false;
+        return SettingsMouseInteraction::Ignored;
     }
 
-    let (active_select, clicked_select, local_position) = inspect_settings_content_at_mouse(
-        &app.settings_popup,
-        viewport,
-        mouse,
-        |content_layout, local_position| {
-            let active_select = app
-                .settings_popup
-                .active_select_target()
-                .and_then(|target| {
-                    settings_select_layout(
-                        content_layout.items,
-                        Some(target),
-                        content_layout.field_layout,
-                        content_layout.content_width,
-                        content_layout.buffer_height,
-                    )
-                });
-            let clicked_select = settings_select_layout_at_position(
-                content_layout.items,
-                local_position,
-                content_layout.field_layout,
-                content_layout.content_width,
-                content_layout.buffer_height,
-            );
-            (active_select, clicked_select, local_position)
-        },
-    );
+    let local_position = hit_regions.local_position(mouse);
+    let active_select = hit_regions.active_select();
+    let clicked_select = hit_regions.select_at(local_position);
     let box_hit = active_select.is_some_and(|select| select.box_contains(local_position));
     let dropdown_hit = active_select.is_some_and(|select| select.dropdown_contains(local_position));
     let option_hit = active_select.and_then(|select| select.layout.option_at(local_position));
     let clicked_select_target = clicked_select.map(|select| select.target);
     match mouse.kind {
         MouseEventKind::ScrollDown if dropdown_hit => {
-            app.settings_popup.scroll_active_select_down();
-            true
+            SettingsMouseInteraction::from_changed(app.settings_popup.scroll_active_select_down())
         }
         MouseEventKind::ScrollUp if dropdown_hit => {
-            app.settings_popup.scroll_active_select_up();
-            true
+            SettingsMouseInteraction::from_changed(app.settings_popup.scroll_active_select_up())
         }
-        MouseEventKind::Down(MouseButton::Left) if box_hit && select_open => true,
+        MouseEventKind::Down(MouseButton::Left) if box_hit && select_open => {
+            SettingsMouseInteraction::Consumed
+        }
         MouseEventKind::Down(MouseButton::Left) if clicked_select_target.is_some() => {
             if let Some(target) = clicked_select_target {
                 app.settings_popup.start_select(target);
             }
-            true
+            SettingsMouseInteraction::Changed
         }
         MouseEventKind::Down(MouseButton::Left) if option_hit.is_some() => {
             if let Some(filtered_index) = option_hit {
-                app.settings_popup
-                    .commit_active_select_filtered_index(filtered_index);
+                return SettingsMouseInteraction::from_changed(
+                    app.settings_popup
+                        .commit_active_select_filtered_index(filtered_index),
+                );
             }
-            true
+            SettingsMouseInteraction::Consumed
         }
-        MouseEventKind::Down(MouseButton::Left) if dropdown_hit => true,
+        MouseEventKind::Down(MouseButton::Left) if dropdown_hit => {
+            SettingsMouseInteraction::Consumed
+        }
         MouseEventKind::Down(_) if select_open => {
-            app.settings_popup.close_active_select();
-            true
+            SettingsMouseInteraction::from_changed(app.settings_popup.close_active_select())
         }
-        _ => false,
+        _ => SettingsMouseInteraction::Ignored,
     }
 }

@@ -23,6 +23,7 @@ use ratatui::{
 };
 #[cfg(test)]
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 mod certificate_popup;
 use certificate_popup::render_certificate_popup;
@@ -39,6 +40,7 @@ use request_list::RequestListView;
 #[cfg(test)]
 use request_list::build_request_tree_items;
 mod settings;
+use settings::SettingsPopupView;
 #[cfg(test)]
 use settings::{
     PEM_FILENAME_INPUT_WIDTH_COLS, PORT_INPUT_WIDTH_COLS, SETTING_TEXT_FIELD_HEIGHT,
@@ -48,7 +50,6 @@ use settings::{
     settings_popup_layout, settings_select_control, settings_select_layout,
     settings_table_max_height,
 };
-use settings::{handle_settings_popup_mouse, render_settings_popup};
 mod terminal_text;
 #[cfg(test)]
 use terminal_text::text_width;
@@ -79,6 +80,7 @@ pub struct RootView {
     request_list: RequestListView,
     right_panel: RightPanelView,
     log: LogView,
+    settings_popup: RefCell<SettingsPopupView>,
 }
 
 impl RootView {
@@ -89,6 +91,7 @@ impl RootView {
             request_list: RequestListView::new(),
             right_panel: RightPanelView::new(),
             log: LogView::new(),
+            settings_popup: RefCell::new(SettingsPopupView::new()),
         }
     }
 
@@ -125,7 +128,9 @@ impl View for RootView {
         }
 
         if app.settings_popup.visible {
-            render_settings_popup(frame, app);
+            self.settings_popup.borrow_mut().render(frame, app);
+        } else {
+            self.settings_popup.borrow_mut().clear();
         }
     }
 
@@ -158,7 +163,10 @@ impl View for RootView {
 impl MouseHandler for RootView {
     fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
         if app.settings_popup.visible {
-            return handle_settings_popup_mouse(mouse, app, self.area());
+            return self
+                .settings_popup
+                .borrow_mut()
+                .handle_mouse(mouse, app, self.area());
         }
 
         if app.certificate_popup.visible {
