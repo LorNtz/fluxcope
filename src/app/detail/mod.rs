@@ -3,8 +3,17 @@ use std::time::Instant;
 
 mod body_viewer;
 pub use body_viewer::BodyViewerKey;
-pub(crate) use body_viewer::{BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyDisplayPreparation};
+pub(crate) use body_viewer::{BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH};
 use body_viewer::{BODY_TEXT_TAB, BodyViewer};
+
+mod body_content;
+mod keymap;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyDisplayPreparation {
+    ReadyToRender,
+    Pending { started_at: Instant },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainDisplayTab {
