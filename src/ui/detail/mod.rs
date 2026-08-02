@@ -19,15 +19,12 @@ use body::{
 };
 
 mod header_table;
-use header_table::{
-    borrowed_lines, header_table_render, header_table_row_at_position, request_header_rows,
-    response_header_rows,
-};
+use header_table::{HeaderTableModel, header_table_row_at_position};
 
 pub(super) struct DetailView {
     area: Rect,
     body_measurement: RefCell<Option<DetailBodyMeasurement>>,
-    header_rows: RefCell<Option<DetailHeaderRows>>,
+    header_table_cache: RefCell<Option<DetailHeaderCache>>,
 }
 
 #[derive(Clone, Copy)]
@@ -45,12 +42,10 @@ struct DetailHeaderKey {
     tab: MainDisplayTab,
 }
 
-struct DetailHeaderRows {
+struct DetailHeaderCache {
     key: DetailHeaderKey,
-    rows: Vec<header_table::TableRow>,
-    render_width: Option<u16>,
-    render_selection: Option<usize>,
-    render: Option<header_table::HeaderTableRender>,
+    width: u16,
+    model: HeaderTableModel,
 }
 
 impl DetailView {
@@ -58,7 +53,7 @@ impl DetailView {
         Self {
             area: Rect::default(),
             body_measurement: RefCell::new(None),
-            header_rows: RefCell::new(None),
+            header_table_cache: RefCell::new(None),
         }
     }
 }
@@ -151,56 +146,48 @@ impl View for DetailView {
                 }
             }
             DetailContent::Table(req) => {
+                let table_area = detail_content_area(self.area());
                 let key = DetailHeaderKey {
                     sequence: req.sequence,
                     revision: req.revision,
                     tab: app.detail_panel.active_tab,
                 };
-                if self.header_rows.borrow().as_ref().map(|cached| cached.key) != Some(key) {
-                    let rows = match key.tab {
-                        MainDisplayTab::RequestHeader => request_header_rows(&req),
-                        MainDisplayTab::ResponseHeader => response_header_rows(&req),
-                        MainDisplayTab::RequestBody | MainDisplayTab::ResponseBody => {
-                            unreachable!()
-                        }
-                    };
-                    *self.header_rows.borrow_mut() = Some(DetailHeaderRows {
+                let cache_matches = self
+                    .header_table_cache
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|cached| cached.key == key);
+                if !cache_matches {
+                    let model = HeaderTableModel::for_tab(&req, key.tab, table_area.width)
+                        .expect("table detail should use a header tab");
+                    *self.header_table_cache.borrow_mut() = Some(DetailHeaderCache {
                         key,
-                        rows,
-                        render_width: None,
-                        render_selection: None,
-                        render: None,
+                        width: table_area.width,
+                        model,
                     });
                 }
-                let table_area = detail_content_area(self.area());
                 let selected_row = app.detail_panel.selected_header_row;
                 {
-                    let mut cache = self.header_rows.borrow_mut();
-                    let cache = cache.as_mut().expect("header rows should be cached");
-                    if cache.render_width != Some(table_area.width)
-                        || cache.render_selection != selected_row
-                    {
-                        cache.render = Some(header_table_render(
-                            &cache.rows,
-                            table_area.width,
-                            selected_row,
-                        ));
-                        cache.render_width = Some(table_area.width);
-                        cache.render_selection = selected_row;
+                    let mut cache = self.header_table_cache.borrow_mut();
+                    let cache = cache.as_mut().expect("header table should be cached");
+                    if cache.width != table_area.width {
+                        cache.model.set_width(table_area.width);
+                        cache.width = table_area.width;
                     }
                 }
-                let cache = self.header_rows.borrow();
-                let table = cache
+                let cache = self.header_table_cache.borrow();
+                let lines = cache
                     .as_ref()
-                    .and_then(|cache| cache.render.as_ref())
-                    .expect("header render should be cached");
-                let total_lines: u16 = table.lines.len().try_into().unwrap_or(u16::MAX);
+                    .expect("header table should be cached")
+                    .model
+                    .render_lines(selected_row);
+                let total_lines: u16 = lines.len().try_into().unwrap_or(u16::MAX);
                 let offset = app
                     .detail_panel
                     .update_scroll_bounds(total_lines.saturating_sub(table_area.height));
 
                 frame.render_widget(
-                    Paragraph::new(borrowed_lines(&table.lines))
+                    Paragraph::new(lines)
                         .block(detail_panel_block(focused))
                         .scroll((offset, 0)),
                     self.area(),
@@ -259,11 +246,37 @@ impl MouseHandler for DetailView {
                 {
                     app.detail_panel.body_viewer.handle_mouse(mouse);
                 } else if button == MouseButton::Left {
-                    app.detail_panel.selected_header_row = header_table_row_at_position(
-                        app,
-                        self.area(),
-                        Position::new(mouse.column, mouse.row),
-                    );
+                    let live_header = current_header(app);
+                    let key = live_header.as_ref().map(|(key, _)| *key);
+                    let content_area = detail_content_area(self.area());
+                    let position = Position::new(mouse.column, mouse.row);
+                    let scroll_offset = app.detail_panel.scroll.offset;
+                    let mut cache = self.header_table_cache.borrow_mut();
+                    if cache.as_ref().is_none_or(|cached| Some(cached.key) != key) {
+                        *cache = live_header.and_then(|(key, request)| {
+                            HeaderTableModel::for_tab(&request, key.tab, content_area.width).map(
+                                |model| DetailHeaderCache {
+                                    key,
+                                    width: content_area.width,
+                                    model,
+                                },
+                            )
+                        });
+                    }
+                    let selected_row = cache.as_mut().and_then(|cache| {
+                        if cache.width != content_area.width {
+                            cache.model.set_width(content_area.width);
+                            cache.width = content_area.width;
+                        }
+                        header_table_row_at_position(
+                            &cache.model,
+                            self.area(),
+                            position,
+                            scroll_offset,
+                        )
+                    });
+                    drop(cache);
+                    app.detail_panel.selected_header_row = selected_row;
                 }
                 true
             }
@@ -278,6 +291,24 @@ impl MouseHandler for DetailView {
             _ => false,
         }
     }
+}
+
+fn current_header(app: &App) -> Option<(DetailHeaderKey, crate::capture::CaptureSummary)> {
+    let tab = app.detail_panel.active_tab;
+    if !matches!(
+        tab,
+        MainDisplayTab::RequestHeader | MainDisplayTab::ResponseHeader
+    ) {
+        return None;
+    }
+
+    let request = app.selected_request()?;
+    let key = DetailHeaderKey {
+        sequence: request.sequence,
+        revision: request.revision,
+        tab,
+    };
+    Some((key, request))
 }
 
 fn detail_panel_block(focused: bool) -> Block<'static> {
