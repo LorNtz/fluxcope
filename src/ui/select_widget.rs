@@ -1,3 +1,5 @@
+use super::terminal_text::{fit_text, text_width, text_width_bounded};
+use crate::app::BODY_TEXT_TAB_WIDTH;
 use crate::select::{SelectItem, SelectItemRole, SelectResolvedItems, SelectState};
 use ratatui::{
     buffer::Buffer,
@@ -13,6 +15,7 @@ use std::borrow::Cow;
 pub(crate) const SELECT_FIELD_HEIGHT: u16 = 3;
 pub(crate) const DEFAULT_MIN_SELECT_FIELD_WIDTH: usize = 12;
 pub(crate) const DEFAULT_MAX_SELECT_FIELD_WIDTH: usize = 36;
+const SELECT_FIELD_CHROME_WIDTH: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SelectWidgetLayout {
@@ -154,16 +157,18 @@ impl<'a, Id> SelectWidget<'a, Id> {
     }
 
     fn preferred_box_width(&self) -> u16 {
-        let label_width = self
-            .items
-            .iter()
-            .map(|item| text_width(item.label.as_ref()))
-            .chain([text_width(self.selected_label.as_ref())])
-            .max()
-            .unwrap_or(0);
-        label_width.saturating_add(5).clamp(
-            self.min_width.try_into().unwrap(),
-            self.max_width.try_into().unwrap(),
+        let max_label_width = self.max_width.saturating_sub(SELECT_FIELD_CHROME_WIDTH);
+        let mut label_width = text_width_bounded(self.selected_label.as_ref(), max_label_width);
+        for item in self.items {
+            if label_width >= max_label_width {
+                break;
+            }
+            label_width = label_width.max(text_width_bounded(item.label.as_ref(), max_label_width));
+        }
+        usize_to_u16(
+            label_width
+                .saturating_add(SELECT_FIELD_CHROME_WIDTH)
+                .clamp(self.min_width, self.max_width),
         )
     }
 
@@ -254,23 +259,22 @@ impl<Id> SelectWidget<'_, Id> {
             buf,
         );
 
-        let text_width = inner.width.saturating_sub(2);
-        if text_width == 0 {
+        let text_area_width = inner.width.saturating_sub(2);
+        if text_area_width == 0 {
             return;
         }
         render_fitted_text(
             self.field_text(),
-            Rect::new(inner.x, inner.y, text_width, 1),
+            Rect::new(inner.x, inner.y, text_area_width, 1),
             style,
             buf,
         );
 
         if let Some(state) = self.state.filter(|state| state.is_open()) {
-            let cursor = state
-                .filter_cursor()
-                .min(usize::from(text_width.saturating_sub(1)));
+            let cursor =
+                usize::from(text_width(state.filter_prefix())).min(usize::from(text_area_width));
             let cursor_x = inner.x.saturating_add(usize_to_u16(cursor));
-            if cursor_x < inner.x.saturating_add(text_width) {
+            if cursor_x < arrow_x {
                 buf[(cursor_x, inner.y)].set_style(style.add_modifier(Modifier::REVERSED));
             }
         }
@@ -374,27 +378,8 @@ fn render_fitted_text(value: &str, area: Rect, style: Style, buf: &mut Buffer) {
         buf[(x, area.y)].set_style(style);
     }
 
-    let text = fit_text(value, usize::from(area.width));
+    let text = fit_text(value, usize::from(area.width), BODY_TEXT_TAB_WIDTH);
     Paragraph::new(text.as_ref()).style(style).render(area, buf);
-}
-
-fn fit_text(value: &str, width: usize) -> Cow<'_, str> {
-    let value_len = value.chars().count();
-    if value_len <= width {
-        return Cow::Borrowed(value);
-    }
-
-    if width == 1 {
-        return Cow::Borrowed("…");
-    }
-
-    let mut clipped = value.chars().take(width - 1).collect::<String>();
-    clipped.push('…');
-    Cow::Owned(clipped)
-}
-
-fn text_width(text: &str) -> u16 {
-    text.chars().count().try_into().unwrap_or(u16::MAX)
 }
 
 fn usize_to_u16(value: usize) -> u16 {
@@ -404,6 +389,54 @@ fn usize_to_u16(value: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_uses_terminal_cells_for_width_and_clipping() {
+        let wide_label = "界".repeat(8);
+        let items = [SelectItem::value(0, wide_label.as_str())];
+        let widget = SelectWidget::new(wide_label.as_str(), &items, None);
+        assert_eq!(widget.layout(Rect::new(0, 0, 80, 3)).box_area.width, 21);
+
+        let widget = SelectWidget::new("界ab", &items, None).with_min_width(3);
+        let area = Rect::new(0, 0, 7, 3);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        assert_eq!(buf[(1, 1)].symbol(), "界");
+        assert_eq!(buf[(3, 1)].symbol(), "…");
+    }
+
+    #[test]
+    fn select_filter_cursor_uses_rendered_prefix_width() {
+        let items = [SelectItem::value(0, "anything")];
+        let rendered_cursor_x = |characters: &[char]| {
+            let mut state = SelectState::new();
+            state.open_with_selected(&items, Some(&0), 4);
+            for character in characters {
+                state.handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char(*character),
+                        crossterm::event::KeyModifiers::NONE,
+                    ),
+                    &items,
+                    4,
+                );
+            }
+
+            let widget = SelectWidget::new("anything", &items, Some(&state));
+            let area = Rect::new(0, 0, 12, 3);
+            let mut buf = Buffer::empty(area);
+            widget.render(area, &mut buf);
+            (1..area.right())
+                .find(|x| buf[(*x, 1)].modifier.contains(Modifier::REVERSED))
+                .expect("open filter should render its cursor")
+        };
+
+        assert_eq!(rendered_cursor_x(&['界']), 3);
+        assert_eq!(rendered_cursor_x(&['e', '\u{301}']), 2);
+        assert_eq!(rendered_cursor_x(&['👩', '\u{200d}', '💻']), 3);
+        assert_eq!(rendered_cursor_x(&['界', '界', '界', '界']), 9);
+    }
 
     #[test]
     fn dropdown_overlay_clears_existing_content() {

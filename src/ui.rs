@@ -38,6 +38,7 @@ mod request_list;
 use request_list::RequestListView;
 #[cfg(test)]
 use request_list::build_request_tree_items;
+mod select_widget;
 mod settings;
 use settings::SettingsPopupView;
 #[cfg(test)]

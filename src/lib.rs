@@ -10,7 +10,6 @@ mod recording;
 mod request_policy;
 mod runtime;
 mod select;
-mod select_widget;
 mod settings;
 mod ui;
 

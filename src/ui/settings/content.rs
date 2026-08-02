@@ -9,12 +9,11 @@ use ratatui::{
 };
 use tui_scrollview::ScrollView;
 
-use crate::app::{ProxyRuleTable, SelectTarget};
+use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SelectTarget};
 
 use super::prefilter::{PrefilterTableHitRegion, PrefilterTableWidget};
 use super::tables::ProxyRuleTableWidget;
-use super::text::fit_input_value;
-use crate::ui::terminal_text::text_width;
+use crate::ui::terminal_text::{fit_text_to_width, text_width};
 
 #[derive(Clone, Copy)]
 pub(super) enum SettingsTableHit {
@@ -150,7 +149,7 @@ fn settings_field_style(selected: bool, activity: SettingsControlActivity) -> Se
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::ui) struct SettingsSelectLayout {
     pub(super) target: SelectTarget,
-    pub(in crate::ui) layout: crate::select_widget::SelectWidgetLayout,
+    pub(in crate::ui) layout: crate::ui::select_widget::SelectWidgetLayout,
 }
 
 impl SettingsSelectLayout {
@@ -478,7 +477,7 @@ fn titled_divider_text(title: &str, width: u16) -> String {
     let title = format!(" {title} ");
     let title_width = text_width(&title);
     if width <= title_width {
-        return fit_input_value(&title, usize::from(width));
+        return fit_text_to_width(&title, usize::from(width), BODY_TEXT_TAB_WIDTH);
     }
 
     let divider_width = width.saturating_sub(title_width);

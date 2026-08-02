@@ -10,11 +10,11 @@ use ratatui::{
 };
 use tui_textarea::{CursorMove, TextArea};
 
-use crate::app::{PrefilterPatternEditState, SettingsPopup};
+use crate::app::{BODY_TEXT_TAB_WIDTH, PrefilterPatternEditState, SettingsPopup};
 use crate::settings::RecordingPrefilterPatternSettings;
 
 use super::tables::{RuleParentState, SettingsTableViewport, settings_table_height};
-use super::text::fit_input_value;
+use crate::ui::terminal_text::fit_text_to_width;
 
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
@@ -133,9 +133,10 @@ impl Widget for &PrefilterTableWidget<'_> {
         );
 
         if self.patterns.is_empty() {
-            Paragraph::new(fit_input_value(
+            Paragraph::new(fit_text_to_width(
                 "No patterns configured; all URLs are recorded",
                 usize::from(table_width),
+                BODY_TEXT_TAB_WIDTH,
             ))
             .render(
                 Rect::new(inner.x, inner.y.saturating_add(1), table_width, 1),
@@ -219,7 +220,11 @@ fn render_prefilter_table_columns(
         return;
     }
     Paragraph::new(Line::styled(
-        fit_input_value(pattern, usize::from(pattern_area.width)),
+        fit_text_to_width(
+            pattern,
+            usize::from(pattern_area.width),
+            BODY_TEXT_TAB_WIDTH,
+        ),
         row_style,
     ))
     .render(pattern_area, buf);

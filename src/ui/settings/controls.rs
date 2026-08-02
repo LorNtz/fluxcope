@@ -13,7 +13,7 @@ use crate::app::{
     PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, SelectTarget, SettingsPopup, SettingsSelectId,
 };
 use crate::select::{SelectItem, SelectState};
-use crate::select_widget::SelectWidget;
+use crate::ui::select_widget::SelectWidget;
 
 use super::content::{
     SettingsControlActivity, SettingsControlView, SettingsFieldStyle, SettingsSelectLayout,
@@ -162,7 +162,7 @@ impl SettingsSelectControl<'_> {
         &self,
         control_area: Rect,
         overlay_bounds: Rect,
-    ) -> crate::select_widget::SelectWidgetLayout {
+    ) -> crate::ui::select_widget::SelectWidgetLayout {
         self.widget(Style::default())
             .layout(select_overlay_area(control_area, overlay_bounds))
     }

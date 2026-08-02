@@ -1,6 +1,6 @@
 use crate::app::{
-    App, PopupFocus, ProxyRuleTable, SettingsKeyHint, SettingsPaneFocus, SettingsPopup,
-    SettingsScrollRequest, SettingsTopic,
+    App, BODY_TEXT_TAB_WIDTH, PopupFocus, ProxyRuleTable, SettingsKeyHint, SettingsPaneFocus,
+    SettingsPopup, SettingsScrollRequest, SettingsTopic,
 };
 use ratatui::{
     Frame,
@@ -12,7 +12,7 @@ use ratatui::{
 use tui_scrollview::{ScrollView, ScrollbarVisibility};
 
 use super::chrome::{base_panel_block, centered_rect, panel_block};
-use super::terminal_text::text_width;
+use super::terminal_text::{fit_text_to_width, text_width};
 
 mod content;
 use content::{
@@ -30,8 +30,6 @@ use pages::settings_content_items_with_error as build_settings_content_items;
 mod prefilter;
 mod tables;
 use tables::{settings_table_height, settings_table_visible_rows};
-mod text;
-use text::fit_input_value;
 
 #[cfg(test)]
 pub(in crate::ui) use content::{
@@ -217,7 +215,11 @@ fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
 
     if text.is_empty() {
         let hint = hints[0];
-        fit_input_value(&format!("{} [{}]", hint.label, hint.key), max_width)
+        fit_text_to_width(
+            &format!("{} [{}]", hint.label, hint.key),
+            max_width,
+            BODY_TEXT_TAB_WIDTH,
+        )
     } else {
         text
     }

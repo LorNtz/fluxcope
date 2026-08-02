@@ -9,11 +9,11 @@ use ratatui::{
     },
 };
 
-use crate::app::{ProxyRuleTable, SettingsPopup};
+use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SettingsPopup};
 use crate::settings::{ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings};
 
 use super::SETTINGS_TABLE_MIN_HEIGHT;
-use super::text::fit_input_value;
+use crate::ui::terminal_text::fit_text_to_width;
 
 #[derive(Clone, Copy)]
 struct ProxyRuleTableRow<'a> {
@@ -230,7 +230,11 @@ impl ProxyRuleTableWidget<'_> {
             .render(Rect::new(inner.x, inner.y, table_width, 1), buf);
 
         if self.is_empty() {
-            let empty = fit_input_value("No rules configured", usize::from(table_width));
+            let empty = fit_text_to_width(
+                "No rules configured",
+                usize::from(table_width),
+                BODY_TEXT_TAB_WIDTH,
+            );
             Paragraph::new(Line::raw(empty)).render(
                 Rect::new(inner.x, inner.y.saturating_add(1), table_width, 1),
                 buf,
@@ -339,9 +343,15 @@ fn format_rule_table_row(
     Line::from(vec![
         Span::styled(mark, parent_state.checkbox_style(row_style, row_selected)),
         Span::styled(" ", row_style),
-        Span::styled(fit_input_value(row.from, from_width), row_style),
+        Span::styled(
+            fit_text_to_width(row.from, from_width, BODY_TEXT_TAB_WIDTH),
+            row_style,
+        ),
         Span::styled(" ", row_style),
-        Span::styled(fit_input_value(row.to, to_width), row_style),
+        Span::styled(
+            fit_text_to_width(row.to, to_width, BODY_TEXT_TAB_WIDTH),
+            row_style,
+        ),
     ])
 }
 

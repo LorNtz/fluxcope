@@ -8,7 +8,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use crate::app::{ActionDialog, RULE_EDITOR_KEY_HINTS, RuleEditField, RuleEditorState};
+use crate::app::{
+    ActionDialog, BODY_TEXT_TAB_WIDTH, RULE_EDITOR_KEY_HINTS, RuleEditField, RuleEditorState,
+};
 
 use super::content::{
     SettingsFieldLayoutConfig, SettingsFieldRow, SettingsFieldRowWidget,
@@ -16,9 +18,8 @@ use super::content::{
 };
 use super::controls::{SETTING_TEXT_FIELD_HEIGHT, SettingsTextInputControl};
 use super::settings_key_hint_text;
-use super::text::fit_input_value;
 use crate::ui::chrome::centered_rect;
-use crate::ui::terminal_text::text_width;
+use crate::ui::terminal_text::{fit_text_to_width, text_width};
 
 pub(super) fn render_rule_editor_popup(
     frame: &mut Frame,
@@ -214,7 +215,7 @@ fn render_action_buttons(frame: &mut Frame, dialog: &ActionDialog, area: Rect) {
             horizontal: 1,
         });
         let label = if text_width(label) > label_area.width {
-            fit_input_value(label, usize::from(label_area.width))
+            fit_text_to_width(label, usize::from(label_area.width), BODY_TEXT_TAB_WIDTH)
         } else {
             label.clone()
         };

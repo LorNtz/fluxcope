@@ -87,8 +87,9 @@ impl SelectState {
         &self.filter
     }
 
-    pub(crate) fn filter_cursor(&self) -> usize {
-        self.filter_cursor
+    pub(crate) fn filter_prefix(&self) -> &str {
+        let end = byte_index_for_char(&self.filter, self.filter_cursor);
+        &self.filter[..end]
     }
 
     pub(crate) fn focused_filtered_index(&self) -> usize {

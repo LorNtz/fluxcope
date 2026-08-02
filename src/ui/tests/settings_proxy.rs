@@ -510,7 +510,7 @@ fn settings_popup_proxy_preset_dropdown_does_not_change_content_height() {
     assert_eq!(
         settings_select_control(&app.settings_popup, SelectTarget::ProxyPreset)
             .height_for_width(content_width),
-        crate::select_widget::SELECT_FIELD_HEIGHT
+        crate::ui::select_widget::SELECT_FIELD_HEIGHT
     );
 }
 
