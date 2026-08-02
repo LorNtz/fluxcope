@@ -1,35 +1,33 @@
-use crate::app::{
-    ActionDialog, App, FieldEditKind, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PanelFocus,
-    PopupFocus, ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS, RecordingWidget,
-    RequestTreeNodeSnapshot, RuleEditField, RuleEditorState, SelectTarget, SettingsKeyHint,
-    SettingsPaneFocus, SettingsPopup, SettingsScrollRequest, SettingsSelectId, SettingsTopic,
-};
+use crate::app::{App, PanelFocus, PopupFocus, RequestTreeNodeSnapshot};
 #[cfg(test)]
-use crate::app::{BODY_LOADING_TEXT, BodyViewerKey, MainDisplayTab, ProxyRow};
-use crate::select::{SelectItem, SelectState};
-use crate::select_widget::SelectWidget;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crate::app::{
+    BODY_LOADING_TEXT, BodyViewerKey, MainDisplayTab, ProxyRow, ProxyRuleTable, SelectTarget,
+    SettingsPaneFocus, SettingsPopup, SettingsTopic,
+};
+use crossterm::event::MouseEvent;
+#[cfg(test)]
+use crossterm::event::MouseEventKind;
 #[cfg(test)]
 use ratatui::symbols;
 use ratatui::{
     Frame,
-    buffer::Buffer,
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect, Size},
-    style::{Color, Modifier, Style},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{
-        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, StatefulWidget, Widget,
-    },
+    widgets::Paragraph,
 };
+#[cfg(test)]
+use ratatui::{
+    layout::{Margin, Position},
+    style::Modifier,
+};
+#[cfg(test)]
 use std::borrow::Cow;
-use tui_scrollview::{ScrollView, ScrollbarVisibility};
-use tui_textarea::{CursorMove, TextArea};
 
 mod certificate_popup;
 use certificate_popup::render_certificate_popup;
 mod chrome;
-use chrome::{base_panel_block, centered_rect, panel_block};
+use chrome::panel_block;
 mod detail;
 use detail::DetailView;
 #[cfg(test)]
@@ -42,9 +40,17 @@ use request_list::RequestListView;
 use request_list::build_request_tree_items;
 mod settings;
 #[cfg(test)]
-use settings::*;
+use settings::{
+    PEM_FILENAME_INPUT_WIDTH_COLS, PORT_INPUT_WIDTH_COLS, SETTING_TEXT_FIELD_HEIGHT,
+    SettingsContentItem, SettingsTextInputControl, TEXT_INPUT_CHROME_WIDTH, action_dialog_area,
+    proxy_rule_table_widget, rule_editor_area, settings_content_height,
+    settings_content_items_with_error, settings_field_layout, settings_popup_area,
+    settings_popup_layout, settings_select_control, settings_select_layout,
+    settings_table_max_height,
+};
 use settings::{handle_settings_popup_mouse, render_settings_popup};
 mod terminal_text;
+#[cfg(test)]
 use terminal_text::text_width;
 
 trait View {

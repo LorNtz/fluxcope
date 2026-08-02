@@ -13,7 +13,8 @@ use tui_textarea::{CursorMove, TextArea};
 use crate::app::{PrefilterPatternEditState, SettingsPopup};
 use crate::settings::RecordingPrefilterPatternSettings;
 
-use super::{RuleParentState, SettingsTableViewport, fit_input_value, settings_table_height};
+use super::tables::{RuleParentState, SettingsTableViewport, settings_table_height};
+use super::text::fit_input_value;
 
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
