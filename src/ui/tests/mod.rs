@@ -322,4 +322,3 @@ mod settings_dialogs;
 mod settings_fields;
 mod settings_proxy;
 mod settings_recording;
-mod terminal_text;

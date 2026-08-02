@@ -7,7 +7,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use super::{App, PopupFocus, centered_rect, text_width, wrap_text};
+use super::chrome::centered_rect;
+use super::terminal_text::{text_width, wrap_text};
+use super::{App, PopupFocus};
 
 pub(super) fn render_certificate_popup(frame: &mut Frame, app: &App) {
     let download_url = app.certificate_popup.download_url.as_deref();

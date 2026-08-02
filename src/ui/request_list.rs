@@ -10,7 +10,8 @@ use ratatui::{
 };
 use tui_tree_widget::{Tree, TreeItem};
 
-use super::{App, MouseHandler, PanelFocus, RequestTreeNodeSnapshot, View, panel_block};
+use super::chrome::panel_block;
+use super::{App, MouseHandler, PanelFocus, RequestTreeNodeSnapshot, View};
 
 pub(super) struct RequestListView {
     area: Rect,

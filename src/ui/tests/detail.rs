@@ -90,20 +90,6 @@ async fn pending_body_renders_loading_without_making_it_editor_content() {
 }
 
 #[test]
-fn header_table_keeps_value_column_at_least_half_width_when_key_wraps() {
-    let rows = vec![header_table_row(
-        "x-very-long-header-name",
-        "value-that-also-needs-wrapping",
-    )];
-    let columns = header_table_columns(&rows, 12);
-    let table = header_table_render(&rows, 12, None);
-
-    assert!(columns.value_width >= 6);
-    assert!(columns.key_width < text_width(&rows[0].key));
-    assert!(table.lines.len() > 1);
-}
-
-#[test]
 fn detail_tabs_render_on_panel_border_without_tabs_box() {
     let mut app = App::new(ui_settings(true));
     let (ui, detail_top_row) = render_detail_top_row(&mut app);

@@ -7,7 +7,8 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::{App, MouseHandler, PanelFocus, View, panel_block, render_scrollbar};
+use super::chrome::{panel_block, render_scrollbar};
+use super::{App, MouseHandler, PanelFocus, View};
 
 pub(super) struct LogView {
     area: Rect,
