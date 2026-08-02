@@ -18,7 +18,7 @@ use super::{RuleParentState, SettingsTableViewport, fit_input_value, settings_ta
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
 
-pub(super) struct PrefilterTableWidget<'a> {
+pub(in crate::ui) struct PrefilterTableWidget<'a> {
     patterns: &'a [RecordingPrefilterPatternSettings],
     parent_state: RuleParentState,
     selected: bool,
