@@ -155,7 +155,7 @@ fn rule_editor_footer_row(buffer: &Buffer) -> String {
 
 fn render_detail_top_row(app: &mut App) -> (RootView, String) {
     let (ui, buffer) = render_to_buffer(app);
-    let detail_area = ui.right_panel.detail.area();
+    let detail_area = ui.detail.area();
     let detail_top_row = buffer_row(&buffer, detail_area.y, detail_area.x, detail_area.width);
 
     (ui, detail_top_row)

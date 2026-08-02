@@ -77,7 +77,7 @@ pub struct RootView {
     area: Rect,
     status: StatusView,
     request_list: RequestListView,
-    right_panel: RightPanelView,
+    detail: DetailView,
     log: LogView,
     settings_popup: SettingsPopupView,
 }
@@ -88,7 +88,7 @@ impl RootView {
             area: Rect::default(),
             status: StatusView::new(),
             request_list: RequestListView::new(),
-            right_panel: RightPanelView::new(),
+            detail: DetailView::new(),
             log: LogView::new(),
             settings_popup: SettingsPopupView::new(),
         }
@@ -119,7 +119,7 @@ impl View for RootView {
             self.log.render(frame, app);
         } else {
             self.request_list.render(frame, app);
-            self.right_panel.render(frame, app);
+            self.detail.render(frame, app);
         }
 
         if app.certificate_popup.visible {
@@ -144,7 +144,7 @@ impl View for RootView {
         self.status.layout(root_chunks[0], app);
         if app.log_panel.visible {
             self.request_list.layout(Rect::default(), app);
-            self.right_panel.layout(Rect::default(), app);
+            self.detail.layout(Rect::default(), app);
             self.log.layout(root_chunks[1], app);
         } else {
             let chunks = Layout::default()
@@ -153,7 +153,7 @@ impl View for RootView {
                 .split(root_chunks[1]);
 
             self.request_list.layout(chunks[0], app);
-            self.right_panel.layout(chunks[1], app);
+            self.detail.layout(chunks[1], app);
             self.log.layout(Rect::default(), app);
         }
     }
@@ -172,7 +172,7 @@ impl MouseHandler for RootView {
         if app.log_panel.visible {
             self.log.handle_mouse(mouse, app)
         } else {
-            self.right_panel.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
+            self.detail.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
         }
     }
 }
@@ -224,42 +224,3 @@ impl View for StatusView {
 
 #[cfg(test)]
 mod tests;
-
-struct RightPanelView {
-    area: Rect,
-    detail: DetailView,
-}
-
-impl RightPanelView {
-    fn new() -> Self {
-        Self {
-            area: Rect::default(),
-            detail: DetailView::new(),
-        }
-    }
-}
-
-impl View for RightPanelView {
-    fn area(&self) -> Rect {
-        self.area
-    }
-
-    fn set_area(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    fn render(&mut self, frame: &mut Frame, app: &mut App) {
-        self.detail.render(frame, app);
-    }
-
-    fn layout(&mut self, area: Rect, app: &App) {
-        self.set_area(area);
-        self.detail.layout(area, app);
-    }
-}
-
-impl MouseHandler for RightPanelView {
-    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
-        self.detail.handle_mouse(mouse, app)
-    }
-}

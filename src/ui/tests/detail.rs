@@ -25,7 +25,7 @@ fn mapped_response_body_expands_tabs_only_for_paragraph_rendering() {
         app.cached_body_render_text(key),
         Some("{\n    \"route\": true\n}")
     );
-    assert!(find_buffer_text(&buffer, ui.right_panel.detail.area(), "\"route\": true").is_some());
+    assert!(find_buffer_text(&buffer, ui.detail.area(), "\"route\": true").is_some());
 
     assert!(app.enter_current_body_viewer());
     assert_eq!(
@@ -50,7 +50,7 @@ async fn pending_body_renders_loading_without_making_it_editor_content() {
     let (ui, buffer) = render_to_buffer(&mut app);
     let key = BodyViewerKey::new(CaptureSequence::new(0), MainDisplayTab::RequestBody);
 
-    assert!(find_buffer_text(&buffer, ui.right_panel.detail.area(), BODY_LOADING_TEXT).is_some());
+    assert!(find_buffer_text(&buffer, ui.detail.area(), BODY_LOADING_TEXT).is_some());
     assert!(app.cached_body_text(key).is_none());
     assert!(!app.enter_current_body_viewer());
     assert_eq!(app.detail_panel.scroll.offset, 4);
@@ -93,9 +93,9 @@ async fn pending_body_renders_loading_without_making_it_editor_content() {
 fn detail_tabs_render_on_panel_border_without_tabs_box() {
     let mut app = App::new(ui_settings(true));
     let (ui, detail_top_row) = render_detail_top_row(&mut app);
-    let detail_area = ui.right_panel.detail.area();
+    let detail_area = ui.detail.area();
 
-    assert_eq!(detail_area.y, ui.right_panel.area().y);
+    assert_eq!(detail_area.y, 3);
     assert!(
         detail_top_row.contains("Request Header"),
         "{detail_top_row:?}"
@@ -111,7 +111,7 @@ fn focused_detail_panel_keeps_unselected_tabs_default_color() {
     let mut app = App::new(ui_settings(true));
     app.focus_panel(PanelFocus::Detail);
     let (ui, buffer) = render_to_buffer(&mut app);
-    let detail_area = ui.right_panel.detail.area();
+    let detail_area = ui.detail.area();
     let selected_tab = tab_click_position(detail_area, MainDisplayTab::RequestHeader);
     let unselected_tab = tab_click_position(detail_area, MainDisplayTab::RequestBody);
 
@@ -156,7 +156,7 @@ fn mouse_request_switch_preserves_detail_viewport_position() {
     assert_eq!(app.detail_panel.scroll.offset, 4);
 
     let (ui, buffer) = render_to_buffer(&mut app);
-    let content_area = detail_content_area(ui.right_panel.detail.area());
+    let content_area = detail_content_area(ui.detail.area());
     let matching_row = find_buffer_text(&buffer, content_area, "second-2")
         .expect("matching header row should be rendered");
     assert_eq!(matching_row.y, content_area.y);
@@ -188,7 +188,7 @@ fn mouse_click_selects_detail_tab_on_panel_border() {
     let mut app = App::new(ui_settings(true));
     app.detail_panel.scroll.offset = 3;
     let mut ui = laid_out_ui(&app);
-    let position = tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
+    let position = tab_click_position(ui.detail.area(), MainDisplayTab::ResponseHeader);
 
     ui.handle_mouse(
         mouse(
@@ -204,8 +204,7 @@ fn mouse_click_selects_detail_tab_on_panel_border() {
     assert!(app.is_panel_focused(PanelFocus::Detail));
 
     app.detail_panel.scroll.offset = 2;
-    let request_header =
-        tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::RequestHeader);
+    let request_header = tab_click_position(ui.detail.area(), MainDisplayTab::RequestHeader);
     ui.handle_mouse(
         mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -238,7 +237,7 @@ fn mouse_click_selects_single_header_table_row_without_breaking_tabs() {
     app.add_request(req);
 
     let mut ui = laid_out_ui(&app);
-    let content_area = detail_content_area(ui.right_panel.detail.area());
+    let content_area = detail_content_area(ui.detail.area());
     let header_row = Position::new(content_area.x, content_area.y.saturating_add(2));
 
     ui.handle_mouse(
@@ -253,13 +252,13 @@ fn mouse_click_selects_single_header_table_row_without_breaking_tabs() {
     assert_eq!(app.detail_panel.selected_header_row, Some(2));
 
     let (mut ui, buffer) = render_to_buffer(&mut app);
-    let content_area = detail_content_area(ui.right_panel.detail.area());
+    let content_area = detail_content_area(ui.detail.area());
     assert_eq!(
         buffer[(content_area.x, content_area.y.saturating_add(2))].bg,
         Color::White
     );
 
-    let position = tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::RequestBody);
+    let position = tab_click_position(ui.detail.area(), MainDisplayTab::RequestBody);
     ui.handle_mouse(
         mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -284,7 +283,7 @@ fn entered_body_tab_renders_editor_content() {
     app.enter_current_body_viewer();
 
     let (ui, buffer) = render_to_buffer(&mut app);
-    let detail_area = ui.right_panel.detail.area();
+    let detail_area = ui.detail.area();
     let text_area = body_editor_text_area(detail_area);
 
     assert!(find_buffer_text(&buffer, text_area, "alpha beta").is_some());
@@ -305,8 +304,7 @@ fn body_editor_render_keeps_plain_body_tab_scroll_offset() {
     assert!(app.enter_current_body_viewer());
 
     let (mut ui, _) = render_to_buffer(&mut app);
-    let response_header =
-        tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
+    let response_header = tab_click_position(ui.detail.area(), MainDisplayTab::ResponseHeader);
     ui.handle_mouse(
         mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -315,8 +313,7 @@ fn body_editor_render_keeps_plain_body_tab_scroll_offset() {
         ),
         &mut app,
     );
-    let request_body =
-        tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::RequestBody);
+    let request_body = tab_click_position(ui.detail.area(), MainDisplayTab::RequestBody);
     ui.handle_mouse(
         mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -343,7 +340,7 @@ fn body_viewer_jump_overlay_labels_visible_match_and_jumps() {
     app.handle_key_event(key(KeyCode::Char('b')));
     app.handle_key_event(key(KeyCode::Char('e')));
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
     let label_position =
         find_buffer_text(&buffer, text_area, "aeta").expect("jump label should render");
 
@@ -369,7 +366,7 @@ fn body_viewer_jump_shows_safe_labels_after_first_query_char() {
     app.handle_key_event(key(KeyCode::Char('s')));
     app.handle_key_event(key(KeyCode::Char('b')));
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
     let label_position =
         find_buffer_text(&buffer, text_area, "ae").expect("jump label should render");
 
@@ -389,7 +386,7 @@ fn body_viewer_jump_skips_possible_refinement_chars_as_labels() {
     app.handle_key_event(key(KeyCode::Char('s')));
     app.handle_key_event(key(KeyCode::Char('b')));
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
 
     assert!(find_buffer_text(&buffer, text_area, "ee").is_none());
 }
@@ -413,7 +410,7 @@ fn body_viewer_jump_refines_query_when_possible_continuation_is_pressed() {
     assert_eq!(editor.cursor.col, 0);
 
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
     let label_position =
         find_buffer_text(&buffer, text_area, "ae").expect("refined jump label should render");
 
@@ -439,7 +436,7 @@ fn body_viewer_jump_label_h_takes_priority_over_editor_motion() {
     app.handle_key_event(key(KeyCode::Char('s')));
     app.handle_key_event(key(KeyCode::Char('b')));
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
     let label_position =
         find_buffer_text(&buffer, text_area, "he").expect("h jump label should render");
 
@@ -466,7 +463,7 @@ fn body_viewer_jump_query_can_refine_before_overlay_render() {
     app.handle_key_event(key(KeyCode::Char('b')));
     app.handle_key_event(key(KeyCode::Char('e')));
     let (ui, buffer) = render_to_buffer(&mut app);
-    let text_area = body_editor_text_area(ui.right_panel.detail.area());
+    let text_area = body_editor_text_area(ui.detail.area());
     let label_position =
         find_buffer_text(&buffer, text_area, "ae").expect("refined jump label should render");
 
