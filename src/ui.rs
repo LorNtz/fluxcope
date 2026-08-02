@@ -23,7 +23,6 @@ use ratatui::{
 };
 #[cfg(test)]
 use std::borrow::Cow;
-use std::cell::RefCell;
 
 mod certificate_popup;
 use certificate_popup::render_certificate_popup;
@@ -57,7 +56,7 @@ use terminal_text::text_width;
 trait View {
     fn area(&self) -> Rect;
     fn set_area(&mut self, area: Rect);
-    fn render(&self, frame: &mut Frame, app: &mut App);
+    fn render(&mut self, frame: &mut Frame, app: &mut App);
 
     fn layout(&mut self, area: Rect, _app: &App) {
         self.set_area(area);
@@ -69,7 +68,7 @@ trait View {
 }
 
 trait MouseHandler: View {
-    fn handle_mouse(&self, _mouse: MouseEvent, _app: &mut App) -> bool {
+    fn handle_mouse(&mut self, _mouse: MouseEvent, _app: &mut App) -> bool {
         false
     }
 }
@@ -80,7 +79,7 @@ pub struct RootView {
     request_list: RequestListView,
     right_panel: RightPanelView,
     log: LogView,
-    settings_popup: RefCell<SettingsPopupView>,
+    settings_popup: SettingsPopupView,
 }
 
 impl RootView {
@@ -91,7 +90,7 @@ impl RootView {
             request_list: RequestListView::new(),
             right_panel: RightPanelView::new(),
             log: LogView::new(),
-            settings_popup: RefCell::new(SettingsPopupView::new()),
+            settings_popup: SettingsPopupView::new(),
         }
     }
 
@@ -100,7 +99,7 @@ impl RootView {
         View::render(self, frame, app);
     }
 
-    pub fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) {
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) {
         let _ = MouseHandler::handle_mouse(self, mouse, app);
     }
 }
@@ -114,7 +113,7 @@ impl View for RootView {
         self.area = area;
     }
 
-    fn render(&self, frame: &mut Frame, app: &mut App) {
+    fn render(&mut self, frame: &mut Frame, app: &mut App) {
         self.status.render(frame, app);
         if app.log_panel.visible {
             self.log.render(frame, app);
@@ -128,9 +127,9 @@ impl View for RootView {
         }
 
         if app.settings_popup.visible {
-            self.settings_popup.borrow_mut().render(frame, app);
+            self.settings_popup.render(frame, app);
         } else {
-            self.settings_popup.borrow_mut().clear();
+            self.settings_popup.clear();
         }
     }
 
@@ -161,12 +160,9 @@ impl View for RootView {
 }
 
 impl MouseHandler for RootView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         if app.settings_popup.visible {
-            return self
-                .settings_popup
-                .borrow_mut()
-                .handle_mouse(mouse, app, self.area());
+            return self.settings_popup.handle_mouse(mouse, app, self.area());
         }
 
         if app.certificate_popup.visible {
@@ -202,7 +198,7 @@ impl View for StatusView {
         self.area = area;
     }
 
-    fn render(&self, frame: &mut Frame, app: &mut App) {
+    fn render(&mut self, frame: &mut Frame, app: &mut App) {
         let (icon, label, style) = if app.is_recording() {
             ("●", "Recording ON", Style::default().fg(Color::LightRed))
         } else {
@@ -252,7 +248,7 @@ impl View for RightPanelView {
         self.area = area;
     }
 
-    fn render(&self, frame: &mut Frame, app: &mut App) {
+    fn render(&mut self, frame: &mut Frame, app: &mut App) {
         self.detail.render(frame, app);
     }
 
@@ -263,7 +259,7 @@ impl View for RightPanelView {
 }
 
 impl MouseHandler for RightPanelView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         self.detail.handle_mouse(mouse, app)
     }
 }

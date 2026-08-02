@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
@@ -12,7 +10,7 @@ use super::{App, MouseHandler, PanelFocus, View};
 
 pub(super) struct LogView {
     area: Rect,
-    measurement: RefCell<Option<LogMeasurement>>,
+    measurement: Option<LogMeasurement>,
 }
 
 #[derive(Clone, Copy)]
@@ -26,7 +24,7 @@ impl LogView {
     pub(super) fn new() -> Self {
         Self {
             area: Rect::default(),
-            measurement: RefCell::new(None),
+            measurement: None,
         }
     }
 }
@@ -40,11 +38,10 @@ impl View for LogView {
         self.area = area;
     }
 
-    fn render(&self, frame: &mut Frame, app: &mut App) {
+    fn render(&mut self, frame: &mut Frame, app: &mut App) {
         let focused = app.is_panel_focused(PanelFocus::Log);
         let revision = app.log_panel.revision();
-        let measurement = *self.measurement.borrow();
-        let total_lines = match measurement {
+        let total_lines = match self.measurement {
             Some(measurement)
                 if measurement.revision == revision && measurement.width == self.area.width =>
             {
@@ -56,7 +53,7 @@ impl View for LogView {
                     .block(panel_block("Logs", focused));
                 let total_lines =
                     u16::try_from(paragraph.line_count(self.area.width)).unwrap_or(u16::MAX);
-                *self.measurement.borrow_mut() = Some(LogMeasurement {
+                self.measurement = Some(LogMeasurement {
                     revision,
                     width: self.area.width,
                     total_lines,
@@ -78,7 +75,7 @@ impl View for LogView {
 }
 
 impl MouseHandler for LogView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         if !self.contains_mouse(mouse) {
             return false;
         }

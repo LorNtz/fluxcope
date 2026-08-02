@@ -78,7 +78,7 @@ fn request_tree_mouse_scroll_stops_at_last_full_viewport() {
     for sequence in 0..12 {
         app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
     }
-    let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+    let (mut ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
 
     for _ in 0..20 {
         ui.handle_mouse(
@@ -107,7 +107,7 @@ fn request_tree_mouse_scroll_keeps_short_content_at_top() {
     let mut app = App::new(ui_settings(true));
     app.add_request(captured(0, "https://a.com/item0"));
     app.add_request(captured(1, "https://a.com/item1"));
-    let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+    let (mut ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
 
     for _ in 0..5 {
         ui.handle_mouse(
@@ -140,7 +140,7 @@ fn request_tree_taller_viewport_reclamps_scroll_offset() {
     for sequence in 0..12 {
         app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
     }
-    let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+    let (mut ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
     for _ in 0..20 {
         ui.handle_mouse(
             mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),
@@ -161,7 +161,7 @@ fn request_tree_fold_reclamps_scroll_offset_to_visible_rows() {
         app.add_request(captured(sequence, &format!("https://a.com/item{sequence}")));
     }
     app.add_request(captured(12, "https://b.com/item12"));
-    let (ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+    let (mut ui, _buffer) = render_to_buffer_with_size(&mut app, 100, 12);
     for _ in 0..20 {
         ui.handle_mouse(
             mouse_inside(MouseEventKind::ScrollDown, ui.request_list.area()),

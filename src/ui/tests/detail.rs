@@ -135,7 +135,7 @@ fn mouse_request_switch_preserves_detail_viewport_position() {
     app.add_request(first);
     app.add_request(second);
 
-    let (ui, buffer) = render_to_buffer(&mut app);
+    let (mut ui, buffer) = render_to_buffer(&mut app);
     let second_request = find_buffer_text(&buffer, ui.request_list.area(), "second")
         .expect("second request should be visible");
     app.detail_panel.scroll.offset = 4;
@@ -187,7 +187,7 @@ fn request_switch_clamps_preserved_detail_offset_to_shorter_content() {
 fn mouse_click_selects_detail_tab_on_panel_border() {
     let mut app = App::new(ui_settings(true));
     app.detail_panel.scroll.offset = 3;
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
     let position = tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
 
     ui.handle_mouse(
@@ -237,7 +237,7 @@ fn mouse_click_selects_single_header_table_row_without_breaking_tabs() {
     ];
     app.add_request(req);
 
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
     let content_area = detail_content_area(ui.right_panel.detail.area());
     let header_row = Position::new(content_area.x, content_area.y.saturating_add(2));
 
@@ -252,7 +252,7 @@ fn mouse_click_selects_single_header_table_row_without_breaking_tabs() {
 
     assert_eq!(app.detail_panel.selected_header_row, Some(2));
 
-    let (ui, buffer) = render_to_buffer(&mut app);
+    let (mut ui, buffer) = render_to_buffer(&mut app);
     let content_area = detail_content_area(ui.right_panel.detail.area());
     assert_eq!(
         buffer[(content_area.x, content_area.y.saturating_add(2))].bg,
@@ -304,7 +304,7 @@ fn body_editor_render_keeps_plain_body_tab_scroll_offset() {
     app.detail_panel.scroll.offset = 4;
     assert!(app.enter_current_body_viewer());
 
-    let (ui, _) = render_to_buffer(&mut app);
+    let (mut ui, _) = render_to_buffer(&mut app);
     let response_header =
         tab_click_position(ui.right_panel.detail.area(), MainDisplayTab::ResponseHeader);
     ui.handle_mouse(

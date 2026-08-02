@@ -131,9 +131,7 @@ impl SettingsPopupView {
             return true;
         };
 
-        if mouse::handle_settings_popup_mouse(mouse, app, hit_regions) {
-            self.hit_regions = None;
-        }
+        mouse::handle_settings_popup_mouse(mouse, app, hit_regions);
         true
     }
 }

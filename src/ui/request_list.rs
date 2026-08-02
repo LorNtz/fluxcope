@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet};
+use std::collections::HashSet;
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
@@ -15,7 +15,7 @@ use super::{App, MouseHandler, PanelFocus, RequestTreeNodeSnapshot, View};
 
 pub(super) struct RequestListView {
     area: Rect,
-    cache: RefCell<RequestTreeRenderCache>,
+    cache: RequestTreeRenderCache,
 }
 
 #[derive(Default)]
@@ -30,7 +30,7 @@ impl RequestListView {
     pub(super) fn new() -> Self {
         Self {
             area: Rect::default(),
-            cache: RefCell::new(RequestTreeRenderCache::default()),
+            cache: RequestTreeRenderCache::default(),
         }
     }
 }
@@ -44,35 +44,26 @@ impl View for RequestListView {
         self.area = area;
     }
 
-    fn render(&self, frame: &mut Frame, app: &mut App) {
+    fn render(&mut self, frame: &mut Frame, app: &mut App) {
         let revision = app.request_tree_revision();
-        let tree_changed = self.cache.borrow().revision != Some(revision);
+        let tree_changed = self.cache.revision != Some(revision);
         if tree_changed {
-            let items = build_request_tree_items(app);
-            let mut cache = self.cache.borrow_mut();
-            cache.revision = Some(revision);
-            cache.items = items;
+            self.cache.revision = Some(revision);
+            self.cache.items = build_request_tree_items(app);
         }
-        let opened_changed = {
-            let cache = self.cache.borrow();
-            cache.opened != *app.request_list.state.opened()
-        };
+        let opened_changed = self.cache.opened != *app.request_list.state.opened();
         if tree_changed || opened_changed {
-            let visible_rows = {
-                let cache = self.cache.borrow();
-                app.request_list.state.flatten(&cache.items).len()
-            };
-            let mut cache = self.cache.borrow_mut();
-            cache.opened.clone_from(app.request_list.state.opened());
-            cache.visible_rows = visible_rows;
+            self.cache.visible_rows = app.request_list.state.flatten(&self.cache.items).len();
+            self.cache
+                .opened
+                .clone_from(app.request_list.state.opened());
         }
-        let cache = self.cache.borrow();
         let focused = app.is_panel_focused(PanelFocus::RequestList);
         let block = panel_block("Requests", focused);
         let viewport_rows = usize::from(block.inner(self.area).height);
         app.request_list
-            .update_scroll_bounds(cache.visible_rows, viewport_rows);
-        let tree = Tree::new(&cache.items)
+            .update_scroll_bounds(self.cache.visible_rows, viewport_rows);
+        let tree = Tree::new(&self.cache.items)
             .expect("request tree identifiers are unique")
             .block(block)
             .highlight_style(Style::default().bg(Color::White).fg(Color::DarkGray))
@@ -90,7 +81,7 @@ impl View for RequestListView {
 }
 
 impl MouseHandler for RequestListView {
-    fn handle_mouse(&self, mouse: MouseEvent, app: &mut App) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         if !self.contains_mouse(mouse) {
             return false;
         }

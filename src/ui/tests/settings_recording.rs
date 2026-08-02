@@ -140,7 +140,7 @@ fn settings_popup_mouse_selects_prefilter_pattern_row() {
         RecordingPrefilterPatternSettings::new("https://first.example.com/*"),
         RecordingPrefilterPatternSettings::new("https://second.example.com/*"),
     ];
-    let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+    let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
     let content_area = settings_content_test_area(buffer.area);
     let second_pattern = find_buffer_text(&buffer, content_area, "https://second.example.com/*")
         .expect("second prefilter pattern should render");
@@ -178,7 +178,7 @@ fn settings_popup_mouse_toggles_prefilter_pattern_checkbox() {
         .include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
         "https://api.example.com/*",
     )];
-    let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+    let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
     let content_area = settings_content_test_area(buffer.area);
     let pattern = find_buffer_text(&buffer, content_area, "https://api.example.com/*")
         .expect("prefilter pattern should render");
@@ -218,7 +218,7 @@ fn settings_popup_mouse_wheel_scrolls_overflowing_prefilter_table() {
             RecordingPrefilterPatternSettings::new(format!("https://api.example.com/v{index}/*"))
         })
         .collect();
-    let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+    let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
     let content_area = settings_content_test_area(buffer.area);
     let title = find_buffer_text(&buffer, content_area, "Included URL Patterns")
         .expect("prefilter table should render");
@@ -250,7 +250,7 @@ fn settings_popup_mouse_rejects_stale_prefilter_table_scroll_mapping() {
             RecordingPrefilterPatternSettings::new(format!("https://api.example.com/v{index}/*"))
         })
         .collect();
-    let (ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+    let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
     let content_area = settings_content_test_area(buffer.area);
     let first_pattern = find_buffer_text(&buffer, content_area, "https://api.example.com/v0/*")
         .expect("first prefilter pattern should render");

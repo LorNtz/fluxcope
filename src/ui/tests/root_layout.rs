@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn mouse_movement_and_scroll_do_not_move_panel_focus() {
     let mut app = App::new(ui_settings(true));
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
 
     ui.handle_mouse(
         mouse_inside(MouseEventKind::Moved, ui.right_panel.detail.area()),
@@ -13,7 +13,7 @@ fn mouse_movement_and_scroll_do_not_move_panel_focus() {
 
     app.log_panel.visible = true;
     app.focus_panel(PanelFocus::Log);
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
     ui.handle_mouse(
         mouse_inside(MouseEventKind::ScrollDown, ui.log.area()),
         &mut app,
@@ -24,7 +24,7 @@ fn mouse_movement_and_scroll_do_not_move_panel_focus() {
 #[test]
 fn mouse_click_focuses_clicked_panel() {
     let mut app = App::new(ui_settings(true));
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
 
     ui.handle_mouse(mouse_down_inside(ui.right_panel.detail.area()), &mut app);
     assert!(app.is_panel_focused(PanelFocus::Detail));
@@ -33,7 +33,7 @@ fn mouse_click_focuses_clicked_panel() {
     assert!(app.is_panel_focused(PanelFocus::RequestList));
 
     app.log_panel.visible = true;
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
     ui.handle_mouse(mouse_down_inside(ui.log.area()), &mut app);
     assert!(app.is_panel_focused(PanelFocus::Log));
 }
@@ -41,7 +41,7 @@ fn mouse_click_focuses_clicked_panel() {
 #[test]
 fn status_panel_does_not_take_focus() {
     let mut app = App::new(ui_settings(true));
-    let ui = laid_out_ui(&app);
+    let mut ui = laid_out_ui(&app);
 
     ui.handle_mouse(mouse_down_inside(ui.status.area()), &mut app);
 
