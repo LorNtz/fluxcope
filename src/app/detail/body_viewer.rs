@@ -16,7 +16,8 @@ use edtui::{
 };
 use ratatui::layout::{Position, Rect};
 
-use super::{App, panels::MainDisplayTab};
+use super::super::App;
+use super::MainDisplayTab;
 use crate::capture::{
     BodySide, BodyStreamState, CaptureRecord, CaptureSequence, DecodeDisplayMode, DecodeKey,
     DecodeResult,

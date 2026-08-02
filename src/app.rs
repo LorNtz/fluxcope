@@ -1,4 +1,4 @@
-mod body_viewer;
+mod detail;
 mod focus;
 mod input;
 mod panels;
@@ -21,11 +21,12 @@ use crate::{
 use focus::FocusState;
 use request_tree::RequestTreeModel;
 
-pub use body_viewer::BodyViewerKey;
-pub(crate) use body_viewer::{BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyDisplayPreparation};
+pub(crate) use detail::{
+    BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyDisplayPreparation, BodyRenderText,
+};
+pub use detail::{BodyViewerKey, DetailPanel, MainDisplayTab};
 pub use focus::{PanelFocus, PopupFocus};
-pub(crate) use panels::BodyRenderText;
-pub use panels::{CertificatePopup, DetailPanel, LogPanel, MainDisplayTab, RequestListPanel};
+pub use panels::{CertificatePopup, LogPanel, RequestListPanel};
 pub(crate) use request_tree::RequestTreeNodeSnapshot;
 #[cfg(test)]
 pub(crate) use settings_popup::ProxyRow;
