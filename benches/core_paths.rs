@@ -2,7 +2,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group};
 use hyper::Method;
 use wirelens::{
     benchmark_support::{
-        ordered_capture_store, request_tree_build_and_snapshot, retained_log_join,
+        ordered_capture_store, request_search_fixture, request_search_rapid_supersession,
+        request_tree_build_and_snapshot, request_tree_search, retained_log_join,
         yaml_semantic_preservation,
     },
     capture::{CaptureSequence, CapturedExchange},
@@ -20,6 +21,21 @@ fn capture(sequence: u64) -> CapturedExchange {
         res_headers: Vec::new(),
         req_body: None,
         res_body: None,
+    }
+}
+
+fn search_capture(sequence: u64) -> CapturedExchange {
+    CapturedExchange {
+        uri: format!("https://example.com/api/items/item{sequence}"),
+        ..capture(sequence)
+    }
+}
+
+fn unicode_capture(sequence: u64) -> CapturedExchange {
+    CapturedExchange {
+        uri: format!("/unicode/Straße{sequence}"),
+        req_headers: vec![("host".to_string(), "example.com".to_string())],
+        ..capture(sequence)
     }
 }
 
@@ -97,6 +113,36 @@ fn refactored_core_paths(c: &mut Criterion) {
         });
     }
     yaml_group.finish();
+
+    let mut search_group = c.benchmark_group("request tree search");
+    search_group.sample_size(10);
+    search_group.measurement_time(std::time::Duration::from_secs(2));
+    for size in [1_000_u64, 10_000] {
+        let fixture = request_search_fixture((0..size).map(search_capture).collect());
+        let unicode_fixture = request_search_fixture((0..size).map(unicode_capture).collect());
+        search_group.throughput(Throughput::Elements(size));
+        search_group.bench_with_input(BenchmarkId::new("no matches", size), &size, |b, _| {
+            b.iter(|| request_tree_search(black_box(&fixture), black_box("absent")))
+        });
+        search_group.bench_with_input(BenchmarkId::new("sparse", size), &size, |b, &size| {
+            let query = (size - 1).to_string();
+            b.iter(|| request_tree_search(black_box(&fixture), black_box(&query)))
+        });
+        search_group.bench_with_input(BenchmarkId::new("all leaves", size), &size, |b, _| {
+            b.iter(|| request_tree_search(black_box(&fixture), black_box("item")))
+        });
+        search_group.bench_with_input(BenchmarkId::new("unicode folding", size), &size, |b, _| {
+            b.iter(|| request_tree_search(black_box(&unicode_fixture), black_box("STRASSE")))
+        });
+        search_group.bench_with_input(
+            BenchmarkId::new("rapid supersession", size),
+            &size,
+            |b, _| {
+                b.iter(|| request_search_rapid_supersession(black_box(&fixture), black_box(100)))
+            },
+        );
+    }
+    search_group.finish();
 }
 
 criterion_group!(benches, capture_insertion, refactored_core_paths);

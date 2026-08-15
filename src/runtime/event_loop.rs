@@ -2,12 +2,18 @@ use std::{io, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::{mpsc, watch},
+    time,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -23,6 +29,7 @@ use crate::{
     },
     logging::{LogRecord, LoggingMetrics, LoggingMetricsSnapshot, LoggingStatus},
     request_policy::RequestPolicyStore,
+    request_search::{RequestSearchClient, RequestSearchDispatch, SearchJobOutcome},
     settings::SettingsManager,
     ui::RootView,
 };
@@ -42,6 +49,8 @@ pub(super) struct AppRuntime {
     decode_rx: mpsc::Receiver<DecodeResult>,
     decode_metrics: Arc<DecodeMetrics>,
     last_decode_metrics: DecodeMetricsSnapshot,
+    request_search: RequestSearchClient,
+    request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
     tui: Tui,
     settings: SettingsManager,
     request_policy_store: RequestPolicyStore,
@@ -62,6 +71,8 @@ impl AppRuntime {
         capture_metrics: Arc<CaptureMetrics>,
         decode_rx: mpsc::Receiver<DecodeResult>,
         decode_metrics: Arc<DecodeMetrics>,
+        request_search: RequestSearchClient,
+        request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
         tui: Tui,
         settings: SettingsManager,
         request_policy_store: RequestPolicyStore,
@@ -84,6 +95,8 @@ impl AppRuntime {
             decode_rx,
             decode_metrics,
             last_decode_metrics: DecodeMetricsSnapshot::default(),
+            request_search,
+            request_search_results,
             tui,
             settings,
             request_policy_store,
@@ -116,6 +129,7 @@ impl AppRuntime {
         let mut logs_open = true;
         let mut logging_status_open = true;
         let mut decode_results_open = true;
+        let mut request_search_results_open = true;
 
         loop {
             tokio::select! {
@@ -152,6 +166,17 @@ impl AppRuntime {
                     match result {
                         Some(result) => dirty |= self.app.apply_decode_result(result),
                         None => decode_results_open = false,
+                    }
+                }
+                changed = self.request_search_results.changed(), if request_search_results_open => {
+                    match changed {
+                        Ok(()) => {
+                            let outcome = self.request_search_results.borrow_and_update().clone();
+                            if let Some(outcome) = outcome {
+                                dirty |= self.app.apply_request_search_outcome(&outcome);
+                            }
+                        }
+                        Err(_) => request_search_results_open = false,
                     }
                 }
                 record = self.log_rx.recv(), if logs_open => {
@@ -207,6 +232,10 @@ impl AppRuntime {
                             completion.result?;
                             return Err(anyhow!("decode service exited unexpectedly"));
                         }
+                        ServiceKind::RequestSearch => {
+                            completion.result?;
+                            return Err(anyhow!("request search service exited unexpectedly"));
+                        }
                     }
                 }
                 _ = metrics_tick.tick() => {
@@ -237,23 +266,31 @@ impl AppRuntime {
             if dirty {
                 let _ = self.app.prepare_current_body_display(Instant::now());
             }
+            self.dispatch_pending_request_search();
         }
     }
 
     fn handle_terminal_event(&mut self, event: Event) -> bool {
         match event {
-            Event::Key(key)
-                if key.modifiers == KeyModifiers::CONTROL
-                    && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) =>
-            {
-                true
-            }
+            Event::Key(key) if is_runtime_quit_key(key) => true,
             Event::Key(key) => self.app.handle_key_event(key),
             Event::Mouse(mouse) => {
                 self.ui.handle_mouse(mouse, &mut self.app);
                 false
             }
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => false,
+            Event::Paste(pasted) => {
+                self.app.handle_request_search_paste(&pasted);
+                false
+            }
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => false,
+        }
+    }
+
+    fn dispatch_pending_request_search(&mut self) {
+        match self.app.take_request_search_dispatch() {
+            Some(RequestSearchDispatch::Run(request)) => self.request_search.submit(request),
+            Some(RequestSearchDispatch::Cancel) => self.request_search.cancel(),
+            None => {}
         }
     }
 
@@ -336,6 +373,11 @@ impl AppRuntime {
     }
 }
 
+fn is_runtime_quit_key(key: crossterm::event::KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::CONTROL
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FrameRenderOutcome {
     Deferred,
@@ -374,12 +416,14 @@ impl Tui {
         if let Err(error) = execute!(
             terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableMouseCapture,
+            EnableBracketedPaste
         ) {
             let _ = execute!(
                 terminal.backend_mut(),
                 LeaveAlternateScreen,
-                DisableMouseCapture
+                DisableMouseCapture,
+                DisableBracketedPaste
             );
             let _ = disable_raw_mode();
             return Err(error);
@@ -400,7 +444,8 @@ impl Drop for Tui {
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         );
     }
 }
@@ -483,5 +528,23 @@ mod tests {
         assert_eq!(outcome, FrameRenderOutcome::Drawn);
         assert!(!dirty);
         assert_eq!(draws, 1);
+    }
+
+    #[test]
+    fn ctrl_c_remains_the_runtime_quit_chord() {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+
+        for character in ['c', 'C'] {
+            assert!(is_runtime_quit_key(KeyEvent {
+                code: KeyCode::Char(character),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }));
+        }
+        assert!(!is_runtime_quit_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
     }
 }

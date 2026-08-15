@@ -2,10 +2,12 @@ mod detail;
 mod focus;
 mod input;
 mod panels;
+mod request_list_search;
 mod request_tree;
 mod requests;
 mod settings_draft;
 mod settings_popup;
+mod single_line_input;
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +21,9 @@ use crate::{
     settings::AppSettings,
 };
 use focus::FocusState;
-use request_tree::RequestTreeModel;
+use request_list_search::RequestListSearch;
+pub(crate) use request_tree::RequestTreeModel;
+use std::sync::Arc;
 
 pub(crate) use detail::{
     BODY_LOADING_TEXT, BODY_TEXT_TAB_WIDTH, BodyDisplayPreparation, BodyRenderText,
@@ -27,6 +31,7 @@ pub(crate) use detail::{
 pub use detail::{BodyViewerKey, DetailPanel, MainDisplayTab};
 pub use focus::{PanelFocus, PopupFocus};
 pub use panels::{CertificatePopup, LogPanel, RequestListPanel};
+pub(crate) use request_list_search::SearchTitleStatus;
 pub(crate) use request_tree::RequestTreeNodeSnapshot;
 #[cfg(test)]
 pub(crate) use settings_popup::ProxyRow;
@@ -79,8 +84,9 @@ pub struct App {
     settings: AppSettings,
     pending_settings_save: Option<AppSettings>,
     decode_client: Option<DecodeClient>,
-    request_tree: RequestTreeModel,
+    request_tree: Arc<RequestTreeModel>,
     request_tree_revision: u64,
+    request_search: RequestListSearch,
 }
 
 impl App {
@@ -145,8 +151,9 @@ impl App {
             settings,
             pending_settings_save: None,
             decode_client: None,
-            request_tree: RequestTreeModel::default(),
+            request_tree: Arc::new(RequestTreeModel::default()),
             request_tree_revision: 0,
+            request_search: RequestListSearch::default(),
         }
     }
 

@@ -2855,6 +2855,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b844d17643ee918803943289730bec8aac480150456169e647ed0b576ba539"
 
 [[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3387,6 +3393,7 @@ dependencies = [
  "tui-scrollview",
  "tui-textarea",
  "tui-tree-widget",
+ "unicode-casefold",
  "unicode-segmentation",
  "unicode-width 0.2.0",
  "url",

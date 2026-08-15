@@ -16,6 +16,11 @@ impl App {
             return false;
         }
 
+        if self.request_search.is_editing() {
+            self.handle_request_search_edit_key(key);
+            return false;
+        }
+
         if self.is_panel_focused(PanelFocus::Detail) && self.detail_panel.body_viewer.is_active() {
             self.detail_panel.body_viewer.handle_key(key);
             return false;
@@ -122,6 +127,14 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('/') => self.begin_request_search(),
+            KeyCode::Esc if self.clear_committed_request_search() => {}
+            KeyCode::Char('n') => {
+                self.navigate_request_search(true);
+            }
+            KeyCode::Char('p') => {
+                self.navigate_request_search(false);
+            }
             KeyCode::Char('j') | KeyCode::Down => self.next(),
             KeyCode::Char('k') | KeyCode::Up => self.previous(),
             KeyCode::Char('h') | KeyCode::Left => {

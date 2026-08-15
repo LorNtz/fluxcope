@@ -9,6 +9,7 @@ pub(super) enum ServiceKind {
     Logger,
     BodyPumps,
     Decoder,
+    RequestSearch,
 }
 
 #[derive(Debug)]

@@ -32,6 +32,7 @@ use crate::{
     request_policy::{
         RequestPolicy, RequestPolicyDiagnostic, RequestPolicyDiagnosticSeverity, RequestPolicyStore,
     },
+    request_search::start_request_search_service,
     settings::{AppSettings, SettingsManager},
 };
 use event_loop::{AppRuntime, Tui};
@@ -75,6 +76,7 @@ pub async fn run() -> Result<()> {
     let capture_dirty = capture_publisher.dirty_signal();
     let body_tasks = BodyTaskTracker::new(shutdown.child_token());
     let decode = start_decode_service(policy.decode.clone(), shutdown.child_token());
+    let request_search = start_request_search_service(shutdown.child_token());
 
     let certificate_store_dir = settings
         .certificate_store_dir()
@@ -142,6 +144,7 @@ pub async fn run() -> Result<()> {
         tokio::spawn(body_tasks.wait_for_shutdown(policy.render.shutdown_grace)),
     );
     services.track_result(ServiceKind::Decoder, decode.task);
+    services.track_result(ServiceKind::RequestSearch, request_search.task);
 
     AppRuntime::new(
         app,
@@ -153,6 +156,8 @@ pub async fn run() -> Result<()> {
         capture_metrics,
         decode.results,
         decode.metrics,
+        request_search.client,
+        request_search.results,
         tui,
         settings,
         request_policy_store,

@@ -114,7 +114,7 @@ fn terminal_text_width(text: &str) -> usize {
     })
 }
 
-fn terminal_grapheme_width(grapheme: &str) -> usize {
+pub(super) fn terminal_grapheme_width(grapheme: &str) -> usize {
     if grapheme == "\t" {
         BODY_TEXT_TAB_WIDTH
     } else {
@@ -238,6 +238,10 @@ fn fitted_text(value: &str, width: usize, tab_width: usize) -> FittedText<'_> {
         text: output.map_or(Cow::Borrowed(value), Cow::Owned),
         cell_width: value_width,
     }
+}
+
+pub(super) fn truncate_text_to_width(value: &str, width: usize) -> String {
+    fitted_text(value, width, 1).text.into_owned()
 }
 
 pub(super) fn fit_text(value: &str, width: usize, tab_width: usize) -> Cow<'_, str> {

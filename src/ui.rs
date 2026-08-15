@@ -172,6 +172,8 @@ impl MouseHandler for RootView {
 
         if app.log_panel.visible {
             self.log.handle_mouse(mouse, app)
+        } else if app.is_request_search_editing() {
+            self.request_list.handle_mouse(mouse, app)
         } else {
             self.detail.handle_mouse(mouse, app) || self.request_list.handle_mouse(mouse, app)
         }

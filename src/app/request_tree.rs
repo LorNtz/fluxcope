@@ -1,6 +1,7 @@
 use crate::capture::{CaptureSequence, CaptureSummary};
 use std::{
     collections::{HashMap, HashSet},
+    ops::ControlFlow,
     sync::Arc,
 };
 use url::Url;
@@ -30,10 +31,35 @@ struct RequestNode {
     leaf_count: usize,
 }
 
+#[derive(Clone, Debug)]
+enum PathHashEntry {
+    One(RequestNodeId),
+    Collision(Vec<RequestNodeId>),
+}
+
+impl PathHashEntry {
+    fn push(&mut self, id: RequestNodeId) {
+        match self {
+            Self::One(first) => *self = Self::Collision(vec![*first, id]),
+            Self::Collision(ids) => ids.push(id),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = RequestNodeId> + '_ {
+        let (first, rest) = match self {
+            Self::One(id) => (Some(*id), &[][..]),
+            Self::Collision(ids) => (None, ids.as_slice()),
+        };
+        first.into_iter().chain(rest.iter().copied())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-pub(in crate::app) struct RequestTreeModel {
+pub(crate) struct RequestTreeModel {
     roots: Vec<RequestNodeId>,
     nodes: Vec<RequestNode>,
+    logical_positions: Vec<usize>,
+    nodes_by_path_hash: HashMap<u64, PathHashEntry>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,9 +72,7 @@ pub(crate) struct RequestTreeNodeSnapshot {
 }
 
 impl RequestTreeModel {
-    pub(in crate::app) fn from_requests(
-        requests: impl IntoIterator<Item = CaptureSummary>,
-    ) -> Self {
+    pub(crate) fn from_requests(requests: impl IntoIterator<Item = CaptureSummary>) -> Self {
         let mut model = Self::default();
         let mut interner = HashMap::<String, Arc<str>>::new();
         let mut branches = HashMap::<(Option<RequestNodeId>, Arc<str>), RequestNodeId>::new();
@@ -82,6 +106,7 @@ impl RequestTreeModel {
             );
             model.insert_capture(parent, label, capture.sequence);
         }
+        model.rebuild_search_index();
         model
     }
 
@@ -158,8 +183,35 @@ impl RequestTreeModel {
         visible
     }
 
-    pub(in crate::app) fn contains(&self, path: &[String]) -> bool {
-        self.find(path).is_some()
+    pub(crate) fn contains(&self, path: &[String]) -> bool {
+        self.logical_position(path).is_some()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub(crate) fn logical_position(&self, path: &[String]) -> Option<usize> {
+        let hash = hash_path(path.iter().map(String::as_str));
+        self.nodes_by_path_hash.get(&hash)?.iter().find_map(|id| {
+            self.node_matches_path(id, path)
+                .then_some(self.logical_positions[id.0 as usize])
+        })
+    }
+
+    pub(crate) fn visit_logical_nodes(
+        &self,
+        mut visitor: impl FnMut(usize, &Arc<str>, &[Arc<str>]) -> ControlFlow<()>,
+    ) -> bool {
+        let mut path = Vec::new();
+        Self::visit_nodes(
+            &self.nodes,
+            &self.logical_positions,
+            &self.roots,
+            &mut path,
+            &mut visitor,
+        )
+        .is_continue()
     }
 
     pub(in crate::app) fn sequences_under(&self, path: &[String]) -> Vec<CaptureSequence> {
@@ -291,6 +343,103 @@ impl RequestTreeModel {
                 .collect(),
         }
     }
+
+    fn rebuild_search_index(&mut self) {
+        let mut logical_positions = vec![0; self.nodes.len()];
+        let mut nodes_by_path_hash = HashMap::<u64, PathHashEntry>::new();
+        let mut next_position = 0_usize;
+        Self::index_nodes(
+            &self.nodes,
+            &self.roots,
+            PATH_HASH_OFFSET,
+            &mut next_position,
+            &mut logical_positions,
+            &mut nodes_by_path_hash,
+        );
+        self.logical_positions = logical_positions;
+        self.nodes_by_path_hash = nodes_by_path_hash;
+    }
+
+    fn index_nodes(
+        nodes: &[RequestNode],
+        ids: &[RequestNodeId],
+        parent_hash: u64,
+        next_position: &mut usize,
+        logical_positions: &mut [usize],
+        nodes_by_path_hash: &mut HashMap<u64, PathHashEntry>,
+    ) {
+        for id in ids {
+            let node = &nodes[id.0 as usize];
+            let path_hash = extend_path_hash(parent_hash, &node.identifier);
+            logical_positions[id.0 as usize] = *next_position;
+            *next_position = next_position.saturating_add(1);
+            nodes_by_path_hash
+                .entry(path_hash)
+                .and_modify(|entry| entry.push(*id))
+                .or_insert(PathHashEntry::One(*id));
+            Self::index_nodes(
+                nodes,
+                &node.children,
+                path_hash,
+                next_position,
+                logical_positions,
+                nodes_by_path_hash,
+            );
+        }
+    }
+
+    fn visit_nodes(
+        nodes: &[RequestNode],
+        logical_positions: &[usize],
+        ids: &[RequestNodeId],
+        path: &mut Vec<Arc<str>>,
+        visitor: &mut impl FnMut(usize, &Arc<str>, &[Arc<str>]) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        for id in ids {
+            let node = &nodes[id.0 as usize];
+            path.push(Arc::clone(&node.identifier));
+            visitor(logical_positions[id.0 as usize], &node.label, path)?;
+            Self::visit_nodes(nodes, logical_positions, &node.children, path, visitor)?;
+            path.pop();
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn node_matches_path(&self, mut id: RequestNodeId, path: &[String]) -> bool {
+        let mut identifiers = path.iter().rev();
+        loop {
+            let node = &self.nodes[id.0 as usize];
+            if identifiers.next().map(String::as_str) != Some(node.identifier.as_ref()) {
+                return false;
+            }
+            let Some(parent) = node.parent else {
+                return identifiers.next().is_none();
+            };
+            id = parent;
+        }
+    }
+}
+
+const PATH_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const PATH_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_path<'a>(identifiers: impl IntoIterator<Item = &'a str>) -> u64 {
+    identifiers
+        .into_iter()
+        .fold(PATH_HASH_OFFSET, extend_path_hash)
+}
+
+fn extend_path_hash(mut hash: u64, identifier: &str) -> u64 {
+    for byte in identifier
+        .len()
+        .to_le_bytes()
+        .iter()
+        .chain(identifier.as_bytes())
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PATH_HASH_PRIME);
+    }
+    hash
 }
 
 fn intern(interner: &mut HashMap<String, Arc<str>>, value: String) -> Arc<str> {

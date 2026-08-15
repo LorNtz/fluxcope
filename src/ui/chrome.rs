@@ -26,6 +26,10 @@ pub(super) fn panel_block(title: &'static str, focused: bool) -> Block<'static> 
     base_panel_block(focused).title(title)
 }
 
+pub(super) fn panel_block_owned(title: String, focused: bool) -> Block<'static> {
+    base_panel_block(focused).title(title)
+}
+
 pub(super) fn base_panel_block(focused: bool) -> Block<'static> {
     let block = Block::default()
         .borders(Borders::ALL)

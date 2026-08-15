@@ -8,6 +8,7 @@ mod mapping;
 mod proxy_handler;
 mod recording;
 mod request_policy;
+mod request_search;
 mod runtime;
 mod select;
 mod settings;

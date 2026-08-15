@@ -31,9 +31,11 @@ impl App {
         }
 
         if self.request_list.auto_expand {
-            self.request_list.open_entry(&tree_entry);
+            for branch in tree_entry.branch_paths() {
+                self.note_auto_expand_opening(branch);
+            }
         }
-        if was_empty {
+        if was_empty && !self.request_search.is_active() {
             if self.request_list.auto_expand {
                 self.request_list.select_entry(&tree_entry);
             } else {
@@ -314,12 +316,13 @@ impl App {
         self.request_tree_revision
     }
 
-    fn ensure_request_tree_model(&mut self) {
+    pub(in crate::app) fn ensure_request_tree_model(&mut self) {
         let revision = self.captures.revision();
         if revision == self.request_tree_revision {
             return;
         }
-        self.request_tree = RequestTreeModel::from_requests(self.captures());
+        self.request_tree = Arc::new(RequestTreeModel::from_requests(self.captures()));
         self.request_tree_revision = revision;
+        self.request_search.refresh_for_tree(revision);
     }
 }

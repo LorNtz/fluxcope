@@ -48,12 +48,6 @@ impl RequestListPanel {
         }
     }
 
-    pub(in crate::app) fn open_entry(&mut self, entry: &RequestTreeEntry) {
-        for branch in entry.branch_paths() {
-            self.state.open(branch);
-        }
-    }
-
     pub(in crate::app) fn select_entry(&mut self, entry: &RequestTreeEntry) {
         self.state.select(entry.request_path());
     }
@@ -88,6 +82,15 @@ impl RequestListPanel {
 
     pub fn scroll_up(&mut self) -> bool {
         self.state.scroll_up(1)
+    }
+
+    pub(in crate::app) fn restore_scroll_offset(&mut self, offset: usize) {
+        let current = self.state.get_offset();
+        if current < offset {
+            self.state.scroll_down(offset - current);
+        } else {
+            self.state.scroll_up(current - offset);
+        }
     }
 }
 
