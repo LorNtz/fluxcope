@@ -3,6 +3,7 @@ mod app;
 pub mod benchmark_support;
 mod ca;
 pub mod capture;
+mod cli;
 mod logging;
 mod mapping;
 mod private_fs;
