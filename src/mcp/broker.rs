@@ -48,6 +48,7 @@ use super::{
 };
 
 const PUBLIC_CALL_LIMIT: usize = 32;
+const BLOCKING_SCAN_LIMIT: usize = 32;
 const LIVENESS_PROBE_LIMIT: usize = 16;
 const AMBIGUOUS_INSTANCE_LIMIT: usize = 16;
 const ORDINARY_DEADLINE: Duration = Duration::from_secs(30);
@@ -87,7 +88,12 @@ pub(crate) struct LiveDiscoveryReport {
 pub(crate) trait RegistryAccess: Send + Sync + 'static {
     fn scan_all(&self) -> io::Result<RegistryScan>;
     fn read_endpoint(&self, endpoint: SocketAddr) -> io::Result<RegistryScan>;
-    fn prune_if_current(&self, descriptor: &InstanceDescriptor) -> io::Result<bool>;
+    fn prune_batch_if_current(
+        &self,
+        descriptors: &[InstanceDescriptor],
+        deadline: Instant,
+        cancelled: &CancellationToken,
+    ) -> io::Result<usize>;
 }
 
 impl RegistryAccess for RegistryScanner {
@@ -99,35 +105,40 @@ impl RegistryAccess for RegistryScanner {
         RegistryScanner::read_endpoint(self, endpoint)
     }
 
-    fn prune_if_current(&self, descriptor: &InstanceDescriptor) -> io::Result<bool> {
-        self.remove_stale_if_current(descriptor)
+    fn prune_batch_if_current(
+        &self,
+        descriptors: &[InstanceDescriptor],
+        deadline: Instant,
+        cancelled: &CancellationToken,
+    ) -> io::Result<usize> {
+        self.remove_stale_batch_if_current(descriptors, deadline.into_std(), cancelled, || {})
     }
 }
 
 pub(crate) trait InstanceProbe: Send + Sync + 'static {
-    fn describe(
-        &self,
-        descriptor: InstanceDescriptor,
+    fn describe<'a>(
+        &'a self,
+        descriptor: &'a InstanceDescriptor,
         client: DeclaredClient,
         deadline: Instant,
         cancelled: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>>;
 }
 
 #[derive(Debug)]
 struct ControlRpcProbe;
 
 impl InstanceProbe for ControlRpcProbe {
-    fn describe(
-        &self,
-        descriptor: InstanceDescriptor,
+    fn describe<'a>(
+        &'a self,
+        descriptor: &'a InstanceDescriptor,
         client: DeclaredClient,
         deadline: Instant,
         cancelled: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>> {
         Box::pin(async move {
             ControlRpcClient::call(
-                &descriptor,
+                descriptor,
                 ControlOperation::DescribeInstance,
                 deadline.into_std(),
                 client,
@@ -159,6 +170,7 @@ pub(crate) struct Broker {
     probe: Arc<dyn InstanceProbe>,
     call_admission: Arc<Semaphore>,
     probe_admission: Arc<Semaphore>,
+    scan_admission: Arc<Semaphore>,
     telemetry: Arc<BrokerTelemetry>,
 }
 
@@ -185,7 +197,7 @@ fn empty_tool_schema() -> Arc<rmcp::model::JsonObject> {
 #[tool_router(router = tool_router)]
 impl Broker {
     pub(crate) fn new(wirelens_home: &Path) -> io::Result<Self> {
-        let registry = Arc::new(RegistryScanner::new(wirelens_home)?);
+        let registry = Arc::new(RegistryScanner::initialize(wirelens_home)?);
         Ok(Self::with_dependencies(
             wirelens_home.join("run").join("instances"),
             registry,
@@ -209,6 +221,7 @@ impl Broker {
             probe,
             call_admission: Arc::new(Semaphore::new(PUBLIC_CALL_LIMIT)),
             probe_admission: Arc::new(Semaphore::new(LIVENESS_PROBE_LIMIT)),
+            scan_admission: Arc::new(Semaphore::new(BLOCKING_SCAN_LIMIT)),
             telemetry: Arc::new(BrokerTelemetry::default()),
         }
     }
@@ -270,7 +283,28 @@ impl Broker {
             ));
         }
         let endpoint = selector.proxy_endpoint;
-        let scan = self.scan(endpoint, deadline, cancelled.clone()).await?;
+        let mut scan = self.scan(endpoint, deadline, cancelled.clone()).await?;
+        if let Some(run_id) = selector.run_id.as_ref() {
+            if let Some(endpoint) = endpoint {
+                if let Some(current) = scan.candidates.first()
+                    && current.run_id() != run_id
+                {
+                    return Err(ControlError::new(
+                        ControlErrorCode::InstanceGenerationConflict,
+                        "selected endpoint belongs to a different run",
+                        false,
+                        json!({
+                            "proxy_endpoint": endpoint,
+                            "requested_run_id": run_id,
+                            "current_run_id": current.run_id(),
+                        }),
+                    ));
+                }
+            } else {
+                scan.candidates
+                    .retain(|descriptor| descriptor.run_id() == run_id);
+            }
+        }
         let report = self.probe_scan(scan, client, deadline, cancelled).await?;
         self.select(selector, report, deadline)
     }
@@ -367,10 +401,25 @@ impl Broker {
         deadline: Instant,
         cancelled: CancellationToken,
     ) -> Result<RegistryScan, McpDomainError> {
+        let permit = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => {
+                self.telemetry.record_cancelled_call();
+                return Err(ControlError::cancelled("registry scan admission cancelled"));
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(ControlError::deadline_exceeded("registry scan admission deadline elapsed"));
+            }
+            permit = Arc::clone(&self.scan_admission).acquire_owned() => permit
+                .map_err(|_| ControlError::service_unavailable("registry scan admission closed"))?,
+        };
         let registry = Arc::clone(&self.registry);
-        let task = tokio::task::spawn_blocking(move || match endpoint {
-            Some(endpoint) => registry.read_endpoint(endpoint),
-            None => registry.scan_all(),
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            match endpoint {
+                Some(endpoint) => registry.read_endpoint(endpoint),
+                None => registry.scan_all(),
+            }
         });
         tokio::select! {
             biased;
@@ -399,48 +448,54 @@ impl Broker {
                 .cmp(&right.proxy_endpoint())
                 .then_with(|| left.run_id().as_str().cmp(right.run_id().as_str()))
         });
-        let mut probes = FuturesUnordered::new();
-        for descriptor in scan.candidates {
-            let admission = Arc::clone(&self.probe_admission);
-            let probe = Arc::clone(&self.probe);
-            let telemetry = Arc::clone(&self.telemetry);
+        let admission = Arc::clone(&self.probe_admission);
+        let probe = Arc::clone(&self.probe);
+        let telemetry = Arc::clone(&self.telemetry);
+        let make_probe = |descriptor: InstanceDescriptor| {
+            let admission = Arc::clone(&admission);
+            let probe = Arc::clone(&probe);
+            let telemetry = Arc::clone(&telemetry);
             let client = client.clone();
             let cancelled = cancelled.clone();
-            probes.push(async move {
+            async move {
                 let permit = tokio::select! {
                     biased;
                     () = cancelled.cancelled() => {
-                        return Err((descriptor.clone(), ControlError::cancelled("probe admission cancelled")));
+                        return Err((descriptor, ControlError::cancelled("probe admission cancelled")));
                     }
                     () = tokio::time::sleep_until(deadline) => {
-                        return Err((descriptor.clone(), ControlError::deadline_exceeded("probe admission deadline elapsed")));
+                        return Err((descriptor, ControlError::deadline_exceeded("probe admission deadline elapsed")));
                     }
-                    permit = admission.acquire_owned() => permit.map_err(|_| {
-                        (
-                            descriptor.clone(),
+                    permit = admission.acquire_owned() => permit,
+                };
+                let permit = match permit {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return Err((
+                            descriptor,
                             ControlError::service_unavailable("probe admission closed"),
-                        )
-                    })?,
+                        ));
+                    }
                 };
                 let _permit = permit;
                 let _activity = Arc::clone(&telemetry).begin_liveness_probe();
                 match probe
-                    .describe(
-                        descriptor.clone(),
-                        client,
-                        deadline,
-                        cancelled,
-                    )
+                    .describe(&descriptor, client, deadline, cancelled)
                     .await
                 {
                     Ok(result) => Ok((descriptor, result)),
                     Err(error) => Err((descriptor, error)),
                 }
-            });
+            }
+        };
+        let mut candidates = scan.candidates.into_iter();
+        let mut probes = FuturesUnordered::new();
+        for descriptor in candidates.by_ref().take(LIVENESS_PROBE_LIMIT) {
+            probes.push(make_probe(descriptor));
         }
 
         let mut live_instances = Vec::new();
-        let mut stale_count = 0usize;
+        let mut stale = Vec::new();
         let mut rejected = scan.rejected;
         while let Some(result) = probes.next().await {
             match result {
@@ -449,10 +504,6 @@ impl Broker {
                         == descriptor.proxy_endpoint()
                         && description.instance_scope().run_id == *descriptor.run_id() =>
                 {
-                    if let Ok(bytes) = serde_json::to_vec(&description) {
-                        self.telemetry
-                            .record_bytes_relayed(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                    }
                     live_instances.push(ResolvedInstance {
                         descriptor,
                         description,
@@ -468,13 +519,9 @@ impl Broker {
                     self.telemetry.record_cancelled_call();
                     return Err(error);
                 }
-                Err((descriptor, error))
-                    if error.code() == ControlErrorCode::InstanceUnavailable =>
-                {
-                    stale_count = stale_count.saturating_add(1);
+                Err((descriptor, error)) if error.is_definitive_stale_connect() => {
                     self.telemetry.record_connection_failure();
-                    self.prune_stale(descriptor, deadline, cancelled.clone())
-                        .await;
+                    stale.push(descriptor);
                 }
                 Err((_descriptor, error)) if error.code() == ControlErrorCode::DeadlineExceeded => {
                     return Err(error);
@@ -486,6 +533,25 @@ impl Broker {
                     ));
                 }
             }
+            if let Some(descriptor) = candidates.next() {
+                probes.push(make_probe(descriptor));
+            }
+        }
+        stale.sort_by(|left, right| {
+            left.proxy_endpoint()
+                .cmp(&right.proxy_endpoint())
+                .then_with(|| left.run_id().as_str().cmp(right.run_id().as_str()))
+                .then_with(|| left.socket_path().cmp(right.socket_path()))
+        });
+        stale.dedup_by(|left, right| {
+            left.proxy_endpoint() == right.proxy_endpoint()
+                && left.run_id() == right.run_id()
+                && left.socket_path() == right.socket_path()
+        });
+        let stale_count = stale.len();
+        if !stale.is_empty() {
+            self.prune_stale_batch(stale, deadline, cancelled.clone())
+                .await?;
         }
         live_instances.sort_by(|left, right| {
             left.descriptor
@@ -511,19 +577,45 @@ impl Broker {
         })
     }
 
-    async fn prune_stale(
+    async fn prune_stale_batch(
         &self,
-        descriptor: InstanceDescriptor,
+        descriptors: Vec<InstanceDescriptor>,
         deadline: Instant,
         cancelled: CancellationToken,
-    ) {
+    ) -> Result<(), McpDomainError> {
+        let permit = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => {
+                self.telemetry.record_cancelled_call();
+                return Err(ControlError::cancelled("stale cleanup admission cancelled"));
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(ControlError::deadline_exceeded("stale cleanup admission deadline elapsed"));
+            }
+            permit = Arc::clone(&self.scan_admission).acquire_owned() => permit
+                .map_err(|_| ControlError::service_unavailable("stale cleanup admission closed"))?,
+        };
         let registry = Arc::clone(&self.registry);
-        let task = tokio::task::spawn_blocking(move || registry.prune_if_current(&descriptor));
+        let cleanup_cancelled = cancelled.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            registry.prune_batch_if_current(&descriptors, deadline, &cleanup_cancelled)
+        });
         tokio::select! {
             biased;
-            () = cancelled.cancelled() => {}
-            () = tokio::time::sleep_until(deadline) => {}
-            _ = task => {}
+            () = cancelled.cancelled() => {
+                self.telemetry.record_cancelled_call();
+                Err(ControlError::cancelled("stale cleanup cancelled"))
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                Err(ControlError::deadline_exceeded("stale cleanup deadline elapsed"))
+            }
+            result = task => {
+                result
+                    .map_err(|_| ControlError::internal("stale cleanup task failed"))?
+                    .map_err(|_| ControlError::instance_unavailable("stale cleanup failed"))?;
+                Ok(())
+            }
         }
     }
 
@@ -804,8 +896,8 @@ mod tests {
         pin::Pin,
         str::FromStr,
         sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            Arc, Condvar, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -827,8 +919,11 @@ mod tests {
 
     use super::{Broker, InstanceProbe, McpDomainError, RegistryAccess, SelectorRequirement};
     use crate::{
-        control_rpc::protocol::{
-            ControlError, ControlErrorCode, ControlResult, DeclaredClient, InstanceScope,
+        control_rpc::{
+            client::connect_failure,
+            protocol::{
+                ControlError, ControlErrorCode, ControlResult, DeclaredClient, InstanceScope,
+            },
         },
         instance::RunId,
         instance_registry::{DiscoveryDiagnostic, InstanceDescriptor, RegistryScan},
@@ -844,6 +939,7 @@ mod tests {
     enum ProbePlan {
         Live(ControlResult),
         Unavailable,
+        StaleConnect,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -908,6 +1004,13 @@ mod tests {
                 .insert(endpoint, ProbePlan::Unavailable);
         }
 
+        fn mark_stale_connect(&self, endpoint: SocketAddr) {
+            self.plans
+                .lock()
+                .expect("probe plans")
+                .insert(endpoint, ProbePlan::StaleConnect);
+        }
+
         fn calls(&self) -> Vec<ProbeCall> {
             self.calls.lock().expect("probe calls").clone()
         }
@@ -930,13 +1033,13 @@ mod tests {
     }
 
     impl InstanceProbe for FakeProbe {
-        fn describe(
-            &self,
-            descriptor: InstanceDescriptor,
+        fn describe<'a>(
+            &'a self,
+            descriptor: &'a InstanceDescriptor,
             client: DeclaredClient,
             deadline: Instant,
             cancelled: CancellationToken,
-        ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>>
         {
             Box::pin(async move {
                 self.calls.lock().expect("probe calls").push(ProbeCall {
@@ -962,6 +1065,9 @@ mod tests {
                         .cloned()
                     {
                         Some(ProbePlan::Live(result)) => Ok(result),
+                        Some(ProbePlan::StaleConnect) => {
+                            Err(connect_failure(io::Error::from(io::ErrorKind::NotFound)))
+                        }
                         Some(ProbePlan::Unavailable) | None => Err(
                             ControlError::instance_unavailable("test instance unavailable"),
                         ),
@@ -983,6 +1089,7 @@ mod tests {
         omitted: usize,
         scan_calls: AtomicUsize,
         endpoint_calls: AtomicUsize,
+        prune_calls: AtomicUsize,
     }
 
     impl FakeRegistry {
@@ -994,6 +1101,7 @@ mod tests {
                 omitted: 0,
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
+                prune_calls: AtomicUsize::new(0),
             })
         }
 
@@ -1008,6 +1116,7 @@ mod tests {
                 omitted: 0,
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
+                prune_calls: AtomicUsize::new(0),
             })
         }
 
@@ -1023,7 +1132,12 @@ mod tests {
                 omitted,
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
+                prune_calls: AtomicUsize::new(0),
             })
+        }
+
+        fn prune_calls(&self) -> usize {
+            self.prune_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1051,8 +1165,100 @@ mod tests {
             })
         }
 
-        fn prune_if_current(&self, _descriptor: &InstanceDescriptor) -> io::Result<bool> {
-            Ok(true)
+        fn prune_batch_if_current(
+            &self,
+            descriptors: &[InstanceDescriptor],
+            _deadline: Instant,
+            _cancelled: &CancellationToken,
+        ) -> io::Result<usize> {
+            self.prune_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(descriptors.len())
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingGate {
+        open: Mutex<bool>,
+        changed: Condvar,
+    }
+
+    impl BlockingGate {
+        fn wait(&self) {
+            let mut open = self.open.lock().expect("blocking gate");
+            while !*open {
+                open = self.changed.wait(open).expect("blocking gate wait");
+            }
+        }
+
+        fn release(&self) {
+            *self.open.lock().expect("blocking gate") = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct BlockingScanRegistry {
+        gate: Arc<BlockingGate>,
+        started: AtomicUsize,
+    }
+
+    impl RegistryAccess for BlockingScanRegistry {
+        fn scan_all(&self) -> io::Result<RegistryScan> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.gate.wait();
+            Ok(RegistryScan {
+                candidates: Vec::new(),
+                rejected: Vec::new(),
+                omitted: 0,
+            })
+        }
+
+        fn read_endpoint(&self, _endpoint: SocketAddr) -> io::Result<RegistryScan> {
+            self.scan_all()
+        }
+
+        fn prune_batch_if_current(
+            &self,
+            _descriptors: &[InstanceDescriptor],
+            _deadline: Instant,
+            _cancelled: &CancellationToken,
+        ) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    struct BlockingPruneRegistry {
+        descriptor: InstanceDescriptor,
+        gate: Arc<BlockingGate>,
+        prune_started: AtomicBool,
+        prune_committed: AtomicUsize,
+    }
+
+    impl RegistryAccess for BlockingPruneRegistry {
+        fn scan_all(&self) -> io::Result<RegistryScan> {
+            Ok(RegistryScan {
+                candidates: vec![self.descriptor.clone()],
+                rejected: Vec::new(),
+                omitted: 0,
+            })
+        }
+
+        fn read_endpoint(&self, _endpoint: SocketAddr) -> io::Result<RegistryScan> {
+            self.scan_all()
+        }
+
+        fn prune_batch_if_current(
+            &self,
+            descriptors: &[InstanceDescriptor],
+            deadline: Instant,
+            cancelled: &CancellationToken,
+        ) -> io::Result<usize> {
+            self.prune_started.store(true, Ordering::SeqCst);
+            self.gate.wait();
+            if cancelled.is_cancelled() || Instant::now() >= deadline {
+                return Ok(0);
+            }
+            self.prune_committed.fetch_add(1, Ordering::SeqCst);
+            Ok(descriptors.len())
         }
     }
 
@@ -1315,7 +1521,7 @@ mod tests {
             7,
         );
         let probe = FakeProbe::live(&candidates);
-        probe.mark_unavailable(stale.proxy_endpoint());
+        probe.mark_stale_connect(stale.proxy_endpoint());
         let broker = broker(registry, probe);
 
         let report = broker
@@ -1613,5 +1819,285 @@ mod tests {
             .await
             .expect_err("cancelled");
         assert_eq!(error.code(), ControlErrorCode::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn generic_instance_unavailable_does_not_authorize_stale_pruning() {
+        let stale = descriptor(19500, RUN_STALE);
+        let registry = FakeRegistry::new(vec![stale.clone()]);
+        let probe = FakeProbe::live(std::slice::from_ref(&stale));
+        probe.mark_unavailable(stale.proxy_endpoint());
+        let broker = broker(Arc::clone(&registry), probe);
+
+        let report = broker
+            .discover(client(), deadline(), CancellationToken::new())
+            .await
+            .expect("generic probe failure is diagnostic");
+
+        assert_eq!(report.stale_count, 0);
+        assert_eq!(registry.prune_calls(), 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(report.rejected[0].code(), "instance_unavailable");
+    }
+
+    #[tokio::test]
+    async fn run_only_selector_probes_only_matching_registry_candidates() {
+        let target = descriptor(19501, RUN_A);
+        let unrelated = [descriptor(19502, RUN_B), descriptor(19503, RUN_STALE)];
+        let mut descriptors = unrelated.to_vec();
+        descriptors.push(target.clone());
+        let probe = FakeProbe::live(&descriptors);
+        let broker = broker(FakeRegistry::new(descriptors), Arc::clone(&probe));
+
+        let resolved = resolve(
+            &broker,
+            InstanceSelector {
+                proxy_endpoint: None,
+                run_id: Some(RunId::from_str(RUN_A).expect("run ID")),
+            },
+            SelectorRequirement::SnapshotRead,
+        )
+        .await
+        .expect("run-only target");
+
+        assert_eq!(
+            resolved.descriptor.proxy_endpoint(),
+            target.proxy_endpoint()
+        );
+        assert_eq!(
+            probe.calls(),
+            vec![ProbeCall {
+                endpoint: target.proxy_endpoint(),
+                client: DeclaredClient {
+                    name: "wirelens-internal".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_generation_mismatch_is_rejected_before_any_probe() {
+        let current = descriptor(19504, RUN_A);
+        let probe = FakeProbe::live(std::slice::from_ref(&current));
+        let broker = broker(FakeRegistry::new(vec![current.clone()]), Arc::clone(&probe));
+
+        let error = resolve(
+            &broker,
+            InstanceSelector {
+                proxy_endpoint: Some(current.proxy_endpoint()),
+                run_id: Some(RunId::from_str(RUN_B).expect("run ID")),
+            },
+            SelectorRequirement::SnapshotRead,
+        )
+        .await
+        .expect_err("generation conflict");
+
+        assert_eq!(error.code(), ControlErrorCode::InstanceGenerationConflict);
+        assert!(probe.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_large_discovery_wave_does_not_prequeue_ahead_of_a_targeted_call() {
+        let descriptors = (0..40)
+            .map(|index| descriptor(19600 + index, RUN_A))
+            .collect::<Vec<_>>();
+        let target = descriptors.last().expect("target descriptor").clone();
+        let target_endpoint = target.proxy_endpoint();
+        let target_run_id = target.run_id().clone();
+        let gate = Arc::new(Semaphore::new(0));
+        let probe = FakeProbe::gated(&descriptors, Arc::clone(&gate));
+        let broker = broker(FakeRegistry::new(descriptors), Arc::clone(&probe));
+        let bulk_cancelled = CancellationToken::new();
+        let targeted_cancelled = CancellationToken::new();
+        let bulk = {
+            let broker = broker.clone();
+            let cancelled = bulk_cancelled.clone();
+            tokio::spawn(async move { broker.discover(client(), deadline(), cancelled).await })
+        };
+        wait_for_active(&probe, 16).await;
+        let targeted = {
+            let broker = broker.clone();
+            let cancelled = targeted_cancelled.clone();
+            tokio::spawn(async move {
+                broker
+                    .resolve(
+                        InstanceSelector {
+                            proxy_endpoint: Some(target_endpoint),
+                            run_id: Some(target_run_id),
+                        },
+                        SelectorRequirement::SnapshotRead,
+                        deadline(),
+                        cancelled,
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        gate.add_permits(1);
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !probe
+                .calls()
+                .iter()
+                .any(|call| call.endpoint == target_endpoint)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("targeted call receives a probe turn after one bulk completion");
+
+        bulk_cancelled.cancel();
+        targeted_cancelled.cancel();
+        let _ = bulk.await;
+        let _ = targeted.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_and_expired_blocking_scans_retain_shared_scan_admission() {
+        let gate = Arc::new(BlockingGate::default());
+        let registry = Arc::new(BlockingScanRegistry {
+            gate: Arc::clone(&gate),
+            started: AtomicUsize::new(0),
+        });
+        let broker = Broker::with_dependencies(
+            PathBuf::from("/test/.wirelens/run/instances"),
+            Arc::clone(&registry),
+            FakeProbe::live(&[]),
+        );
+        let mut calls = Vec::new();
+        for index in 0..32 {
+            let broker = broker.clone();
+            let cancelled = CancellationToken::new();
+            let call_cancelled = cancelled.clone();
+            let call_deadline = if index < 16 {
+                deadline()
+            } else {
+                Instant::now() + Duration::from_millis(25)
+            };
+            let task = tokio::spawn(async move {
+                broker
+                    .discover(client(), call_deadline, call_cancelled)
+                    .await
+            });
+            calls.push((cancelled, task));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.started.load(Ordering::SeqCst) != 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all admitted blocking scans started");
+        for (cancelled, _) in calls.iter().take(16) {
+            cancelled.cancel();
+        }
+        for (_, task) in calls {
+            let _ = task.await;
+        }
+
+        let extra_cancelled = CancellationToken::new();
+        let extra = {
+            let broker = broker.clone();
+            let cancelled = extra_cancelled.clone();
+            tokio::spawn(async move { broker.discover(client(), deadline(), cancelled).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.started.load(Ordering::SeqCst),
+            32,
+            "cancelled or expired blocking work must retain admission until it exits"
+        );
+
+        extra_cancelled.cancel();
+        gate.release();
+        let _ = extra.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_cleanup_cannot_commit_after_waiting_on_a_registry_lock() {
+        let stale = descriptor(19700, RUN_STALE);
+        let gate = Arc::new(BlockingGate::default());
+        let registry = Arc::new(BlockingPruneRegistry {
+            descriptor: stale.clone(),
+            gate: Arc::clone(&gate),
+            prune_started: AtomicBool::new(false),
+            prune_committed: AtomicUsize::new(0),
+        });
+        let probe = FakeProbe::live(std::slice::from_ref(&stale));
+        probe.mark_stale_connect(stale.proxy_endpoint());
+        let broker = Broker::with_dependencies(
+            PathBuf::from("/test/.wirelens/run/instances"),
+            Arc::clone(&registry),
+            probe,
+        );
+        let cancelled = CancellationToken::new();
+        let call = {
+            let cancelled = cancelled.clone();
+            tokio::spawn(async move { broker.discover(client(), deadline(), cancelled).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !registry.prune_started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup reached blocked registry mutation");
+
+        cancelled.cancel();
+        let _ = call.await;
+        gate.release();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            registry.prune_committed.load(Ordering::SeqCst),
+            0,
+            "cleanup must recheck cancellation immediately before mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_stale_probe_results_are_pruned_once_per_identity() {
+        let stale = descriptor(19701, RUN_STALE);
+        let registry = FakeRegistry::new(vec![stale.clone(), stale.clone()]);
+        let probe = FakeProbe::live(std::slice::from_ref(&stale));
+        probe.mark_stale_connect(stale.proxy_endpoint());
+        let broker = broker(Arc::clone(&registry), probe);
+
+        let report = broker
+            .discover(client(), deadline(), CancellationToken::new())
+            .await
+            .expect("stale discovery");
+
+        assert_eq!(report.stale_count, 1);
+        assert_eq!(registry.prune_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_reserialize_results_to_estimate_transport_bytes() {
+        let live = descriptor(19702, RUN_A);
+        let broker = broker(
+            FakeRegistry::new(vec![live.clone()]),
+            FakeProbe::live(&[live]),
+        );
+
+        broker
+            .discover(client(), deadline(), CancellationToken::new())
+            .await
+            .expect("live discovery");
+
+        assert_eq!(broker.telemetry.snapshot().bytes_relayed, 0);
+    }
+
+    #[tokio::test]
+    async fn probe_contract_borrows_large_descriptors_instead_of_cloning_them() {
+        let descriptor = descriptor(19703, RUN_A);
+        let probe = FakeProbe::live(std::slice::from_ref(&descriptor));
+
+        probe
+            .describe(&descriptor, client(), deadline(), CancellationToken::new())
+            .await
+            .expect("borrowed descriptor probe");
     }
 }

@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use rmcp::{
@@ -22,15 +22,7 @@ fn binary() -> &'static str {
 }
 
 fn isolated_home() -> Result<TempDir> {
-    let home = tempfile::tempdir()?;
-    let wirelens = home.path().join(".wirelens");
-    let run = wirelens.join("run");
-    let instances = run.join("instances");
-    for directory in [&wirelens, &run, &instances] {
-        fs::create_dir(directory)?;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(home)
+    tempfile::tempdir().map_err(Into::into)
 }
 
 fn broker_command(home: &Path) -> Command {

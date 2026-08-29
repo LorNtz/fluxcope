@@ -3,12 +3,13 @@ use crate::{
         framing::{REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, read_json_frame},
         protocol::{
             ControlError, ControlOperation, ControlResult, DeclaredClient, InstanceScope,
-            RequestEnvelope, ResponseEnvelope,
+            LocalTransportCause, RequestEnvelope, ResponseEnvelope,
         },
     },
     instance_registry::InstanceDescriptor,
 };
 use std::{
+    io,
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
@@ -55,7 +56,7 @@ impl ControlRpcClient {
                 .map_err(|_| ControlError::frame_too_large(REQUEST_MAX_BYTES))?;
             let mut stream = UnixStream::connect(&socket_path)
                 .await
-                .map_err(|_| ControlError::instance_unavailable("private RPC connection failed"))?;
+                .map_err(connect_failure)?;
             stream.write_all(&length.to_be_bytes()).await.map_err(|_| {
                 ControlError::instance_unavailable("private RPC request write failed")
             })?;
@@ -78,6 +79,22 @@ impl ControlRpcClient {
             }
         }
     }
+}
+
+pub(crate) fn connect_failure(error: io::Error) -> ControlError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    ) {
+        return ControlError::instance_unavailable("private RPC connection failed")
+            .with_local_transport_cause(LocalTransportCause::DefinitiveStaleConnect);
+    }
+    if error.kind() == io::ErrorKind::OutOfMemory || matches!(error.raw_os_error(), Some(23 | 24)) {
+        return ControlError::service_unavailable(
+            "private RPC connection failed due to local resource exhaustion",
+        );
+    }
+    ControlError::instance_unavailable("private RPC connection failed")
 }
 
 fn next_request_id() -> String {

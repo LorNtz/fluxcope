@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     future::Future,
+    io,
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -213,4 +214,32 @@ async fn one_outer_deadline_bounds_connect_write_and_read() {
     assert_eq!(error.code, ControlErrorCode::DeadlineExceeded);
     assert!(started.elapsed() < Duration::from_millis(500));
     server.abort();
+}
+
+#[tokio::test]
+async fn missing_private_socket_is_typed_as_a_definitively_stale_connect() {
+    let directory = TempDir::new().expect("temporary socket directory");
+    let missing_socket = directory.path().join("missing-control.sock");
+    let descriptor = descriptor(&missing_socket);
+
+    let error = ControlRpcClient::call(
+        &descriptor,
+        ControlOperation::DescribeInstance,
+        Instant::now() + Duration::from_secs(1),
+        declared_client(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect_err("missing private socket");
+
+    assert_eq!(error.code(), ControlErrorCode::InstanceUnavailable);
+    assert!(error.is_definitive_stale_connect());
+}
+
+#[test]
+fn local_connect_resource_exhaustion_is_not_typed_as_stale() {
+    let error = super::connect_failure(io::Error::from_raw_os_error(24));
+
+    assert_eq!(error.code(), ControlErrorCode::ServiceUnavailable);
+    assert!(!error.is_definitive_stale_connect());
 }

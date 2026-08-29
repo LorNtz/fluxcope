@@ -101,6 +101,11 @@ pub(crate) enum ControlErrorCode {
     InternalError,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalTransportCause {
+    DefinitiveStaleConnect,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ControlError {
@@ -108,6 +113,8 @@ pub(crate) struct ControlError {
     pub(crate) message: String,
     pub(crate) retryable: bool,
     pub(crate) details: Value,
+    #[serde(skip)]
+    pub(crate) local_transport_cause: Option<LocalTransportCause>,
 }
 
 impl ControlErrorCode {
@@ -141,6 +148,7 @@ impl ControlError {
             message: message.into(),
             retryable,
             details,
+            local_transport_cause: None,
         }
     }
     pub(crate) fn code(&self) -> ControlErrorCode {
@@ -157,6 +165,15 @@ impl ControlError {
 
     pub(crate) fn details(&self) -> &Value {
         &self.details
+    }
+
+    pub(crate) fn is_definitive_stale_connect(&self) -> bool {
+        self.local_transport_cause == Some(LocalTransportCause::DefinitiveStaleConnect)
+    }
+
+    pub(crate) fn with_local_transport_cause(mut self, cause: LocalTransportCause) -> Self {
+        self.local_transport_cause = Some(cause);
+        self
     }
 
     pub(crate) fn invalid_argument(message: impl Into<String>) -> Self {

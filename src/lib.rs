@@ -37,3 +37,25 @@ where
         cli::ProcessMode::Broker => mcp::run_stdio().await,
     }
 }
+
+#[cfg(test)]
+mod mcp_platform_tests {
+    #[test]
+    fn disabled_proxy_mcp_is_supported_on_every_target() {
+        super::mcp::ensure_supported_platform(false).expect("MCP-disabled proxy");
+    }
+
+    #[test]
+    fn enabled_proxy_mcp_matches_target_support() {
+        let result = super::mcp::ensure_supported_platform(true);
+        #[cfg(unix)]
+        assert!(result.is_ok());
+        #[cfg(not(unix))]
+        assert!(
+            result
+                .expect_err("MCP-enabled proxy must be rejected")
+                .to_string()
+                .contains("unsupported_platform")
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use std::{
-    collections::BinaryHeap,
+    collections::HashSet,
     fs::{self, File, Metadata, OpenOptions},
     io::{self, Read, Write},
     net::SocketAddr,
@@ -8,12 +8,14 @@ use std::{
         net::UnixListener,
     },
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     instance::{InstanceIdentity, RunId, endpoint_hash, local_proxy_url},
@@ -25,6 +27,25 @@ const DESCRIPTOR_RPC_VERSION: u16 = 1;
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const MAX_SCAN_FILES: usize = 256;
 const SOCKET_HASH_HEX_BYTES: usize = 24;
+const REGISTRY_INDEX_VERSION: u16 = 1;
+const REGISTRY_INDEX_FILENAME: &str = ".registry-index.json";
+const REGISTRY_INDEX_TEMP_FILENAME: &str = ".registry-index.tmp";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryIndex {
+    version: u16,
+    descriptors: Vec<String>,
+}
+
+impl Default for RegistryIndex {
+    fn default() -> Self {
+        Self {
+            version: REGISTRY_INDEX_VERSION,
+            descriptors: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -122,46 +143,6 @@ pub(crate) struct RegistryScan {
     pub(crate) omitted: usize,
 }
 
-pub(crate) struct BoundedDescriptorNames {
-    limit: usize,
-    seen: usize,
-    retained: BinaryHeap<PathBuf>,
-}
-
-impl BoundedDescriptorNames {
-    pub(crate) fn new(limit: usize) -> Self {
-        Self {
-            limit,
-            seen: 0,
-            retained: BinaryHeap::with_capacity(limit),
-        }
-    }
-
-    pub(crate) fn insert(&mut self, path: PathBuf) {
-        self.seen = self.seen.saturating_add(1);
-        if self.retained.len() < self.limit {
-            self.retained.push(path);
-            return;
-        }
-        if self.retained.peek().is_some_and(|largest| path < *largest) {
-            let mut largest = self
-                .retained
-                .peek_mut()
-                .expect("a full bounded descriptor set is non-empty");
-            *largest = path;
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.retained.len()
-    }
-
-    pub(crate) fn into_sorted(self) -> (Vec<PathBuf>, usize) {
-        let omitted = self.seen.saturating_sub(self.retained.len());
-        (self.retained.into_sorted_vec(), omitted)
-    }
-}
-
 pub(crate) struct RegistryMutationLock {
     _file: File,
 }
@@ -235,6 +216,105 @@ impl RegistryMutationLock {
     }
 }
 
+fn read_registry_index(instances_root: &Path) -> io::Result<RegistryIndex> {
+    let path = instances_root.join(REGISTRY_INDEX_FILENAME);
+    let nofollow = (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nofollow)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() > MAX_DESCRIPTOR_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registry index must be an owner-only bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    Read::by_ref(&mut file)
+        .take(MAX_DESCRIPTOR_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "registry index exceeds 64 KiB",
+        ));
+    }
+    let mut index: RegistryIndex = serde_json::from_slice(&bytes).map_err(json_to_io)?;
+    if index.version != REGISTRY_INDEX_VERSION
+        || index
+            .descriptors
+            .iter()
+            .any(|name| !is_descriptor_name(name))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "registry index is invalid",
+        ));
+    }
+    index.descriptors.sort_unstable();
+    index.descriptors.dedup();
+    Ok(index)
+}
+
+fn write_registry_index<O>(
+    instances_root: &Path,
+    index: &mut RegistryIndex,
+    observer: O,
+) -> io::Result<()>
+where
+    O: FnOnce(),
+{
+    validate_owner_only_directory(instances_root)?;
+    index.descriptors.sort_unstable();
+    index.descriptors.dedup();
+    if index.descriptors.len() > MAX_SCAN_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "instance registry descriptor capacity of 256 reached",
+        ));
+    }
+    let temporary_path = instances_root.join(REGISTRY_INDEX_TEMP_FILENAME);
+    let index_path = instances_root.join(REGISTRY_INDEX_FILENAME);
+    match fs::remove_file(&temporary_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let result = (|| {
+        let mut temporary = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary_path)?;
+        temporary.set_permissions(fs::Permissions::from_mode(0o600))?;
+        serde_json::to_writer(&mut temporary, index).map_err(json_to_io)?;
+        temporary.flush()?;
+        temporary.sync_all()?;
+        fs::rename(&temporary_path, &index_path)?;
+        observer();
+        File::open(instances_root)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn ensure_registry_index(instances_root: &Path) -> io::Result<()> {
+    match read_registry_index(instances_root) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_registry_index(instances_root, &mut RegistryIndex::default(), || {})
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) struct RegistryPublisher {
     identity: InstanceIdentity,
     descriptor: InstanceDescriptor,
@@ -252,11 +332,9 @@ impl RegistryPublisher {
         identity: InstanceIdentity,
         settings: &SettingsSession,
     ) -> io::Result<Self> {
-        ensure_owner_only_directory(wirelens_home)?;
+        let _scanner = RegistryScanner::initialize(wirelens_home)?;
         let run_dir = wirelens_home.join("run");
         let instances_dir = run_dir.join("instances");
-        ensure_owner_only_directory(&run_dir)?;
-        ensure_owner_only_directory(&instances_dir)?;
 
         let descriptor_path = instances_dir.join(descriptor_name(identity.proxy_endpoint()));
         let socket_path = run_dir.join(socket_name(identity.proxy_endpoint(), identity.run_id()));
@@ -321,12 +399,32 @@ impl RegistryPublisher {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        let descriptor_name = self
+            .descriptor_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "descriptor has no valid filename",
+                )
+            })?
+            .to_owned();
+        let mut index = read_registry_index(parent)?;
+        index
+            .descriptors
+            .retain(|name| fs::symlink_metadata(parent.join(name)).is_ok());
+        if !index.descriptors.contains(&descriptor_name)
+            && index.descriptors.len() >= MAX_SCAN_FILES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "instance registry descriptor capacity of 256 reached",
+            ));
+        }
         let temporary_path = parent.join(format!(
             ".{}.{}.tmp",
-            self.descriptor_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("descriptor"),
+            descriptor_name,
             self.identity.run_id()
         ));
         let mut linked = false;
@@ -343,13 +441,16 @@ impl RegistryPublisher {
             fs::hard_link(&temporary_path, &self.descriptor_path)?;
             linked = true;
             fs::remove_file(&temporary_path)?;
-            File::open(parent)?.sync_all()
+            index.descriptors.push(descriptor_name);
+            write_registry_index(parent, &mut index, || {})
         })();
-        if linked {
+        if result.is_ok() {
             self.published = true;
-        }
-        if result.is_err() {
+        } else {
             let _ = fs::remove_file(&temporary_path);
+            if linked {
+                let _ = fs::remove_file(&self.descriptor_path);
+            }
         }
         result
     }
@@ -390,7 +491,19 @@ impl RegistryPublisher {
             Err(error) => return Err(error),
         }
         if let Some(parent) = self.descriptor_path.parent() {
-            File::open(parent)?.sync_all()?;
+            let descriptor_name = self
+                .descriptor_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "descriptor has no valid filename",
+                    )
+                })?;
+            let mut index = read_registry_index(parent)?;
+            index.descriptors.retain(|name| name != descriptor_name);
+            write_registry_index(parent, &mut index, || {})?;
         }
         Ok(true)
     }
@@ -453,7 +566,19 @@ impl RegistryPublisher {
             fs::remove_file(&self.descriptor_path)?;
             fs::remove_file(&self.socket_path)?;
             if let Some(parent) = self.descriptor_path.parent() {
-                File::open(parent)?.sync_all()?;
+                let descriptor_name = self
+                    .descriptor_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "descriptor has no valid filename",
+                        )
+                    })?;
+                let mut index = read_registry_index(parent)?;
+                index.descriptors.retain(|name| name != descriptor_name);
+                write_registry_index(parent, &mut index, || {})?;
             }
         }
         self.cleanup_attempted = true;
@@ -507,6 +632,17 @@ pub(crate) struct RegistryScanner {
 }
 
 impl RegistryScanner {
+    pub(crate) fn initialize(wirelens_home: &Path) -> io::Result<Self> {
+        ensure_owner_only_directory(wirelens_home)?;
+        let run_root = wirelens_home.join("run");
+        let instances_root = run_root.join("instances");
+        ensure_owner_only_directory(&run_root)?;
+        ensure_owner_only_directory(&instances_root)?;
+        let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
+        ensure_registry_index(&instances_root)?;
+        Self::new_from_run_root(&run_root)
+    }
+
     pub(crate) fn new(wirelens_home: &Path) -> io::Result<Self> {
         Self::new_from_run_root(&wirelens_home.join("run"))
     }
@@ -523,43 +659,62 @@ impl RegistryScanner {
     }
 
     pub(crate) fn scan_all(&self) -> io::Result<RegistryScan> {
-        let mut matching = BoundedDescriptorNames::new(MAX_SCAN_FILES);
-        for entry in fs::read_dir(&self.instances_root)? {
-            let entry = entry?;
-            if is_descriptor_name(&entry.file_name().to_string_lossy()) {
-                matching.insert(entry.path());
-            }
-        }
-        let (matching, omitted) = matching.into_sorted();
+        self.scan_all_internal(|| {})
+    }
+
+    fn scan_all_internal<O>(&self, mut observer: O) -> io::Result<RegistryScan>
+    where
+        O: FnMut(),
+    {
+        let index = read_registry_index(&self.instances_root)?;
+        let omitted = index.descriptors.len().saturating_sub(MAX_SCAN_FILES);
         let mut scan = RegistryScan {
             candidates: Vec::new(),
             rejected: Vec::new(),
             omitted,
         };
-        for path in matching {
-            self.inspect(&path, &mut scan);
+        for name in index.descriptors.into_iter().take(MAX_SCAN_FILES) {
+            observer();
+            self.inspect(&self.instances_root.join(name), &mut scan);
         }
         Ok(scan)
     }
 
+    #[cfg(test)]
+    pub(crate) fn scan_all_with_enumeration_observer<O>(
+        &self,
+        observer: O,
+    ) -> io::Result<RegistryScan>
+    where
+        O: FnMut(),
+    {
+        self.scan_all_internal(observer)
+    }
+
     pub(crate) fn read_endpoint(&self, endpoint: SocketAddr) -> io::Result<RegistryScan> {
-        let path = self.instances_root.join(descriptor_name(endpoint));
+        let name = descriptor_name(endpoint);
+        let index = read_registry_index(&self.instances_root)?;
         let mut scan = RegistryScan {
             candidates: Vec::new(),
             rejected: Vec::new(),
             omitted: 0,
         };
-        match fs::symlink_metadata(&path) {
-            Ok(_) => self.inspect(&path, &mut scan),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        if index.descriptors.binary_search(&name).is_ok() {
+            self.inspect(&self.instances_root.join(name), &mut scan);
         }
         Ok(scan)
     }
-    pub(crate) fn remove_stale_if_current(
+
+    fn remove_stale_batch_internal<O>(
         &self,
-        expected: &InstanceDescriptor,
-    ) -> io::Result<bool> {
+        expected: &[InstanceDescriptor],
+        deadline: Instant,
+        cancelled: &CancellationToken,
+        observer: O,
+    ) -> io::Result<usize>
+    where
+        O: FnOnce(),
+    {
         let wirelens_home = self.run_root.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -567,27 +722,82 @@ impl RegistryScanner {
             )
         })?;
         let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
-        let descriptor_path = self
-            .instances_root
-            .join(descriptor_name(expected.proxy_endpoint()));
-        let current = match self.parse_descriptor(&descriptor_path) {
-            Ok(descriptor) => descriptor,
-            Err(_) => return Ok(false),
-        };
-        if current.proxy_endpoint != expected.proxy_endpoint
-            || current.run_id != expected.run_id
-            || current.socket_path != expected.socket_path
-        {
-            return Ok(false);
+        if cancelled.is_cancelled() || Instant::now() >= deadline {
+            return Ok(0);
         }
-        fs::remove_file(&descriptor_path)?;
-        match fs::remove_file(&current.socket_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        let mut index = read_registry_index(&self.instances_root)?;
+        let mut seen = HashSet::with_capacity(expected.len().min(MAX_SCAN_FILES));
+        let mut removed = 0usize;
+        let mut deferred_error = None;
+        for stale in expected {
+            let identity = (
+                stale.proxy_endpoint(),
+                stale.run_id().as_str(),
+                stale.socket_path(),
+            );
+            if !seen.insert(identity) {
+                continue;
+            }
+            let descriptor_path = self
+                .instances_root
+                .join(descriptor_name(stale.proxy_endpoint()));
+            let current = match self.parse_descriptor(&descriptor_path) {
+                Ok(descriptor) => descriptor,
+                Err(_) => continue,
+            };
+            if current.proxy_endpoint != stale.proxy_endpoint
+                || current.run_id != *stale.run_id()
+                || current.socket_path != stale.socket_path()
+            {
+                continue;
+            }
+            if cancelled.is_cancelled() || Instant::now() >= deadline {
+                break;
+            }
+            if let Err(error) = fs::remove_file(&descriptor_path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    deferred_error = Some(error);
+                    break;
+                }
+                continue;
+            }
+            let stop_after_descriptor = cancelled.is_cancelled() || Instant::now() >= deadline;
+            if !stop_after_descriptor {
+                match fs::remove_file(&current.socket_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        deferred_error = Some(error);
+                    }
+                }
+            }
+            let name = descriptor_name(current.proxy_endpoint);
+            index.descriptors.retain(|candidate| candidate != &name);
+            removed = removed.saturating_add(1);
+            if stop_after_descriptor || deferred_error.is_some() {
+                break;
+            }
         }
-        File::open(&self.instances_root)?.sync_all()?;
-        Ok(true)
+        if removed > 0 {
+            write_registry_index(&self.instances_root, &mut index, observer)?;
+        }
+        if let Some(error) = deferred_error {
+            return Err(error);
+        }
+        Ok(removed)
+    }
+
+    pub(crate) fn remove_stale_batch_if_current<O>(
+        &self,
+        expected: &[InstanceDescriptor],
+        deadline: Instant,
+        cancelled: &CancellationToken,
+        observer: O,
+    ) -> io::Result<usize>
+    where
+        O: FnOnce(),
+    {
+        self.remove_stale_batch_internal(expected, deadline, cancelled, observer)
     }
 
     fn inspect(&self, path: &Path, scan: &mut RegistryScan) {

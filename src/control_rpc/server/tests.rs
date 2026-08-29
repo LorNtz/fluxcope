@@ -99,6 +99,7 @@ impl ControlRpcHandler for TestHandler {
                         details: serde_json::json!({
                             "payload": "x".repeat(6 * 1024 * 1024),
                         }),
+                        local_transport_cause: None,
                     });
                 }
             }

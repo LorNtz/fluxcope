@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use super::{
-    BoundedDescriptorNames, InstanceDescriptor, RegistryMutationLock, RegistryPublisher,
-    RegistryScan, RegistryScanner, validate_descriptor_metadata,
+    InstanceDescriptor, RegistryMutationLock, RegistryPublisher, RegistryScan, RegistryScanner,
+    validate_descriptor_metadata,
 };
 use crate::{
     instance::InstanceIdentity,
@@ -15,8 +15,10 @@ use std::{
     net::SocketAddr,
     os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 const ENDPOINT_A: &str = "127.0.0.1:19001";
 const ENDPOINT_B: &str = "[::1]:19002";
@@ -406,7 +408,7 @@ fn scanner_rejects_regular_file_at_the_declared_socket_path() {
 }
 
 #[test]
-fn scanner_requires_descriptor_filename_to_match_the_embedded_endpoint_hash() {
+fn scanner_reports_a_missing_indexed_descriptor_and_ignores_its_untracked_rename() {
     let fixture = RegistryFixture::new();
     let publisher = fixture.publish(ENDPOINT_A);
     let mut wrong_name = publisher
@@ -427,13 +429,13 @@ fn scanner_requires_descriptor_filename_to_match_the_embedded_endpoint_hash() {
     let report = fixture.scan();
 
     assert_eq!(
-        RegistryFixture::rejected_by_code(&report, "descriptor_name_mismatch"),
+        RegistryFixture::rejected_by_code(&report, "descriptor_open"),
         1
     );
 }
 
 #[test]
-fn scanner_inspects_at_most_256_matching_descriptor_files() {
+fn scanner_ignores_descriptor_shaped_files_missing_from_the_bounded_index() {
     let fixture = RegistryFixture::new();
     let publisher = fixture.publish(ENDPOINT_A);
     let mut created = 0;
@@ -458,30 +460,9 @@ fn scanner_inspects_at_most_256_matching_descriptor_files() {
 
     let report = fixture.scan();
 
-    assert_eq!(report.candidates.len() + report.rejected.len(), 256);
-    assert_eq!(report.omitted, 1);
-}
-
-#[test]
-fn descriptor_name_retention_never_buffers_more_than_the_scan_cap() {
-    let mut retained = BoundedDescriptorNames::new(256);
-    for index in (0..10_000_u32).rev() {
-        retained.insert(PathBuf::from(format!("{index:064x}.json")));
-        assert!(retained.len() <= 256);
-    }
-
-    let (names, omitted) = retained.into_sorted();
-
-    assert_eq!(names.len(), 256);
-    assert_eq!(
-        names.first().and_then(|path| path.to_str()),
-        Some("0000000000000000000000000000000000000000000000000000000000000000.json")
-    );
-    assert_eq!(
-        names.last().and_then(|path| path.to_str()),
-        Some("00000000000000000000000000000000000000000000000000000000000000ff.json")
-    );
-    assert_eq!(omitted, 9_744);
+    assert_eq!(report.candidates.len(), 1);
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.omitted, 0);
 }
 
 #[test]
@@ -621,4 +602,126 @@ fn stale_replacement_refuses_a_changed_descriptor_after_the_probe() {
 
     assert!(!removed);
     assert!(descriptor_path.exists());
+}
+
+#[test]
+fn scanner_uses_a_bounded_index_instead_of_enumerating_untracked_directory_junk() {
+    let fixture = RegistryFixture::new();
+    let published = fixture.publish(ENDPOINT_A);
+    let descriptor_path = published.descriptor_path().to_path_buf();
+    let mut created = 0usize;
+    for index in 0..=300_u16 {
+        let path = fixture.instances_dir().join(format!("{index:064x}.json"));
+        if path == descriptor_path {
+            continue;
+        }
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .expect("untracked descriptor-shaped junk");
+        created += 1;
+        if created == 300 {
+            break;
+        }
+    }
+    assert_eq!(created, 300);
+    let mut enumerated = 0usize;
+
+    let report = fixture
+        .scanner()
+        .scan_all_with_enumeration_observer(|| enumerated += 1)
+        .expect("bounded indexed scan");
+
+    assert_eq!(enumerated, 1);
+    assert_eq!(report.omitted, 0);
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), published.identity().run_id());
+}
+
+#[test]
+fn registry_refuses_a_257th_descriptor_before_enumeration_can_grow_unbounded() {
+    let fixture = RegistryFixture::new();
+    let mut overflow = fixture.prepare("127.0.0.1:20256");
+    let overflow_path = overflow.descriptor_path().to_path_buf();
+    let mut created = 0usize;
+    let mut tracked = Vec::new();
+    for index in 0..=256_u16 {
+        let path = fixture.instances_dir().join(format!("{index:064x}.json"));
+        if path == overflow_path {
+            continue;
+        }
+        tracked.push(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .expect("descriptor filename")
+                .to_owned(),
+        );
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .expect("bounded descriptor slot");
+        file.sync_all().expect("sync descriptor slot");
+        created += 1;
+        if created == 256 {
+            break;
+        }
+    }
+    assert_eq!(created, 256);
+    let index_path = fixture.instances_dir().join(".registry-index.json");
+    let mut index_file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(index_path)
+        .expect("registry index");
+    serde_json::to_writer(
+        &mut index_file,
+        &serde_json::json!({"version": 1, "descriptors": tracked}),
+    )
+    .expect("seed full registry index");
+    index_file.flush().expect("flush registry index");
+    index_file.sync_all().expect("sync registry index");
+
+    let error = overflow
+        .publish()
+        .expect_err("registry descriptor capacity");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    assert_eq!(
+        error.to_string(),
+        "instance registry descriptor capacity of 256 reached"
+    );
+    assert!(!overflow_path.exists());
+}
+
+#[test]
+fn stale_cleanup_deduplicates_a_batch_and_syncs_the_registry_once() {
+    let fixture = RegistryFixture::new();
+    let _publishers = [
+        fixture.publish("127.0.0.1:20300"),
+        fixture.publish("127.0.0.1:20301"),
+        fixture.publish("127.0.0.1:20302"),
+    ];
+    let mut stale = fixture.scan().candidates;
+    stale.push(stale[0].clone());
+    let cancelled = CancellationToken::new();
+    let mut durable_syncs = 0usize;
+
+    let removed = fixture
+        .scanner()
+        .remove_stale_batch_if_current(
+            &stale,
+            Instant::now() + Duration::from_secs(1),
+            &cancelled,
+            || durable_syncs += 1,
+        )
+        .expect("batched stale cleanup");
+
+    assert_eq!(removed, 3);
+    assert_eq!(durable_syncs, 1);
+    assert!(fixture.scan().candidates.is_empty());
 }

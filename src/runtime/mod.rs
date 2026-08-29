@@ -71,13 +71,14 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let mut settings =
         SettingsSession::load(&startup.config).context("failed to load Fluxcope settings")?;
     let settings_snapshot = settings.snapshot();
+    let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
+    crate::mcp::ensure_supported_platform(mcp_enabled)?;
     let requested_proxy_addr = resolve_proxy_bind_addr(&startup.config, &settings_snapshot);
     let proxy_listener_lease = bind_proxy_listener(requested_proxy_addr)?;
     let proxy_addr = proxy_listener_lease
         .local_addr()
         .context("failed to read bound proxy address")?;
     let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
-    let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
     #[cfg(unix)]
     let identity = InstanceIdentity::new(proxy_addr)?;
     #[cfg(unix)]

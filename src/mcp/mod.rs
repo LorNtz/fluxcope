@@ -3,6 +3,13 @@ pub(crate) mod broker;
 mod schema;
 mod telemetry;
 
+pub(crate) fn ensure_supported_platform(enabled: bool) -> anyhow::Result<()> {
+    if enabled && !cfg!(unix) {
+        anyhow::bail!("unsupported_platform: embedded MCP requires Unix");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub(crate) async fn run_stdio() -> anyhow::Result<()> {
     use anyhow::Context as _;

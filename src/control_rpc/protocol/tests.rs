@@ -62,6 +62,7 @@ fn response_envelopes_serialize_exactly_one_typed_outcome() {
             message: "instance unavailable".to_owned(),
             retryable: true,
             details: json!({"reason": "closed"}),
+            local_transport_cause: None,
         },
     );
 
