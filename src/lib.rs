@@ -13,6 +13,7 @@ mod instance;
 mod instance_registry;
 mod logging;
 mod mapping;
+mod mcp;
 mod private_fs;
 mod proxy_handler;
 mod recording;
@@ -23,5 +24,16 @@ mod select;
 mod settings;
 mod ui;
 pub async fn run() -> anyhow::Result<()> {
-    runtime::run(cli::ProxyStartup::default()).await
+    run_from(std::env::args_os()).await
+}
+
+pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match cli::parse_from(args)? {
+        cli::ProcessMode::Proxy(startup) => runtime::run(startup).await,
+        cli::ProcessMode::Broker => mcp::run_stdio().await,
+    }
 }

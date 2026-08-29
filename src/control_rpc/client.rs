@@ -13,6 +13,7 @@ use std::{
     time::Instant,
 };
 use tokio::{io::AsyncWriteExt, net::UnixStream};
+use tokio_util::sync::CancellationToken;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -24,6 +25,7 @@ impl ControlRpcClient {
         operation: ControlOperation,
         deadline: Instant,
         client: DeclaredClient,
+        cancelled: CancellationToken,
     ) -> Result<ControlResult, ControlError> {
         let request_id = next_request_id();
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -65,9 +67,16 @@ impl ControlRpcClient {
             response.validate(&request_id, &expected_scope)
         };
 
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), call)
-            .await
-            .map_err(|_| ControlError::instance_unavailable("private RPC deadline elapsed"))?
+        tokio::select! {
+            biased;
+            () = cancelled.cancelled() => {
+                Err(ControlError::cancelled("private RPC call cancelled"))
+            }
+            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), call) => {
+                result
+                    .map_err(|_| ControlError::deadline_exceeded("private RPC deadline elapsed"))?
+            }
+        }
     }
 }
 

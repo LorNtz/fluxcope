@@ -20,7 +20,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tui-tree-widget = "0.23" # Essential for the request list panel
 
 # Async & Runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
@@ -61,12 +61,15 @@ tui-scrollview = "=0.5.1"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
 globset = "0.4"
 tempfile = "3"
+rmcp = { version = "=3.1.4", default-features = false, features = ["base64", "macros", "server", "transport-io"] }
+schemars = "1.1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 criterion = "0.5"
+rmcp = { version = "=3.1.4", default-features = false, features = ["client", "transport-child-process"] }
 
 [[bench]]
 name = "core_paths"

@@ -170,7 +170,7 @@ impl ExistingDescriptorProbe for ControlRpcDescriptorProbe {
         cancelled: CancellationToken,
     ) -> BoxFuture<'a, Result<InstanceScope, ControlError>> {
         Box::pin(async move {
-            let call = ControlRpcClient::call(
+            match ControlRpcClient::call(
                 descriptor,
                 ControlOperation::DescribeInstance,
                 deadline,
@@ -178,14 +178,11 @@ impl ExistingDescriptorProbe for ControlRpcDescriptorProbe {
                     name: "wirelens-runtime".to_owned(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
-            );
-            tokio::select! {
-                result = call => match result? {
-                    ControlResult::DescribeInstance { instance, .. } => Ok(instance),
-                },
-                _ = cancelled.cancelled() => Err(ControlError::instance_unavailable(
-                    "descriptor probe was cancelled",
-                )),
+                cancelled,
+            )
+            .await?
+            {
+                ControlResult::DescribeInstance { instance, .. } => Ok(instance),
             }
         })
     }

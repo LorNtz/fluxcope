@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     ffi::OsStr,
     fmt::{self, Write as _},
     io,
@@ -84,7 +85,7 @@ impl<'de> Deserialize<'de> for RunId {
     where
         D: Deserializer<'de>,
     {
-        let value = <&str>::deserialize(deserializer)?;
+        let value = Cow::<'de, str>::deserialize(deserializer)?;
         value.parse().map_err(de::Error::custom)
     }
 }

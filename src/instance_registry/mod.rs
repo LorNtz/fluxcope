@@ -103,6 +103,9 @@ impl DiscoveryDiagnostic {
         }
         Self { code, message }
     }
+    pub(crate) fn from_parts(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, message)
+    }
 
     pub(crate) fn code(&self) -> &'static str {
         self.code
@@ -552,6 +555,39 @@ impl RegistryScanner {
             Err(error) => return Err(error),
         }
         Ok(scan)
+    }
+    pub(crate) fn remove_stale_if_current(
+        &self,
+        expected: &InstanceDescriptor,
+    ) -> io::Result<bool> {
+        let wirelens_home = self.run_root.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registry run root has no Wirelens home parent",
+            )
+        })?;
+        let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
+        let descriptor_path = self
+            .instances_root
+            .join(descriptor_name(expected.proxy_endpoint()));
+        let current = match self.parse_descriptor(&descriptor_path) {
+            Ok(descriptor) => descriptor,
+            Err(_) => return Ok(false),
+        };
+        if current.proxy_endpoint != expected.proxy_endpoint
+            || current.run_id != expected.run_id
+            || current.socket_path != expected.socket_path
+        {
+            return Ok(false);
+        }
+        fs::remove_file(&descriptor_path)?;
+        match fs::remove_file(&current.socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        File::open(&self.instances_root)?.sync_all()?;
+        Ok(true)
     }
 
     fn inspect(&self, path: &Path, scan: &mut RegistryScan) {

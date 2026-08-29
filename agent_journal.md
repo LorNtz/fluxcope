@@ -28,3 +28,8 @@ Date: 2026/09/17 10:38
 Date: 2026/09/17 10:39
 
 - Per Main clarification, removed newly introduced global install_default from runtime::run. Master has no global provider install; runtime preserves its explicit aws_lc_rs provider passed to RcgenAuthority and with_rustls_connector without adding process-global side effects. Final runtime smoke remains Main-owned.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:40
+
+- Merged MCP broker module registration with the upstream private_fs module; retained both broker dispatch and owner-only file protection. Continued using master lockfile as the dependency-resolution baseline.

@@ -62,6 +62,14 @@ fn generated_run_id_is_canonical_base64url_and_round_trips_through_json() {
     assert_eq!(&decoded, run_id);
     assert_eq!(decoded.decoded_len(), 16);
 }
+#[test]
+fn run_id_deserializes_from_owned_json_value() {
+    let value = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA");
+
+    let run_id: RunId = serde_json::from_value(value).expect("owned JSON run ID");
+
+    assert_eq!(run_id.as_str(), "AAAAAAAAAAAAAAAAAAAAAA");
+}
 
 #[test]
 fn run_id_parser_rejects_wrong_lengths_padding_alphabet_and_noncanonical_bits() {

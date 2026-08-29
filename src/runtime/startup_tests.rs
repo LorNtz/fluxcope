@@ -408,13 +408,12 @@ async fn preflight_conflict_cancels_service_and_removes_unpublished_socket() {
             .expect("existing publisher");
     existing.publish().expect("existing descriptor");
     let replacement_identity = identity(endpoint);
-    let replacement_socket;
     let (handler, _control_rx) = runtime_handler();
     let prepared =
         PrivateControlStartup::prepare(true, home.path(), replacement_identity, &settings())
             .expect("prepare replacement")
             .expect("enabled control");
-    replacement_socket = prepared.socket_path().to_path_buf();
+    let replacement_socket = prepared.socket_path().to_path_buf();
     let mut running = prepared
         .start(handler, CancellationToken::new())
         .expect("start control service");
@@ -520,6 +519,7 @@ async fn graceful_shutdown_cancels_admitted_calls_before_registry_cleanup() {
                 name: "shutdown-order-test".to_owned(),
                 version: "1".to_owned(),
             },
+            CancellationToken::new(),
         )
         .await
     });

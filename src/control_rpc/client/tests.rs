@@ -51,6 +51,7 @@ where
         ControlOperation::DescribeInstance,
         Instant::now() + Duration::from_secs(1),
         declared_client(),
+        tokio_util::sync::CancellationToken::new(),
     )
     .await;
     server.await.expect("fake server task");
@@ -127,6 +128,7 @@ async fn client_closes_after_reading_one_response() {
         ControlOperation::DescribeInstance,
         Instant::now() + Duration::from_secs(1),
         declared_client(),
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .expect("successful RPC call");
@@ -203,11 +205,12 @@ async fn one_outer_deadline_bounds_connect_write_and_read() {
         ControlOperation::DescribeInstance,
         started + Duration::from_millis(25),
         declared_client(),
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
     .expect_err("outer deadline");
 
-    assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
+    assert_eq!(error.code, ControlErrorCode::DeadlineExceeded);
     assert!(started.elapsed() < Duration::from_millis(500));
     server.abort();
 }

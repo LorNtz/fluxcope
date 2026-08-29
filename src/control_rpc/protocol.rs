@@ -88,10 +88,17 @@ impl ControlResult {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlErrorCode {
     InvalidArgument,
+    NoInstances,
+    InstanceRequired,
+    InstanceNotFound,
     InstanceGenerationConflict,
     InstanceUnavailable,
     RpcVersionMismatch,
     RpcFrameTooLarge,
+    ServiceUnavailable,
+    DeadlineExceeded,
+    Cancelled,
+    InternalError,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -101,6 +108,25 @@ pub(crate) struct ControlError {
     pub(crate) message: String,
     pub(crate) retryable: bool,
     pub(crate) details: Value,
+}
+
+impl ControlErrorCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidArgument => "invalid_argument",
+            Self::NoInstances => "no_instances",
+            Self::InstanceRequired => "instance_required",
+            Self::InstanceNotFound => "instance_not_found",
+            Self::InstanceGenerationConflict => "instance_generation_conflict",
+            Self::InstanceUnavailable => "instance_unavailable",
+            Self::RpcVersionMismatch => "rpc_version_mismatch",
+            Self::RpcFrameTooLarge => "rpc_frame_too_large",
+            Self::ServiceUnavailable => "service_unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::InternalError => "internal_error",
+        }
+    }
 }
 
 impl ControlError {
@@ -117,10 +143,46 @@ impl ControlError {
             details,
         }
     }
+    pub(crate) fn code(&self) -> ControlErrorCode {
+        self.code
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn details(&self) -> &Value {
+        &self.details
+    }
 
     pub(crate) fn invalid_argument(message: impl Into<String>) -> Self {
         Self::new(
             ControlErrorCode::InvalidArgument,
+            message,
+            false,
+            Value::Object(Default::default()),
+        )
+    }
+    pub(crate) fn no_instances() -> Self {
+        Self::new(
+            ControlErrorCode::NoInstances,
+            "no live Wirelens instances are available",
+            true,
+            Value::Object(Default::default()),
+        )
+    }
+
+    pub(crate) fn instance_required(message: impl Into<String>, details: Value) -> Self {
+        Self::new(ControlErrorCode::InstanceRequired, message, false, details)
+    }
+
+    pub(crate) fn instance_not_found(message: impl Into<String>) -> Self {
+        Self::new(
+            ControlErrorCode::InstanceNotFound,
             message,
             false,
             Value::Object(Default::default()),
@@ -132,6 +194,41 @@ impl ControlError {
             ControlErrorCode::InstanceUnavailable,
             message,
             true,
+            Value::Object(Default::default()),
+        )
+    }
+    pub(crate) fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            ControlErrorCode::ServiceUnavailable,
+            message,
+            true,
+            Value::Object(Default::default()),
+        )
+    }
+
+    pub(crate) fn deadline_exceeded(message: impl Into<String>) -> Self {
+        Self::new(
+            ControlErrorCode::DeadlineExceeded,
+            message,
+            true,
+            Value::Object(Default::default()),
+        )
+    }
+
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(
+            ControlErrorCode::Cancelled,
+            message,
+            true,
+            Value::Object(Default::default()),
+        )
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::new(
+            ControlErrorCode::InternalError,
+            message,
+            false,
             Value::Object(Default::default()),
         )
     }
