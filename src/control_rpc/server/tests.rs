@@ -14,6 +14,7 @@ use crate::{
         test_support::{OTHER_RUN_ID, endpoint, read_payload, request_json, write_payload},
     },
     instance::InstanceIdentity,
+    settings::{ConfigMode, PersistenceMode},
 };
 use serde_json::Value;
 use std::{
@@ -101,7 +102,14 @@ impl ControlRpcHandler for TestHandler {
                     });
                 }
             }
-            Ok(ControlResult::DescribeInstance { instance: scope })
+            Ok(ControlResult::DescribeInstance {
+                instance: scope,
+                config_mode: ConfigMode::Temporary,
+                persistence: PersistenceMode::Ephemeral,
+                recording_enabled: false,
+                retained_capture_count: 0,
+                settings_revision: 0,
+            })
         }
     }
 }

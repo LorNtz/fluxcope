@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use super::{
-    BoundedDescriptorNames, RegistryMutationLock, RegistryPublisher, RegistryScan, RegistryScanner,
-    validate_descriptor_metadata,
+    BoundedDescriptorNames, InstanceDescriptor, RegistryMutationLock, RegistryPublisher,
+    RegistryScan, RegistryScanner, validate_descriptor_metadata,
 };
 use crate::{
     instance::InstanceIdentity,
@@ -572,5 +572,53 @@ fn stale_cleanup_refuses_a_descriptor_whose_run_id_changed_before_locked_reread(
 
     drop(publisher);
 
+    assert!(descriptor_path.exists());
+}
+
+#[test]
+fn exact_stale_descriptor_can_be_removed_then_replaced_after_a_private_probe() {
+    let fixture = RegistryFixture::new();
+    let stale_publisher = fixture.publish(ENDPOINT_A);
+    let stale = fixture.scan().candidates[0].clone();
+    let stale_socket = stale.socket_path().to_path_buf();
+    let mut replacement = fixture.prepare(ENDPOINT_A);
+
+    assert!(
+        replacement
+            .remove_stale_for_replacement(&stale)
+            .expect("identity-safe stale removal")
+    );
+    assert!(!stale_publisher.descriptor_path().exists());
+    assert!(!stale_socket.exists());
+
+    replacement.publish().expect("replacement publication");
+    let report = fixture.scan();
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(
+        report.candidates[0].run_id(),
+        replacement.identity().run_id()
+    );
+}
+
+#[test]
+fn stale_replacement_refuses_a_changed_descriptor_after_the_probe() {
+    let fixture = RegistryFixture::new();
+    let stale_publisher = fixture.publish(ENDPOINT_A);
+    let stale: InstanceDescriptor = fixture.scan().candidates[0].clone();
+    let descriptor_path = stale_publisher.descriptor_path().to_path_buf();
+    let replacement_identity =
+        InstanceIdentity::new(ENDPOINT_A.parse().expect("endpoint")).expect("replacement identity");
+    let replacement_run_id = replacement_identity.run_id().as_str().to_owned();
+    let mut replacement = fixture.prepare(ENDPOINT_A);
+
+    let removed = replacement
+        .remove_stale_for_replacement_with_observer(&stale, || {
+            fixture.rewrite_descriptor(&descriptor_path, |descriptor| {
+                descriptor["run_id"] = Value::from(replacement_run_id);
+            });
+        })
+        .expect("locked stale replacement check");
+
+    assert!(!removed);
     assert!(descriptor_path.exists());
 }

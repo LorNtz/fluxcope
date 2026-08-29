@@ -1,6 +1,10 @@
+#[cfg(unix)]
+mod control;
 mod event_loop;
 mod policy;
 mod services;
+#[cfg(test)]
+mod startup_tests;
 
 #[cfg(test)]
 use std::path::PathBuf;
@@ -23,6 +27,8 @@ use rustls::{crypto::aws_lc_rs, pki_types::CertificateDer};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use crate::instance::InstanceIdentity;
 use crate::{
     app::App,
     ca,
@@ -42,7 +48,9 @@ use crate::{
     settings::{AppSettings, SettingsSession},
 };
 #[cfg(unix)]
-use crate::{instance::InstanceIdentity, instance_registry::RegistryPublisher};
+use control::{
+    ControlRpcDescriptorProbe, PrivateControlStartup, RuntimeControlHandler, RuntimeGateway,
+};
 use event_loop::{AppRuntime, Tui};
 use policy::RuntimePolicy;
 use services::{ServiceKind, ServiceSupervisor};
@@ -69,15 +77,27 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         .local_addr()
         .context("failed to read bound proxy address")?;
     let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
+    let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
     #[cfg(unix)]
     let identity = InstanceIdentity::new(proxy_addr)?;
     #[cfg(unix)]
-    let mut registry_publisher = RegistryPublisher::prepare(&wirelens_home, identity, &settings)
-        .context("failed to prepare instance registry publication")?;
-    let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
+    let prepared_control =
+        PrivateControlStartup::prepare(mcp_enabled, &wirelens_home, identity.clone(), &settings)
+            .map_err(anyhow::Error::new)?;
     let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
+    let certificate_store_dir = settings
+        .certificate_store_dir()
+        .context("failed to resolve certificate store directory")?;
+    let certificate_pem_filename = settings.certificate_pem_filename().to_string();
+    let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename)
+        .with_context(|| {
+            format!(
+                "failed to create or load certificate authority in {}",
+                certificate_store_dir.display()
+            )
+        })?;
     let shutdown = CancellationToken::new();
 
     let logging = AppLogger::init(
@@ -112,17 +132,6 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let decode = start_decode_service(policy.decode.clone(), shutdown.child_token());
     let request_search = start_request_search_service(shutdown.child_token());
 
-    let certificate_store_dir = settings
-        .certificate_store_dir()
-        .context("failed to resolve certificate store directory")?;
-    let certificate_pem_filename = settings.certificate_pem_filename().to_string();
-    let ca = ca::create_or_load_ca(&certificate_store_dir, &certificate_pem_filename)
-        .with_context(|| {
-            format!(
-                "failed to create or load certificate authority in {}",
-                certificate_store_dir.display()
-            )
-        })?;
     log::info!(
         "CA certificate available at {}",
         certificate_store_dir
@@ -130,7 +139,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
             .display()
     );
 
-    let certificate_download = match start_certificate_download_server(
+    let mut certificate_download = match start_certificate_download_server(
         ca.cert_pem(),
         certificate_pem_filename,
         shutdown.child_token(),
@@ -142,27 +151,9 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         }
     };
 
-    let proxy_task = start_proxy(
-        proxy_listener_lease
-            .try_clone_for_proxy()
-            .context("failed to clone proxy listener for proxy task")?,
-        ca,
-        capture_publisher,
-        body_tasks.clone(),
-        request_policy_store.clone(),
-        recording.clone(),
-        shutdown.child_token(),
-    )?;
-    #[cfg(unix)]
-    if let Err(error) = registry_publisher.publish() {
-        shutdown.cancel();
-        return Err(error).context("failed to publish instance descriptor");
-    }
-
-    let tui = Tui::enter().context("failed to initialize terminal UI")?;
     let mut app = App::with_runtime_policies(
         settings_snapshot.as_ref().clone(),
-        recording,
+        recording.clone(),
         log_retention,
         CaptureRetentionPolicy {
             max_records: policy.capture.retained_records,
@@ -176,19 +167,116 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     }
 
     let mut services = ServiceSupervisor::new(shutdown.clone());
-    services.track_result(ServiceKind::Proxy, proxy_task);
-    if let Some(service) = certificate_download {
+    if let Some(service) = certificate_download.take() {
         services.track_result(ServiceKind::CertificateDownload, service.task);
     }
     services.track_infallible(ServiceKind::Logger, logging.task);
     services.track_result(
         ServiceKind::BodyPumps,
-        tokio::spawn(body_tasks.wait_for_shutdown(policy.render.shutdown_grace)),
+        tokio::spawn(
+            body_tasks
+                .clone()
+                .wait_for_shutdown(policy.render.shutdown_grace),
+        ),
     );
     services.track_result(ServiceKind::Decoder, decode.task);
     services.track_result(ServiceKind::RequestSearch, request_search.task);
 
-    AppRuntime::new(
+    #[cfg(unix)]
+    let (control_rx, mut running_control) = if let Some(prepared) = prepared_control {
+        let (client, receiver) = RuntimeGateway::new(64);
+        match prepared.start(RuntimeControlHandler::new(client), shutdown.child_token()) {
+            Ok(running) => (Some(receiver), Some(running)),
+            Err(error) => {
+                shutdown.cancel();
+                services.shutdown(policy.render.shutdown_grace).await;
+                return Err(anyhow::Error::new(error));
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    let proxy_listener = match proxy_listener_lease
+        .try_clone_for_proxy()
+        .context("failed to clone proxy listener for proxy task")
+    {
+        Ok(listener) => listener,
+        Err(error) => {
+            shutdown.cancel();
+            services.shutdown(policy.render.shutdown_grace).await;
+            #[cfg(unix)]
+            if let Some(running) = running_control.take() {
+                let _ = running.rollback(policy.render.shutdown_grace).await;
+            }
+            return Err(error);
+        }
+    };
+
+    let proxy_task = match start_proxy(
+        proxy_listener,
+        ca,
+        capture_publisher,
+        body_tasks.clone(),
+        request_policy_store.clone(),
+        recording,
+        shutdown.child_token(),
+    ) {
+        Ok(task) => task,
+        Err(error) => {
+            shutdown.cancel();
+            services.shutdown(policy.render.shutdown_grace).await;
+            #[cfg(unix)]
+            if let Some(running) = running_control.take() {
+                let _ = running.rollback(policy.render.shutdown_grace).await;
+            }
+            return Err(error);
+        }
+    };
+    services.track_result(ServiceKind::Proxy, proxy_task);
+
+    #[cfg(unix)]
+    if let Some(running) = running_control.as_mut() {
+        if let Err(error) = running
+            .publish_after_probe(
+                &ControlRpcDescriptorProbe,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                shutdown.child_token(),
+            )
+            .await
+        {
+            shutdown.cancel();
+            services.shutdown(policy.render.shutdown_grace).await;
+            if let Some(running) = running_control.take() {
+                let _ = running.rollback(policy.render.shutdown_grace).await;
+            }
+            return Err(anyhow::Error::new(error));
+        }
+    }
+
+    let tui = match Tui::enter().context("failed to initialize terminal UI") {
+        Ok(tui) => tui,
+        Err(error) => {
+            shutdown.cancel();
+            services.shutdown(policy.render.shutdown_grace).await;
+            #[cfg(unix)]
+            if let Some(running) = running_control.take() {
+                let _ = running.rollback(policy.render.shutdown_grace).await;
+            }
+            return Err(error);
+        }
+    };
+
+    #[cfg(unix)]
+    let control_publisher = if let Some(running) = running_control.take() {
+        let (publisher, task) = running.into_supervised_parts();
+        services.track_result(ServiceKind::ControlRpc, task);
+        Some(publisher)
+    } else {
+        None
+    };
+
+    let runtime = AppRuntime::new(
         app,
         capture_rx,
         logging.records,
@@ -206,9 +294,10 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         policy.render,
         services,
         shutdown,
-    )
-    .run()
-    .await
+    );
+    #[cfg(unix)]
+    let runtime = runtime.with_control(identity, control_rx, control_publisher);
+    runtime.run().await
 }
 
 struct BoundProxyListener {

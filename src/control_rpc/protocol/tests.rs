@@ -241,14 +241,12 @@ fn response_rejects_unknown_fields_versions_and_error_codes() {
         },
         "extra": true
     });
-    let wrong_version = json!({
-        "protocol_version": 2,
-        "request_id": "request-1",
-        "result": {
-            "operation": "describe_instance",
-            "instance": scope_value(ENDPOINT, RUN_ID)
-        }
-    });
+    let mut wrong_version = serde_json::to_value(ResponseEnvelope::success(
+        "request-1".to_owned(),
+        describe_result(),
+    ))
+    .expect("complete describe response");
+    wrong_version["protocol_version"] = json!(2);
     let unknown_error_code = json!({
         "protocol_version": 1,
         "request_id": "request-1",

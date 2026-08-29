@@ -16,6 +16,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use super::control::{RuntimeCommand, RuntimeControlReceiver};
 use super::{
     policy::RenderPolicy,
     save_settings_draft,
@@ -33,6 +35,24 @@ use crate::{
     settings::SettingsSession,
     ui::RootView,
 };
+#[cfg(unix)]
+use crate::{
+    control::{AppControlSummary, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest},
+    control_rpc::protocol::{ControlError, InstanceScope},
+    instance::InstanceIdentity,
+    instance_registry::RegistryPublisher,
+};
+#[cfg(unix)]
+type PlatformControlReceiver = RuntimeControlReceiver;
+
+#[cfg(not(unix))]
+struct PlatformControlReceiver;
+
+enum PlatformControlEvent {
+    #[cfg(unix)]
+    Command(RuntimeCommand),
+    Closed,
+}
 
 pub(super) struct AppRuntime {
     app: App,
@@ -57,6 +77,11 @@ pub(super) struct AppRuntime {
     policy: RenderPolicy,
     services: ServiceSupervisor,
     shutdown: CancellationToken,
+    #[cfg(unix)]
+    identity: Option<InstanceIdentity>,
+    control_rx: Option<PlatformControlReceiver>,
+    #[cfg(unix)]
+    control_publisher: Option<RegistryPublisher>,
 }
 
 impl AppRuntime {
@@ -103,13 +128,50 @@ impl AppRuntime {
             policy,
             services,
             shutdown,
+            #[cfg(unix)]
+            identity: None,
+            control_rx: None,
+            #[cfg(unix)]
+            control_publisher: None,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn with_control(
+        mut self,
+        identity: InstanceIdentity,
+        control_rx: Option<RuntimeControlReceiver>,
+        control_publisher: Option<RegistryPublisher>,
+    ) -> Self {
+        self.identity = Some(identity);
+        self.control_rx = control_rx;
+        self.control_publisher = control_publisher;
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    fn test_with_control(
+        identity: InstanceIdentity,
+        app: App,
+        settings: SettingsSession,
+        control_rx: RuntimeControlReceiver,
+    ) -> ControlExecutionHarness {
+        ControlExecutionHarness {
+            identity,
+            app,
+            settings,
+            control_rx,
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
         let result = self.run_loop().await;
+        #[cfg(unix)]
+        self.close_control_ingress();
         self.shutdown.cancel();
         self.services.shutdown(self.policy.shutdown_grace).await;
+        #[cfg(unix)]
+        self.control_publisher.take();
         result
     }
 
@@ -143,6 +205,17 @@ impl AppRuntime {
                     }
                     dirty = true;
                     dirty |= self.handle_settings_save_request();
+                }
+                control_event = receive_control_event(&mut self.control_rx) => {
+                    #[cfg(unix)]
+                    match control_event {
+                        PlatformControlEvent::Command(command) => {
+                            dirty |= self.process_control_command(command);
+                        }
+                        PlatformControlEvent::Closed => self.control_rx = None,
+                    }
+                    #[cfg(not(unix))]
+                    let _ = control_event;
                 }
                 capture = self.capture_rx.recv(), if captures_open => {
                     match capture {
@@ -203,11 +276,14 @@ impl AppRuntime {
                         return Err(anyhow!("all runtime services exited unexpectedly"));
                     };
                     let completion = completion?;
+                    if is_fatal_service(completion.kind) {
+                        completion.result?;
+                        return Err(anyhow!(
+                            "{:?} service exited unexpectedly",
+                            completion.kind
+                        ));
+                    }
                     match completion.kind {
-                        ServiceKind::Proxy => {
-                            completion.result?;
-                            return Err(anyhow!("proxy service exited unexpectedly"));
-                        }
                         ServiceKind::CertificateDownload => {
                             let message = match completion.result {
                                 Ok(()) => "certificate download service stopped".to_string(),
@@ -224,17 +300,12 @@ impl AppRuntime {
                             self.app.append_log(LogRecord::system(format!("ERROR - [fluxcope::runtime] {message}")));
                             dirty = true;
                         }
-                        ServiceKind::BodyPumps => {
-                            completion.result?;
-                            return Err(anyhow!("body pump supervisor exited unexpectedly"));
-                        }
-                        ServiceKind::Decoder => {
-                            completion.result?;
-                            return Err(anyhow!("decode service exited unexpectedly"));
-                        }
-                        ServiceKind::RequestSearch => {
-                            completion.result?;
-                            return Err(anyhow!("request search service exited unexpectedly"));
+                        ServiceKind::Proxy
+                        | ServiceKind::ControlRpc
+                        | ServiceKind::BodyPumps
+                        | ServiceKind::Decoder
+                        | ServiceKind::RequestSearch => {
+                            return Err(anyhow!("fatal service classification was inconsistent"));
                         }
                     }
                 }
@@ -370,6 +441,158 @@ impl AppRuntime {
             changed = true;
         }
         changed
+    }
+    #[cfg(unix)]
+    fn execute_control(
+        &mut self,
+        request: RuntimeRequest,
+    ) -> std::result::Result<RuntimeReply, ControlError> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| ControlError::instance_unavailable("runtime control is not enabled"))?;
+        execute_control_request(identity, &self.app, &self.settings, request)
+    }
+
+    #[cfg(unix)]
+    fn process_control_command(&mut self, command: RuntimeCommand) -> bool {
+        if command.cancelled.is_cancelled() {
+            return false;
+        }
+        let result = self.execute_control(command.request);
+        let _ = command.reply.send(result);
+        false
+    }
+
+    #[cfg(unix)]
+    fn close_control_ingress(&mut self) {
+        let Some(receiver) = self.control_rx.as_mut() else {
+            return;
+        };
+        receiver.close();
+        while let Ok(command) = receiver.try_recv() {
+            let _ = command.reply.send(Err(ControlError::instance_unavailable(
+                "runtime command gateway is shutting down",
+            )));
+        }
+    }
+
+    #[cfg(unix)]
+    fn control_ingress_is_closed(&self) -> bool {
+        self.control_rx
+            .as_ref()
+            .map_or(true, RuntimeControlReceiver::is_closed)
+    }
+
+    #[cfg(all(test, unix))]
+    async fn process_next_control_command(&mut self) -> Result<bool> {
+        match receive_control_event(&mut self.control_rx).await {
+            PlatformControlEvent::Command(command) => Ok(self.process_control_command(command)),
+            PlatformControlEvent::Closed => Err(anyhow!("runtime command gateway closed")),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn receive_control_event(
+    receiver: &mut Option<PlatformControlReceiver>,
+) -> PlatformControlEvent {
+    match receiver.as_mut() {
+        Some(receiver) => receiver
+            .recv()
+            .await
+            .map_or(PlatformControlEvent::Closed, PlatformControlEvent::Command),
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn receive_control_event(
+    _receiver: &mut Option<PlatformControlReceiver>,
+) -> PlatformControlEvent {
+    std::future::pending().await
+}
+
+#[cfg(unix)]
+fn execute_control_request(
+    identity: &InstanceIdentity,
+    app: &App,
+    settings: &SettingsSession,
+    request: RuntimeRequest,
+) -> std::result::Result<RuntimeReply, ControlError> {
+    match request {
+        RuntimeRequest::DescribeInstance => {
+            let AppControlSummary {
+                recording_enabled,
+                retained_capture_count,
+                settings_revision,
+            } = app.control_summary();
+            let context = settings.ui_context();
+            Ok(RuntimeReply::Instance(InstanceRuntimeSnapshot {
+                instance: InstanceScope {
+                    proxy_endpoint: identity.proxy_endpoint(),
+                    run_id: identity.run_id().clone(),
+                },
+                config_mode: context.config_mode,
+                persistence: context.persistence,
+                recording_enabled,
+                retained_capture_count,
+                settings_revision,
+            }))
+        }
+        #[cfg(test)]
+        RuntimeRequest::UnsupportedForTest => Err(ControlError::invalid_argument(
+            "unsupported runtime control operation",
+        )),
+    }
+}
+
+fn is_fatal_service(kind: ServiceKind) -> bool {
+    !matches!(kind, ServiceKind::CertificateDownload | ServiceKind::Logger)
+}
+
+#[cfg(all(test, unix))]
+struct ControlExecutionHarness {
+    identity: InstanceIdentity,
+    app: App,
+    settings: SettingsSession,
+    control_rx: RuntimeControlReceiver,
+}
+
+#[cfg(all(test, unix))]
+impl ControlExecutionHarness {
+    fn execute_control(
+        &mut self,
+        request: RuntimeRequest,
+    ) -> std::result::Result<RuntimeReply, ControlError> {
+        execute_control_request(&self.identity, &self.app, &self.settings, request)
+    }
+
+    async fn process_next_control_command(&mut self) -> Result<bool> {
+        let command = self
+            .control_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("runtime command gateway closed"))?;
+        if command.cancelled.is_cancelled() {
+            return Ok(false);
+        }
+        let result = self.execute_control(command.request);
+        let _ = command.reply.send(result);
+        Ok(false)
+    }
+
+    fn close_control_ingress(&mut self) {
+        self.control_rx.close();
+        while let Ok(command) = self.control_rx.try_recv() {
+            let _ = command.reply.send(Err(ControlError::instance_unavailable(
+                "runtime command gateway is shutting down",
+            )));
+        }
+    }
+
+    fn control_ingress_is_closed(&self) -> bool {
+        self.control_rx.is_closed()
     }
 }
 
@@ -546,5 +769,137 @@ mod tests {
             KeyCode::Char('c'),
             KeyModifiers::NONE,
         )));
+    }
+
+    #[test]
+    fn runtime_describe_returns_authoritative_identity_and_live_owned_state() {
+        use crate::{
+            app::App,
+            control::{RuntimeReply, RuntimeRequest},
+            instance::InstanceIdentity,
+            recording::RecordingState,
+            settings::{AppSettings, ConfigMode, PersistenceMode, SettingsSession, UiSettings},
+        };
+
+        let identity =
+            InstanceIdentity::new("127.0.0.1:19011".parse().expect("endpoint")).expect("identity");
+        let settings = SettingsSession::temporary(AppSettings::default());
+        let app = App::with_recording(UiSettings::default(), RecordingState::new(true));
+        let (_client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let mut runtime =
+            AppRuntime::test_with_control(identity.clone(), app, settings, control_rx);
+
+        let reply = runtime
+            .execute_control(RuntimeRequest::DescribeInstance)
+            .expect("describe runtime");
+        let RuntimeReply::Instance(snapshot) = reply;
+
+        assert_eq!(snapshot.instance.proxy_endpoint, identity.proxy_endpoint());
+        assert_eq!(snapshot.instance.run_id, *identity.run_id());
+        assert_eq!(snapshot.config_mode, ConfigMode::Temporary);
+        assert_eq!(snapshot.persistence, PersistenceMode::Ephemeral);
+        assert!(snapshot.recording_enabled);
+        assert_eq!(snapshot.retained_capture_count, 0);
+        assert_eq!(snapshot.settings_revision, 0);
+    }
+
+    #[test]
+    fn unsupported_runtime_operation_is_invalid_argument() {
+        use crate::{
+            app::App,
+            control::RuntimeRequest,
+            control_rpc::protocol::ControlErrorCode,
+            instance::InstanceIdentity,
+            recording::RecordingState,
+            settings::{AppSettings, SettingsSession, UiSettings},
+        };
+
+        let identity =
+            InstanceIdentity::new("127.0.0.1:19012".parse().expect("endpoint")).expect("identity");
+        let settings = SettingsSession::temporary(AppSettings::default());
+        let app = App::with_recording(UiSettings::default(), RecordingState::default());
+        let (_client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
+
+        let error = runtime
+            .execute_control(RuntimeRequest::UnsupportedForTest)
+            .expect_err("unsupported control operation");
+
+        assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
+    async fn command_channel_describe_is_processed_without_marking_the_frame_dirty() {
+        use crate::{
+            app::App,
+            control::RuntimeRequest,
+            instance::InstanceIdentity,
+            recording::RecordingState,
+            settings::{AppSettings, SettingsSession, UiSettings},
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let identity =
+            InstanceIdentity::new("127.0.0.1:19013".parse().expect("endpoint")).expect("identity");
+        let expected_run_id = identity.run_id().clone();
+        let settings = SettingsSession::temporary(AppSettings::default());
+        let app = App::with_recording(UiSettings::default(), RecordingState::default());
+        let (client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
+        let request = tokio::spawn(async move {
+            client
+                .request(RuntimeRequest::DescribeInstance, CancellationToken::new())
+                .await
+        });
+
+        let visible_state_changed = runtime
+            .process_next_control_command()
+            .await
+            .expect("process command");
+        let reply = request
+            .await
+            .expect("request task")
+            .expect("describe reply");
+
+        assert!(!visible_state_changed);
+        assert_eq!(reply.instance().instance.run_id, expected_run_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_closes_command_ingress_before_service_cleanup() {
+        use crate::{
+            app::App,
+            control::RuntimeRequest,
+            control_rpc::protocol::ControlErrorCode,
+            instance::InstanceIdentity,
+            recording::RecordingState,
+            settings::{AppSettings, SettingsSession, UiSettings},
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let identity =
+            InstanceIdentity::new("127.0.0.1:19014".parse().expect("endpoint")).expect("identity");
+        let settings = SettingsSession::temporary(AppSettings::default());
+        let app = App::with_recording(UiSettings::default(), RecordingState::default());
+        let (client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
+
+        runtime.close_control_ingress();
+        let error = client
+            .request(RuntimeRequest::DescribeInstance, CancellationToken::new())
+            .await
+            .expect_err("runtime no longer admits ordinary commands");
+
+        assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
+        assert!(runtime.control_ingress_is_closed());
+    }
+
+    #[test]
+    fn control_rpc_completion_is_fatal_to_the_proxy_instance() {
+        assert!(is_fatal_service(ServiceKind::ControlRpc));
+        assert!(is_fatal_service(ServiceKind::Proxy));
+        assert!(!is_fatal_service(ServiceKind::CertificateDownload));
+        assert!(!is_fatal_service(ServiceKind::Logger));
     }
 }

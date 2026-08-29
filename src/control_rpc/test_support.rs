@@ -2,6 +2,7 @@ use crate::{
     control_rpc::protocol::{ControlResult, InstanceScope, RPC_VERSION},
     instance::RunId,
     instance_registry::InstanceDescriptor,
+    settings::{ConfigMode, PersistenceMode},
 };
 use serde_json::{Value, json};
 use std::{
@@ -47,6 +48,11 @@ pub(crate) fn instance_scope() -> InstanceScope {
 pub(crate) fn describe_result() -> ControlResult {
     ControlResult::DescribeInstance {
         instance: instance_scope(),
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+        recording_enabled: false,
+        retained_capture_count: 0,
+        settings_revision: 0,
     }
 }
 
@@ -72,7 +78,12 @@ pub(crate) fn success_response_value(request_id: &str, scope: Value) -> Value {
         "request_id": request_id,
         "result": {
             "operation": "describe_instance",
-            "instance": scope
+            "instance": scope,
+            "config_mode": "temporary",
+            "persistence": "ephemeral",
+            "recording_enabled": false,
+            "retained_capture_count": 0,
+            "settings_revision": 0
         }
     })
 }

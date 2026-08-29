@@ -12,6 +12,8 @@ mod single_line_input;
 #[cfg(test)]
 mod tests;
 
+#[cfg(unix)]
+use crate::control::AppControlSummary;
 pub(crate) use crate::settings::SettingsUiContext;
 #[cfg(test)]
 use crate::settings::UiSettings;
@@ -84,6 +86,7 @@ pub struct App {
     pub settings_popup: SettingsPopup,
     settings: AppSettings,
     pending_settings_save: Option<AppSettings>,
+    settings_revision: u64,
     decode_client: Option<DecodeClient>,
     request_tree: Arc<RequestTreeModel>,
     request_tree_revision: u64,
@@ -160,6 +163,7 @@ impl App {
             settings_popup: SettingsPopup::with_context(settings_context),
             settings,
             pending_settings_save: None,
+            settings_revision: 0,
             decode_client: None,
             request_tree: Arc::new(RequestTreeModel::default()),
             request_tree_revision: 0,
@@ -197,6 +201,16 @@ impl App {
         self.close_popup_focus();
         self.request_list.auto_expand = saved.ui.request_list.auto_expand;
         self.settings = saved;
+        self.settings_revision = self.settings_revision.saturating_add(1);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn control_summary(&self) -> AppControlSummary {
+        AppControlSummary {
+            recording_enabled: self.is_recording(),
+            retained_capture_count: self.capture_count(),
+            settings_revision: self.settings_revision,
+        }
     }
 
     pub fn fail_settings_save(&mut self, message: String) {

@@ -5,6 +5,8 @@ mod ca;
 pub mod capture;
 mod cli;
 #[cfg(unix)]
+mod control;
+#[cfg(unix)]
 mod control_rpc;
 mod instance;
 #[cfg(unix)]

@@ -5,7 +5,7 @@ use crate::control_rpc::{
         RPC_VERSION,
     },
     test_support::{
-        ENDPOINT, OTHER_ENDPOINT, OTHER_RUN_ID, RUN_ID, descriptor, instance_scope, read_payload,
+        ENDPOINT, OTHER_ENDPOINT, OTHER_RUN_ID, RUN_ID, describe_result, descriptor, read_payload,
         request_value, scope_value, success_response_value, write_payload,
     },
 };
@@ -94,12 +94,7 @@ async fn call_sends_the_exact_top_level_operation_and_arguments_shape() {
     .await
     .expect("successful RPC call");
 
-    assert_eq!(
-        result,
-        ControlResult::DescribeInstance {
-            instance: instance_scope()
-        }
-    );
+    assert_eq!(result, describe_result());
 }
 
 #[tokio::test]

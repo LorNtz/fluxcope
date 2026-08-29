@@ -237,7 +237,7 @@ pub(crate) struct RegistryPublisher {
     descriptor: InstanceDescriptor,
     descriptor_path: PathBuf,
     socket_path: PathBuf,
-    _listener: UnixListener,
+    listener: Option<UnixListener>,
     published: bool,
     wirelens_home: PathBuf,
     cleanup_attempted: bool,
@@ -295,7 +295,7 @@ impl RegistryPublisher {
             descriptor,
             descriptor_path,
             socket_path,
-            _listener: listener,
+            listener: Some(listener),
             published: false,
             wirelens_home: wirelens_home.to_path_buf(),
             cleanup_attempted: false,
@@ -351,6 +351,61 @@ impl RegistryPublisher {
         result
     }
 
+    fn remove_stale_for_replacement_internal<F>(
+        &mut self,
+        expected: &InstanceDescriptor,
+        observer: F,
+    ) -> io::Result<bool>
+    where
+        F: FnOnce(),
+    {
+        if expected.proxy_endpoint != self.identity.proxy_endpoint() {
+            return Ok(false);
+        }
+        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        observer();
+        let scanner = RegistryScanner::new(&self.wirelens_home)?;
+        let current = match scanner.parse_descriptor(&self.descriptor_path) {
+            Ok(descriptor) => descriptor,
+            Err(_) => return Ok(false),
+        };
+        if current.proxy_endpoint != expected.proxy_endpoint
+            || current.run_id != expected.run_id
+            || current.socket_path != expected.socket_path
+        {
+            return Ok(false);
+        }
+        fs::remove_file(&self.descriptor_path)?;
+        match fs::remove_file(&current.socket_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(parent) = self.descriptor_path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn remove_stale_for_replacement(
+        &mut self,
+        expected: &InstanceDescriptor,
+    ) -> io::Result<bool> {
+        self.remove_stale_for_replacement_internal(expected, || {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_stale_for_replacement_with_observer<F>(
+        &mut self,
+        expected: &InstanceDescriptor,
+        observer: F,
+    ) -> io::Result<bool>
+    where
+        F: FnOnce(),
+    {
+        self.remove_stale_for_replacement_internal(expected, observer)
+    }
+
     fn cleanup_internal<F>(&mut self, observer: F) -> io::Result<()>
     where
         F: FnOnce(),
@@ -394,6 +449,15 @@ impl RegistryPublisher {
         self.cleanup_internal(observer)
     }
 
+    pub(crate) fn take_listener(&mut self) -> io::Result<UnixListener> {
+        self.listener.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "private control listener was already taken",
+            )
+        })
+    }
+
     pub(crate) fn identity(&self) -> &InstanceIdentity {
         &self.identity
     }
@@ -404,6 +468,10 @@ impl RegistryPublisher {
 
     pub(crate) fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub(crate) fn wirelens_home(&self) -> &Path {
+        &self.wirelens_home
     }
 }
 

@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ServiceKind {
     Proxy,
+    ControlRpc,
     CertificateDownload,
     Logger,
     BodyPumps,
@@ -67,5 +68,45 @@ impl ServiceSupervisor {
             self.tasks.abort_all();
             while self.tasks.join_next().await.is_some() {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn control_rpc_service_is_tracked_by_the_shared_supervisor() {
+        let shutdown = CancellationToken::new();
+        let mut supervisor = ServiceSupervisor::new(shutdown.clone());
+        let task = tokio::spawn(async move {
+            shutdown.cancelled().await;
+            Ok(())
+        });
+        supervisor.track_result(ServiceKind::ControlRpc, task);
+
+        supervisor.shutdown(std::time::Duration::from_secs(1)).await;
+
+        assert!(supervisor.join_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unexpected_control_rpc_exit_preserves_its_fatal_error() {
+        let shutdown = CancellationToken::new();
+        let mut supervisor = ServiceSupervisor::new(shutdown);
+        supervisor.track_result(
+            ServiceKind::ControlRpc,
+            tokio::spawn(async { Err(anyhow!("control listener failed")) }),
+        );
+
+        let completion = supervisor
+            .join_next()
+            .await
+            .expect("tracked completion")
+            .expect("supervisor join");
+
+        assert_eq!(completion.kind, ServiceKind::ControlRpc);
+        let error = completion.result.expect_err("fatal control service error");
+        assert!(error.to_string().contains("control listener failed"));
     }
 }

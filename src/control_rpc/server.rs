@@ -85,17 +85,30 @@ where
     }
 
     pub(crate) async fn serve_connection(&self, stream: UnixStream) -> Result<(), ControlError> {
-        let call_lease = self.admission.acquire().await?;
+        self.serve_connection_until(stream, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn serve_connection_until(
+        &self,
+        stream: UnixStream,
+        cancelled: CancellationToken,
+    ) -> Result<(), ControlError> {
+        let call_lease = tokio::select! {
+            lease = self.admission.acquire() => lease?,
+            _ = cancelled.cancelled() => return Ok(()),
+        };
         validate_peer_identity(&stream)?;
         let (mut reader, mut writer) = stream.into_split();
-        let parsed = read_validated_request_frame_with_call_lease(
-            &mut reader,
-            REQUEST_MAX_BYTES,
-            Arc::clone(&call_lease),
-            Instant::now(),
-        )
-        .await?;
-        let cancelled = CancellationToken::new();
+        let parsed = tokio::select! {
+            parsed = read_validated_request_frame_with_call_lease(
+                &mut reader,
+                REQUEST_MAX_BYTES,
+                Arc::clone(&call_lease),
+                Instant::now(),
+            ) => parsed?,
+            _ = cancelled.cancelled() => return Ok(()),
+        };
         let request = match parsed.request {
             Ok(request) => request,
             Err(error) => {
@@ -180,6 +193,7 @@ where
                 cancelled.cancel();
                 DispatchOutcome::Disconnected
             }
+            _ = cancelled.cancelled() => DispatchOutcome::Disconnected,
             _ = tokio::time::sleep_until(deadline) => {
                 cancelled.cancel();
                 DispatchOutcome::Response(Err(ControlError::instance_unavailable(

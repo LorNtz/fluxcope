@@ -1,4 +1,7 @@
-use crate::instance::RunId;
+use crate::{
+    instance::RunId,
+    settings::{ConfigMode, PersistenceMode},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, value::RawValue};
 use std::{
@@ -63,13 +66,20 @@ pub(crate) struct InstanceScope {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ControlResult {
-    DescribeInstance { instance: InstanceScope },
+    DescribeInstance {
+        instance: InstanceScope,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        recording_enabled: bool,
+        retained_capture_count: usize,
+        settings_revision: u64,
+    },
 }
 
 impl ControlResult {
     pub(crate) fn instance_scope(&self) -> &InstanceScope {
         match self {
-            Self::DescribeInstance { instance } => instance,
+            Self::DescribeInstance { instance, .. } => instance,
         }
     }
 }
