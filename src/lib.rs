@@ -4,6 +4,8 @@ pub mod benchmark_support;
 mod ca;
 pub mod capture;
 mod cli;
+#[cfg(unix)]
+mod control_rpc;
 mod instance;
 #[cfg(unix)]
 mod instance_registry;
