@@ -1,4 +1,5 @@
 use std::{
+    collections::BinaryHeap,
     fs::{self, File, Metadata, OpenOptions},
     io::{self, Read, Write},
     net::SocketAddr,
@@ -10,6 +11,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -117,6 +119,119 @@ pub(crate) struct RegistryScan {
     pub(crate) omitted: usize,
 }
 
+pub(crate) struct BoundedDescriptorNames {
+    limit: usize,
+    seen: usize,
+    retained: BinaryHeap<PathBuf>,
+}
+
+impl BoundedDescriptorNames {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            seen: 0,
+            retained: BinaryHeap::with_capacity(limit),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, path: PathBuf) {
+        self.seen = self.seen.saturating_add(1);
+        if self.retained.len() < self.limit {
+            self.retained.push(path);
+            return;
+        }
+        if self.retained.peek().is_some_and(|largest| path < *largest) {
+            let mut largest = self
+                .retained
+                .peek_mut()
+                .expect("a full bounded descriptor set is non-empty");
+            *largest = path;
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.retained.len()
+    }
+
+    pub(crate) fn into_sorted(self) -> (Vec<PathBuf>, usize) {
+        let omitted = self.seen.saturating_sub(self.retained.len());
+        (self.retained.into_sorted_vec(), omitted)
+    }
+}
+
+pub(crate) struct RegistryMutationLock {
+    _file: File,
+}
+
+impl RegistryMutationLock {
+    pub(crate) fn acquire(wirelens_home: &Path) -> io::Result<Self> {
+        Self::open(wirelens_home, true)
+    }
+
+    pub(crate) fn try_acquire(wirelens_home: &Path) -> io::Result<Self> {
+        Self::open(wirelens_home, false)
+    }
+
+    fn open(wirelens_home: &Path, blocking: bool) -> io::Result<Self> {
+        ensure_owner_only_directory(wirelens_home)?;
+        let run_dir = wirelens_home.join("run");
+        ensure_owner_only_directory(&run_dir)?;
+        let path = run_dir.join(".registry-mutation.lock");
+        let nofollow = (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32;
+        let open_existing = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(nofollow)
+                .open(&path)
+        };
+        let file = match open_existing() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(nofollow)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => open_existing()?,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.uid() != rustix::process::geteuid().as_raw()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "registry mutation lock must be an owner-owned regular file",
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        if blocking {
+            file.lock_exclusive()?;
+        } else {
+            file.try_lock_exclusive()?;
+        }
+        let path_metadata = fs::symlink_metadata(&path)?;
+        let locked_metadata = file.metadata()?;
+        if !path_metadata.file_type().is_file()
+            || path_metadata.dev() != locked_metadata.dev()
+            || path_metadata.ino() != locked_metadata.ino()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "registry mutation lock path changed while acquiring it",
+            ));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
 pub(crate) struct RegistryPublisher {
     identity: InstanceIdentity,
     descriptor: InstanceDescriptor,
@@ -124,6 +239,8 @@ pub(crate) struct RegistryPublisher {
     socket_path: PathBuf,
     _listener: UnixListener,
     published: bool,
+    wirelens_home: PathBuf,
+    cleanup_attempted: bool,
 }
 
 impl RegistryPublisher {
@@ -180,14 +297,27 @@ impl RegistryPublisher {
             socket_path,
             _listener: listener,
             published: false,
+            wirelens_home: wirelens_home.to_path_buf(),
+            cleanup_attempted: false,
         })
     }
 
     pub(crate) fn publish(&mut self) -> io::Result<()> {
+        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
         let parent = self.descriptor_path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "descriptor path has no parent")
         })?;
         validate_owner_only_directory(parent)?;
+        match fs::symlink_metadata(&self.descriptor_path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "endpoint descriptor already exists and requires a liveness probe",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let temporary_path = parent.join(format!(
             ".{}.{}.tmp",
             self.descriptor_path
@@ -196,6 +326,7 @@ impl RegistryPublisher {
                 .unwrap_or("descriptor"),
             self.identity.run_id()
         ));
+        let mut linked = false;
         let result = (|| {
             let mut temporary = OpenOptions::new()
                 .write(true)
@@ -206,15 +337,61 @@ impl RegistryPublisher {
             serde_json::to_writer(&mut temporary, &self.descriptor).map_err(json_to_io)?;
             temporary.flush()?;
             temporary.sync_all()?;
-            fs::rename(&temporary_path, &self.descriptor_path)?;
+            fs::hard_link(&temporary_path, &self.descriptor_path)?;
+            linked = true;
+            fs::remove_file(&temporary_path)?;
             File::open(parent)?.sync_all()
         })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        } else {
+        if linked {
             self.published = true;
         }
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
         result
+    }
+
+    fn cleanup_internal<F>(&mut self, observer: F) -> io::Result<()>
+    where
+        F: FnOnce(),
+    {
+        if self.cleanup_attempted {
+            return Ok(());
+        }
+        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        if !self.published {
+            let _ = fs::remove_file(&self.socket_path);
+            self.cleanup_attempted = true;
+            return Ok(());
+        }
+        let scanner = RegistryScanner::new(&self.wirelens_home)?;
+        let descriptor = match scanner.parse_descriptor(&self.descriptor_path) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                self.cleanup_attempted = true;
+                return Ok(());
+            }
+        };
+        observer();
+        if descriptor.proxy_endpoint == self.identity.proxy_endpoint()
+            && descriptor.run_id == *self.identity.run_id()
+        {
+            fs::remove_file(&self.descriptor_path)?;
+            fs::remove_file(&self.socket_path)?;
+            if let Some(parent) = self.descriptor_path.parent() {
+                File::open(parent)?.sync_all()?;
+            }
+        }
+        self.cleanup_attempted = true;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_with_observer<F>(&mut self, observer: F) -> io::Result<()>
+    where
+        F: FnOnce(),
+    {
+        self.cleanup_internal(observer)
     }
 
     pub(crate) fn identity(&self) -> &InstanceIdentity {
@@ -232,30 +409,7 @@ impl RegistryPublisher {
 
 impl Drop for RegistryPublisher {
     fn drop(&mut self) {
-        if !self.published {
-            let _ = fs::remove_file(&self.socket_path);
-            return;
-        }
-        let owned = RegistryScanner::new_from_run_root(
-            self.descriptor_path
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or_else(|| Path::new("")),
-        )
-        .and_then(|scanner| scanner.read_endpoint(self.identity.proxy_endpoint()))
-        .ok()
-        .and_then(|report| report.candidates.into_iter().next())
-        .is_some_and(|descriptor| {
-            descriptor.proxy_endpoint == self.identity.proxy_endpoint()
-                && descriptor.run_id == *self.identity.run_id()
-        });
-        if owned {
-            let _ = fs::remove_file(&self.descriptor_path);
-            let _ = fs::remove_file(&self.socket_path);
-            if let Some(parent) = self.descriptor_path.parent() {
-                let _ = File::open(parent).and_then(|directory| directory.sync_all());
-            }
-        }
+        let _ = self.cleanup_internal(|| {});
     }
 }
 
@@ -282,22 +436,20 @@ impl RegistryScanner {
     }
 
     pub(crate) fn scan_all(&self) -> io::Result<RegistryScan> {
-        let mut matching = Vec::new();
+        let mut matching = BoundedDescriptorNames::new(MAX_SCAN_FILES);
         for entry in fs::read_dir(&self.instances_root)? {
             let entry = entry?;
-            let name = entry.file_name();
-            if is_descriptor_name(&name.to_string_lossy()) {
-                matching.push((name, entry.path()));
+            if is_descriptor_name(&entry.file_name().to_string_lossy()) {
+                matching.insert(entry.path());
             }
         }
-        matching.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let omitted = matching.len().saturating_sub(MAX_SCAN_FILES);
+        let (matching, omitted) = matching.into_sorted();
         let mut scan = RegistryScan {
             candidates: Vec::new(),
             rejected: Vec::new(),
             omitted,
         };
-        for (_, path) in matching.into_iter().take(MAX_SCAN_FILES) {
+        for path in matching {
             self.inspect(&path, &mut scan);
         }
         Ok(scan)
@@ -325,7 +477,7 @@ impl RegistryScanner {
         }
     }
 
-    fn read_descriptor(&self, path: &Path) -> Result<InstanceDescriptor, DiscoveryDiagnostic> {
+    fn parse_descriptor(&self, path: &Path) -> Result<InstanceDescriptor, DiscoveryDiagnostic> {
         let nofollow = (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32;
         let mut file = OpenOptions::new()
             .read(true)
@@ -375,6 +527,11 @@ impl RegistryScanner {
                 format!("invalid descriptor JSON: {error}"),
             )
         })?;
+        Ok(descriptor)
+    }
+
+    fn read_descriptor(&self, path: &Path) -> Result<InstanceDescriptor, DiscoveryDiagnostic> {
+        let descriptor = self.parse_descriptor(path)?;
         self.validate_descriptor(path, descriptor)
     }
 
@@ -454,18 +611,6 @@ pub(crate) fn validate_descriptor_metadata(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn wirelens_home_dir() -> io::Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".wirelens"))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "HOME environment variable is not set",
-            )
-        })
 }
 
 fn descriptor_name(endpoint: SocketAddr) -> String {

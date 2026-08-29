@@ -1,6 +1,9 @@
 use std::{
+    ffi::OsStr,
     fmt::{self, Write as _},
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
     str::FromStr,
 };
 
@@ -137,6 +140,21 @@ pub(crate) fn local_proxy_url(endpoint: SocketAddr) -> String {
         ip => ip,
     };
     format!("http://{}", SocketAddr::new(connect_ip, endpoint.port()))
+}
+
+pub(crate) fn wirelens_home_dir() -> io::Result<PathBuf> {
+    wirelens_home_from_env(std::env::var_os("HOME").as_deref())
+}
+
+pub(crate) fn wirelens_home_from_env(home: Option<&OsStr>) -> io::Result<PathBuf> {
+    home.map(PathBuf::from)
+        .map(|path| path.join(".wirelens"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "HOME environment variable is not set",
+            )
+        })
 }
 
 pub(crate) mod lock;

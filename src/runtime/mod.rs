@@ -2,7 +2,7 @@ mod event_loop;
 mod policy;
 mod services;
 
-#[cfg(any(test, not(unix)))]
+#[cfg(test)]
 use std::path::PathBuf;
 use std::{
     convert::Infallible,
@@ -31,6 +31,7 @@ use crate::{
         start_decode_service,
     },
     cli::{ConfigSelection, McpOverride, ProxyStartup},
+    instance::wirelens_home_dir,
     logging::{AppLogger, endpoint_log_path},
     proxy_handler::LogHandler,
     recording::RecordingState,
@@ -41,10 +42,7 @@ use crate::{
     settings::{AppSettings, SettingsSession},
 };
 #[cfg(unix)]
-use crate::{
-    instance::InstanceIdentity,
-    instance_registry::{RegistryPublisher, wirelens_home_dir},
-};
+use crate::{instance::InstanceIdentity, instance_registry::RegistryPublisher};
 use event_loop::{AppRuntime, Tui};
 use policy::RuntimePolicy;
 use services::{ServiceKind, ServiceSupervisor};
@@ -66,19 +64,16 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         SettingsSession::load(&startup.config).context("failed to load Fluxcope settings")?;
     let settings_snapshot = settings.snapshot();
     let requested_proxy_addr = resolve_proxy_bind_addr(&startup.config, &settings_snapshot);
-    let proxy_listener = bind_proxy_listener(requested_proxy_addr)?;
-    let proxy_addr = proxy_listener
+    let proxy_listener_lease = bind_proxy_listener(requested_proxy_addr)?;
+    let proxy_addr = proxy_listener_lease
         .local_addr()
         .context("failed to read bound proxy address")?;
+    let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
     #[cfg(unix)]
     let identity = InstanceIdentity::new(proxy_addr)?;
     #[cfg(unix)]
-    let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
-    #[cfg(unix)]
     let mut registry_publisher = RegistryPublisher::prepare(&wirelens_home, identity, &settings)
         .context("failed to prepare instance registry publication")?;
-    #[cfg(not(unix))]
-    let wirelens_home = PathBuf::from(".");
     let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
     let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
@@ -148,7 +143,9 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     };
 
     let proxy_task = start_proxy(
-        proxy_listener,
+        proxy_listener_lease
+            .try_clone_for_proxy()
+            .context("failed to clone proxy listener for proxy task")?,
         ca,
         capture_publisher,
         body_tasks.clone(),
@@ -214,14 +211,28 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     .await
 }
 
-fn bind_proxy_listener(proxy_addr: SocketAddr) -> Result<TcpListener> {
+struct BoundProxyListener {
+    lease: TcpListener,
+}
+
+impl BoundProxyListener {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.lease.local_addr()
+    }
+
+    fn try_clone_for_proxy(&self) -> io::Result<TcpListener> {
+        self.lease.try_clone()
+    }
+}
+
+fn bind_proxy_listener(proxy_addr: SocketAddr) -> Result<BoundProxyListener> {
     let listener = TcpListener::bind(proxy_addr).with_context(|| {
         format!("failed to bind proxy address {proxy_addr}; another instance may be running")
     })?;
     listener
         .set_nonblocking(true)
         .context("failed to make proxy listener nonblocking")?;
-    Ok(listener)
+    Ok(BoundProxyListener { lease: listener })
 }
 
 fn start_proxy(
@@ -421,10 +432,13 @@ mod tests {
 
     #[test]
     fn proxy_listener_is_bound_and_nonblocking_before_proxy_service_startup() {
-        let listener =
+        let bound =
             bind_proxy_listener("127.0.0.1:0".parse().expect("ephemeral loopback endpoint"))
                 .expect("bind proxy listener");
-        let endpoint = listener.local_addr().expect("bound proxy endpoint");
+        let listener = bound
+            .try_clone_for_proxy()
+            .expect("clone listener for proxy task");
+        let endpoint = bound.local_addr().expect("bound proxy endpoint");
 
         let error = listener
             .accept()
@@ -453,19 +467,23 @@ mod tests {
     }
 
     #[test]
-    fn bound_proxy_listener_exclusively_owns_its_actual_endpoint() {
-        let listener =
+    fn listener_lease_outlives_the_proxy_task_listener() {
+        let bound =
             bind_proxy_listener("127.0.0.1:0".parse().expect("ephemeral loopback endpoint"))
                 .expect("bind proxy listener");
-        let endpoint = listener.local_addr().expect("actual proxy endpoint");
+        let endpoint = bound.local_addr().expect("actual proxy endpoint");
+        let proxy_task_listener = bound
+            .try_clone_for_proxy()
+            .expect("clone listener for proxy task");
 
+        drop(proxy_task_listener);
         let duplicate = std::net::TcpListener::bind(endpoint)
-            .expect_err("bound endpoint must remain exclusively owned");
+            .expect_err("instance lease must retain endpoint after proxy task exit");
         assert_eq!(duplicate.kind(), io::ErrorKind::AddrInUse);
 
-        drop(listener);
+        drop(bound);
         std::net::TcpListener::bind(endpoint)
-            .expect("dropping the retained listener should release the endpoint");
+            .expect("dropping the instance lease should release the endpoint");
     }
     #[test]
     fn every_config_selection_resolves_the_expected_proxy_endpoint() {

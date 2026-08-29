@@ -1,5 +1,9 @@
-use super::{InstanceIdentity, RunId, endpoint_hash};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use super::{InstanceIdentity, RunId, endpoint_hash, wirelens_home_from_env};
+use std::{
+    ffi::OsStr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+};
 
 #[test]
 fn unspecified_ipv4_endpoint_uses_loopback_local_url() {
@@ -103,4 +107,14 @@ fn endpoint_hash_is_stable_bounded_and_uses_the_canonical_socket_address() {
     assert_eq!(ipv4_hash.len(), 64);
     assert!(ipv4_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(ipv4_hash, ipv4_hash.to_ascii_lowercase());
+}
+
+#[test]
+fn per_user_wirelens_home_is_platform_independent_and_never_uses_cwd() {
+    let home =
+        wirelens_home_from_env(Some(OsStr::new("test-user-home"))).expect("per-user Wirelens home");
+
+    assert_eq!(home, PathBuf::from("test-user-home").join(".wirelens"));
+    assert!(wirelens_home_from_env(None).is_err());
+    assert_ne!(home, PathBuf::from("."));
 }

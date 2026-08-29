@@ -1,6 +1,9 @@
 #![cfg(unix)]
 
-use super::{RegistryPublisher, RegistryScan, RegistryScanner, validate_descriptor_metadata};
+use super::{
+    BoundedDescriptorNames, RegistryMutationLock, RegistryPublisher, RegistryScan, RegistryScanner,
+    validate_descriptor_metadata,
+};
 use crate::{
     instance::InstanceIdentity,
     settings::{AppSettings, ConfigMode, PersistenceMode, SettingsSession},
@@ -460,6 +463,46 @@ fn scanner_inspects_at_most_256_matching_descriptor_files() {
 }
 
 #[test]
+fn descriptor_name_retention_never_buffers_more_than_the_scan_cap() {
+    let mut retained = BoundedDescriptorNames::new(256);
+    for index in (0..10_000_u32).rev() {
+        retained.insert(PathBuf::from(format!("{index:064x}.json")));
+        assert!(retained.len() <= 256);
+    }
+
+    let (names, omitted) = retained.into_sorted();
+
+    assert_eq!(names.len(), 256);
+    assert_eq!(
+        names.first().and_then(|path| path.to_str()),
+        Some("0000000000000000000000000000000000000000000000000000000000000000.json")
+    );
+    assert_eq!(
+        names.last().and_then(|path| path.to_str()),
+        Some("00000000000000000000000000000000000000000000000000000000000000ff.json")
+    );
+    assert_eq!(omitted, 9_744);
+}
+
+#[test]
+fn registry_mutation_lock_is_exclusive_across_independent_handles() {
+    let fixture = RegistryFixture::new();
+    fs::create_dir_all(fixture.run_dir()).expect("run directory");
+    fs::set_permissions(fixture.run_dir(), fs::Permissions::from_mode(0o700))
+        .expect("owner-only run directory");
+    let first = RegistryMutationLock::acquire(fixture.home()).expect("registry mutation lock");
+
+    let error = RegistryMutationLock::try_acquire(fixture.home())
+        .err()
+        .expect("second mutation handle must contend");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+
+    drop(first);
+    RegistryMutationLock::try_acquire(fixture.home())
+        .expect("lock must be available after the owner exits");
+}
+
+#[test]
 fn endpoint_read_does_not_scan_an_unrelated_invalid_descriptor() {
     let fixture = RegistryFixture::new();
     let good = fixture.publish(ENDPOINT_A);
@@ -480,23 +523,54 @@ fn endpoint_read_does_not_scan_an_unrelated_invalid_descriptor() {
 }
 
 #[test]
-fn stale_cleanup_refuses_to_remove_a_descriptor_with_a_changed_run_id() {
+fn publisher_refuses_to_overwrite_an_existing_endpoint_descriptor() {
     let fixture = RegistryFixture::new();
     let first = fixture.publish(ENDPOINT_A);
-    let second = fixture.publish(ENDPOINT_A);
-    let replacement_run_id = second.identity().run_id().clone();
-    let replacement_descriptor = second.descriptor_path().to_path_buf();
-    let replacement_socket = second.socket_path().to_path_buf();
+    let mut second = fixture.prepare(ENDPOINT_A);
+    let authoritative_run_id = first.identity().run_id().clone();
 
-    drop(first);
+    let error = second
+        .publish()
+        .expect_err("Task 5 must probe liveness before replacement");
 
-    assert!(replacement_descriptor.exists());
-    assert!(replacement_socket.exists());
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     let report = fixture.scan();
     assert_eq!(report.candidates.len(), 1);
-    assert_eq!(report.candidates[0].run_id(), &replacement_run_id);
+    assert_eq!(report.candidates[0].run_id(), &authoritative_run_id);
+}
 
-    drop(second);
-    assert!(!replacement_descriptor.exists());
-    assert!(!replacement_socket.exists());
+#[test]
+fn cleanup_holds_registry_lock_from_identity_reread_through_unlink() {
+    let fixture = RegistryFixture::new();
+    let mut publisher = fixture.publish(ENDPOINT_A);
+    let descriptor_path = publisher.descriptor_path().to_path_buf();
+    let socket_path = publisher.socket_path().to_path_buf();
+
+    publisher
+        .cleanup_with_observer(|| {
+            let error = RegistryMutationLock::try_acquire(fixture.home())
+                .err()
+                .expect("cleanup observer must run while mutation lock is held");
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        })
+        .expect("locked publisher cleanup");
+
+    assert!(!descriptor_path.exists());
+    assert!(!socket_path.exists());
+}
+
+#[test]
+fn stale_cleanup_refuses_a_descriptor_whose_run_id_changed_before_locked_reread() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let descriptor_path = publisher.descriptor_path().to_path_buf();
+    let replacement =
+        InstanceIdentity::new(ENDPOINT_A.parse().expect("endpoint")).expect("replacement identity");
+    fixture.rewrite_descriptor(&descriptor_path, |descriptor| {
+        descriptor["run_id"] = Value::from(replacement.run_id().as_str());
+    });
+
+    drop(publisher);
+
+    assert!(descriptor_path.exists());
 }
