@@ -33,3 +33,8 @@ Date: 2026/09/17 10:39
 Date: 2026/09/17 10:40
 
 - Merged MCP broker module registration with the upstream private_fs module; retained both broker dispatch and owner-only file protection. Continued using master lockfile as the dependency-resolution baseline.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:40
+
+- Merged capture snapshot/timing support without downgrading the modern HTTP/TLS stack. Kept Hyper 1 streaming channel exports together with MCP capture-change feed exports; added the bytes dependency required by capture snapshots.

@@ -1,5 +1,8 @@
 use super::*;
-use crate::capture::{CapturePolicy, CapturePublisher, RequestCaptureInput, ResponseCaptureInput};
+use crate::capture::{
+    CapturePolicy, CapturePublisher, CaptureSnapshotMode, RequestCaptureInput, ResponseCaptureInput,
+};
+
 use hyper::{HeaderMap, Method, Response, body::Bytes};
 use std::io;
 use tokio::sync::mpsc;
@@ -43,10 +46,7 @@ async fn tee_forwards_order_and_captures_prefix() {
         .expect("destination body should complete");
 
     assert_eq!(forwarded.as_ref(), b"onetwo");
-    assert_eq!(
-        record.body_preview(BodySide::Response).as_ref().as_ref(),
-        b"onetwo"
-    );
+    assert_eq!(record.body_preview(BodySide::Response).flatten(), b"onetwo");
     shutdown.cancel();
     tasks
         .wait_for_shutdown(Duration::from_secs(1))
@@ -153,10 +153,7 @@ async fn preview_limit_never_truncates_forwarded_body() {
         .await
         .expect("body forwards");
     assert_eq!(forwarded.as_ref(), b"abcdef");
-    assert_eq!(
-        record.body_preview(BodySide::Response).as_ref().as_ref(),
-        b"abc"
-    );
+    assert_eq!(record.body_preview(BodySide::Response).flatten(), b"abc");
     assert_eq!(
         record.summary().response_body.preview_limit,
         Some(crate::capture::BodyPreviewLimit::PerBodyLimit)
@@ -166,6 +163,61 @@ async fn preview_limit_never_truncates_forwarded_body() {
         .wait_for_shutdown(Duration::from_secs(1))
         .await
         .expect("tasks stop");
+}
+#[tokio::test]
+async fn thousands_of_tiny_fragments_preserve_forwarding_and_preview_byte_order() {
+    const BLOCK_BYTES: usize = 64 * 1024;
+    let expected = (0..4 * BLOCK_BYTES + 211)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let fragments = expected
+        .chunks(47)
+        .map(Bytes::copy_from_slice)
+        .collect::<Vec<_>>();
+    assert!(fragments.len() > 5_000);
+
+    let (capture_tx, mut capture_rx) = mpsc::channel(1);
+    let publisher = CapturePublisher::new(capture_tx, CapturePolicy::default());
+    let headers = HeaderMap::new();
+    let capture = publisher
+        .try_start(RequestCaptureInput {
+            method: Method::GET,
+            original_uri: "https://example.com/fragmented",
+            effective_uri: "https://example.com/fragmented",
+            local_path: None,
+            headers: &headers,
+        })
+        .expect("capture admitted");
+    capture.complete(BodySide::Request);
+    capture.set_response(ResponseCaptureInput {
+        status: 200,
+        headers: &headers,
+    });
+    let record = capture_rx.recv().await.expect("capture published");
+    let shutdown = CancellationToken::new();
+    let tasks = BodyTaskTracker::new(shutdown.clone());
+    let source = Body::wrap_stream(futures::stream::iter(
+        fragments.into_iter().map(Ok::<Bytes, io::Error>),
+    ));
+    let destination = tee_body(source, capture, BodySide::Response, &tasks);
+
+    let forwarded = hyper::body::to_bytes(destination)
+        .await
+        .expect("all fragments should forward");
+    let snapshot = record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
+
+    assert_eq!(forwarded.as_ref(), expected);
+    assert_eq!(snapshot.response_body.preview.flatten(), expected);
+    assert_eq!(snapshot.response_body.status.retained_bytes, expected.len());
+    assert_eq!(
+        snapshot.response_body.status.stream,
+        crate::capture::BodyStreamState::Complete
+    );
+    shutdown.cancel();
+    tasks
+        .wait_for_shutdown(Duration::from_secs(1))
+        .await
+        .expect("body tasks should stop");
 }
 
 #[tokio::test]

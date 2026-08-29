@@ -295,14 +295,16 @@ fn reserve_queued_bytes(counter: &AtomicUsize, requested: usize, limit: usize) -
 }
 
 fn decode_job(job: DecodeJob, policy: &DecodePolicy) -> DecodeResult {
-    let decoded = decode_content_encoded(&job.input, &job.headers, policy.max_output_bytes);
+    let input = job.input.flatten();
+    let decoded = decode_content_encoded(input, &job.headers, policy.max_output_bytes);
     let (bytes, mut limited, error) = match decoded {
         Ok(stage) => (stage.bytes, stage.limited, None),
-        Err(error) => (
-            job.input[..job.input.len().min(policy.max_output_bytes)].to_vec(),
-            job.input.len() > policy.max_output_bytes,
-            Some(error.to_string()),
-        ),
+        Err(error) => {
+            let mut fallback = job.input.flatten();
+            let limited = fallback.len() > policy.max_output_bytes;
+            fallback.truncate(policy.max_output_bytes);
+            (fallback, limited, Some(error.to_string()))
+        }
     };
     let formatted = format_body(&bytes, &job.headers, job.key.mode, policy);
     limited |= formatted.limited;
@@ -327,12 +329,11 @@ struct DecodedStage {
 }
 
 fn decode_content_encoded(
-    input: &[u8],
+    mut current: Vec<u8>,
     headers: &[(String, String)],
     limit: usize,
 ) -> io::Result<DecodedStage> {
     let encodings = content_encodings(headers);
-    let mut current = input.to_vec();
     for encoding in encodings.iter().rev() {
         let stage = match encoding.as_str() {
             "gzip" | "x-gzip" => {
@@ -340,24 +341,30 @@ fn decode_content_encoded(
             }
             "deflate" => decode_deflate_limited(&current, limit),
             "br" => read_limited(brotli::Decompressor::new(current.as_slice(), 4096), limit),
-            "zstd" => read_limited(zstd::stream::read::Decoder::new(current.as_slice())?, limit),
-            "identity" => Ok(DecodedStage {
-                bytes: current,
-                limited: false,
-            }),
+            "zstd" => zstd::stream::read::Decoder::new(current.as_slice())
+                .and_then(|decoder| read_limited(decoder, limit)),
+            "identity" => {
+                return Ok(DecodedStage {
+                    bytes: current,
+                    limited: false,
+                });
+            }
             unsupported => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported content encoding {unsupported}"),
             )),
-        }?;
+        };
+        let stage = stage?;
         if stage.limited {
             return Ok(stage);
         }
         current = stage.bytes;
     }
+    let limited = current.len() > limit;
+    current.truncate(limit);
     Ok(DecodedStage {
-        limited: current.len() > limit,
-        bytes: current.into_iter().take(limit).collect(),
+        bytes: current,
+        limited,
     })
 }
 
@@ -593,6 +600,10 @@ mod tests {
     };
 
     fn job(input: Vec<u8>, headers: Vec<(String, String)>) -> DecodeJob {
+        job_with_preview(CapturedBodyPreview::unbudgeted(Bytes::from(input)), headers)
+    }
+
+    fn job_with_preview(input: CapturedBodyPreview, headers: Vec<(String, String)>) -> DecodeJob {
         DecodeJob {
             key: DecodeKey {
                 sequence: CaptureSequence::new(0),
@@ -600,7 +611,7 @@ mod tests {
                 revision: 1,
                 mode: DecodeDisplayMode::Response,
             },
-            input: CapturedBodyPreview::unbudgeted(Bytes::from(input)),
+            input,
             headers: CapturedHeaders::unbudgeted(headers.into()),
         }
     }
@@ -793,6 +804,55 @@ mod tests {
             .expect("service join")
             .expect("service stop");
         assert!(service.metrics.snapshot().superseded >= 1);
+    }
+
+    #[tokio::test]
+    async fn chunked_preview_decodes_to_the_same_display_as_contiguous_input() {
+        use crate::capture::{
+            CapturePolicy, CapturePublisher, CaptureSnapshotMode, RequestCaptureInput,
+        };
+        use hyper::{HeaderMap, Method};
+        use tokio::sync::mpsc;
+
+        let payload = format!(
+            r#"{{"message":"{}","count":3}}"#,
+            "fragmented-preview".repeat(12_000)
+        )
+        .into_bytes();
+        let headers = vec![("content-type".into(), "application/json".into())];
+        let contiguous = decode_job(
+            job(payload.clone(), headers.clone()),
+            &DecodePolicy::default(),
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        let publisher = CapturePublisher::new(tx, CapturePolicy::default());
+        let request_headers = HeaderMap::new();
+        let handle = publisher
+            .try_start(RequestCaptureInput {
+                method: Method::GET,
+                original_uri: "https://example.com/chunked",
+                effective_uri: "https://example.com/chunked",
+                local_path: None,
+                headers: &request_headers,
+            })
+            .expect("capture admitted");
+        let record = rx.recv().await.expect("capture published");
+        for fragment in payload.chunks(37) {
+            handle.append(BodySide::Response, fragment);
+        }
+        let chunked_preview = record
+            .snapshot(CaptureSnapshotMode::WithBodyPreviews)
+            .response_body
+            .preview;
+
+        let chunked = decode_job(
+            job_with_preview(chunked_preview, headers),
+            &DecodePolicy::default(),
+        );
+
+        assert_eq!(chunked.text, contiguous.text);
+        assert_eq!(chunked.limited, contiguous.limited);
+        assert_eq!(chunked.error, contiguous.error);
     }
 
     fn compress_bytes(input: &[u8]) -> Vec<u8> {

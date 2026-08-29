@@ -1,4 +1,6 @@
 mod body;
+mod change;
+
 mod decode;
 mod model;
 mod publisher;
@@ -7,12 +9,14 @@ mod store;
 use hyper::Method;
 
 pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
+pub(crate) use change::{CaptureChangeError, CaptureChangeFeed, CaptureChangeKind};
 pub(crate) use decode::{
     DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
     DecodeResult, start_decode_service,
 };
 pub use model::{
-    BodyPreviewLimit, BodySide, BodyStatus, BodyStreamState, CaptureRecord, CaptureSummary,
+    BodyPreviewLimit, BodySide, BodySnapshot, BodyStatus, BodyStreamState, CaptureRecord,
+    CaptureSnapshot, CaptureSnapshotMode, CaptureSummary, CaptureTiming, CapturedBodyChunks,
     CapturedBodyPreview, CapturedHeaders, MetadataTruncation, RequestMetadata, ResponseMetadata,
 };
 pub(crate) use publisher::{
