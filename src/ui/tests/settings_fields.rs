@@ -15,6 +15,70 @@ fn settings_popup_renders_topics_and_selected_content() {
     assert!(rendered.contains("Server"));
     assert!(rendered.contains("Proxy port"));
 }
+#[test]
+fn default_owned_settings_popup_presents_persistent_save_semantics() {
+    let mut app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::DefaultOwned,
+        persistence: PersistenceMode::Persistent,
+    });
+    app.open_settings_popup();
+
+    let (_ui, buffer) = render_to_buffer(&mut app);
+    let rendered = (0..buffer.area.height)
+        .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let footer = settings_popup_footer_row(&buffer);
+
+    assert!(
+        rendered.contains("Default config (persistent)"),
+        "{rendered}"
+    );
+    assert!(footer.contains("Save [s]"), "{footer}");
+}
+
+#[test]
+fn read_only_settings_popup_presents_ephemeral_apply_semantics() {
+    let mut app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::ReadOnlyFile,
+        persistence: PersistenceMode::Ephemeral,
+    });
+    app.open_settings_popup();
+
+    let (_ui, buffer) = render_to_buffer(&mut app);
+    let rendered = (0..buffer.area.height)
+        .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let footer = settings_popup_footer_row(&buffer);
+
+    assert!(
+        rendered.contains("Read-only file (ephemeral)"),
+        "{rendered}"
+    );
+    assert!(footer.contains("Apply [s]"), "{footer}");
+    assert!(!footer.contains("Save [s]"), "{footer}");
+}
+
+#[test]
+fn temporary_settings_popup_presents_ephemeral_apply_semantics() {
+    let mut app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+    });
+    app.open_settings_popup();
+
+    let (_ui, buffer) = render_to_buffer(&mut app);
+    let rendered = (0..buffer.area.height)
+        .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let footer = settings_popup_footer_row(&buffer);
+
+    assert!(rendered.contains("Temporary (ephemeral)"), "{rendered}");
+    assert!(footer.contains("Apply [s]"), "{footer}");
+    assert!(!footer.contains("Save [s]"), "{footer}");
+}
 
 #[test]
 fn settings_popup_renders_content_column_border() {

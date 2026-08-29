@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
@@ -30,6 +32,30 @@ fn temp_config_path() -> TempConfigPath {
     TempConfigPath {
         _directory: directory,
         path,
+    }
+}
+#[cfg(unix)]
+struct DirectoryPermissionsGuard {
+    path: PathBuf,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl DirectoryPermissionsGuard {
+    fn make_read_only(path: &Path) -> io::Result<Self> {
+        let original_mode = fs::metadata(path)?.permissions().mode();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            original_mode,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryPermissionsGuard {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.original_mode));
     }
 }
 

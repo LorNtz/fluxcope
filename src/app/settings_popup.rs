@@ -1,5 +1,7 @@
 use crate::select::SelectState;
-use crate::settings::{AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule};
+use crate::settings::{
+    AppSettings, ConfigMode, ProxyMapLocalRule, ProxyMapRemoteRule, SettingsUiContext,
+};
 use tui_scrollview::ScrollViewState;
 
 use super::settings_draft::SettingsDraft;
@@ -664,6 +666,7 @@ pub struct SettingsPopup {
     pub selected_row: usize,
     pub scroll: ScrollViewState,
     draft: SettingsDraft,
+    context: SettingsUiContext,
     mode: EditMode,
     field_hint: Option<FieldEditHint>,
     scroll_request: Option<SettingsScrollRequest>,
@@ -675,6 +678,10 @@ pub struct SettingsPopup {
 
 impl SettingsPopup {
     pub fn new() -> Self {
+        Self::with_context(SettingsUiContext::default())
+    }
+
+    pub(crate) fn with_context(context: SettingsUiContext) -> Self {
         let settings = AppSettings::default();
         Self {
             visible: false,
@@ -682,6 +689,7 @@ impl SettingsPopup {
             topic: SettingsTopic::Server,
             selected_row: 0,
             scroll: ScrollViewState::default(),
+            context,
             draft: SettingsDraft::new(settings),
             mode: EditMode::Browse,
             field_hint: None,
@@ -746,7 +754,7 @@ impl SettingsPopup {
             message_lines: vec!["You have unsaved setting changes."],
             actions: vec![
                 DialogAction {
-                    label: "Save",
+                    label: self.commit_label(),
                     key_hint: "Enter",
                     kind: DialogActionKind::Save,
                 },
@@ -757,6 +765,21 @@ impl SettingsPopup {
                 },
             ],
         })
+    }
+
+    pub(crate) fn commit_label(&self) -> &'static str {
+        match self.context.persistence {
+            crate::settings::PersistenceMode::Persistent => "Save",
+            crate::settings::PersistenceMode::Ephemeral => "Apply",
+        }
+    }
+
+    pub(crate) fn mode_label(&self) -> &'static str {
+        match self.context.config_mode {
+            ConfigMode::DefaultOwned => "Default config (persistent)",
+            ConfigMode::ReadOnlyFile => "Read-only file (ephemeral)",
+            ConfigMode::Temporary => "Temporary (ephemeral)",
+        }
     }
 
     pub fn mark_saved(&mut self) {

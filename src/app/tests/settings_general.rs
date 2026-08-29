@@ -11,6 +11,25 @@ fn settings_popup_tracks_dirty_draft() {
     popup.draft_mut_for_tests().recording.start_record_on_launch = false;
     assert!(popup.is_dirty());
 }
+#[test]
+fn persistent_settings_context_uses_save_commit_label() {
+    let app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::DefaultOwned,
+        persistence: PersistenceMode::Persistent,
+    });
+
+    assert_eq!(app.settings_popup.commit_label(), "Save");
+}
+
+#[test]
+fn ephemeral_settings_context_uses_apply_commit_label() {
+    let app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+    });
+
+    assert_eq!(app.settings_popup.commit_label(), "Apply");
+}
 
 #[test]
 fn settings_popup_rejects_invalid_remote_rule_url() {

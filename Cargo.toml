@@ -44,6 +44,7 @@ zstd = "0.13"
 
 # Utilities
 clap = { version = "4.6", features = ["derive"] }
+fs2 = "0.4"
 parking_lot = "0.12" # Faster Mutex/RwLock
 anyhow = "1"
 log = "0.4"

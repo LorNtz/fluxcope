@@ -28,6 +28,7 @@ use crate::{
         BodyTaskTracker, CapturePublisher, CaptureRecord, CaptureRetentionPolicy,
         start_decode_service,
     },
+    cli::{ConfigSelection, McpOverride, ProxyStartup},
     logging::AppLogger,
     proxy_handler::LogHandler,
     recording::RecordingState,
@@ -35,7 +36,7 @@ use crate::{
         RequestPolicy, RequestPolicyDiagnostic, RequestPolicyDiagnosticSeverity, RequestPolicyStore,
     },
     request_search::start_request_search_service,
-    settings::{AppSettings, SettingsManager},
+    settings::{AppSettings, SettingsSession},
 };
 use event_loop::{AppRuntime, Tui};
 use policy::RuntimePolicy;
@@ -45,8 +46,18 @@ fn proxy_bind_addr(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
 }
 
-pub async fn run() -> Result<()> {
-    let mut settings = SettingsManager::load().context("failed to load Fluxcope settings")?;
+pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
+    let mut settings =
+        SettingsSession::load(&startup.config).context("failed to load Fluxcope settings")?;
+    let settings_snapshot = settings.snapshot();
+    let proxy_addr = match &startup.config {
+        ConfigSelection::Temporary { host, port } => SocketAddr::new(*host, *port),
+        ConfigSelection::DefaultOwned | ConfigSelection::ReadOnlyFile(_) => {
+            proxy_bind_addr(settings_snapshot.server.port)
+        }
+    };
+    let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
+    let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
     let shutdown = CancellationToken::new();
@@ -58,16 +69,21 @@ pub async fn run() -> Result<()> {
     )
     .map_err(|error| anyhow!("failed to install application logger: {error}"))?;
     log::info!("Application started");
-    log::info!("Loaded settings from {}", settings.path().display());
+    match settings.source_path() {
+        Some(path) => log::info!("Loaded settings from {}", path.display()),
+        None => log::info!("Loaded temporary settings"),
+    }
+    log::info!(
+        "Embedded MCP server {}",
+        if mcp_enabled { "enabled" } else { "disabled" }
+    );
     for diagnostic in settings.take_load_diagnostics() {
         log::error!("{}", diagnostic.message);
     }
 
-    let proxy_port = settings.server_port();
-    let proxy_addr = proxy_bind_addr(proxy_port);
     verify_proxy_port_available(proxy_addr)?;
 
-    let compiled_policy = RequestPolicy::compile(settings.settings());
+    let compiled_policy = RequestPolicy::compile(&settings_snapshot);
     log_request_policy_diagnostics(&compiled_policy.diagnostics);
     let request_policy_store = RequestPolicyStore::new(compiled_policy.policy);
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
@@ -122,13 +138,14 @@ pub async fn run() -> Result<()> {
 
     let tui = Tui::enter().context("failed to initialize terminal UI")?;
     let mut app = App::with_runtime_policies(
-        settings.settings().clone(),
+        settings_snapshot.as_ref().clone(),
         recording,
         log_retention,
         CaptureRetentionPolicy {
             max_records: policy.capture.retained_records,
             max_bytes: policy.capture.total_retained_bytes,
         },
+        settings_context,
     );
     app.set_decode_client(decode.client);
     if let Some(service) = certificate_download.as_ref() {
@@ -327,16 +344,22 @@ fn format_url_host(ip: IpAddr) -> String {
     }
 }
 
+fn effective_mcp_enabled(mcp_override: McpOverride, settings: &AppSettings) -> bool {
+    match mcp_override {
+        McpOverride::Inherit => settings.mcp.enable,
+        McpOverride::Enabled => true,
+        McpOverride::Disabled => false,
+    }
+}
+
 fn save_settings_draft(
-    settings: &mut SettingsManager,
+    settings: &mut SettingsSession,
     request_policy_store: &RequestPolicyStore,
     draft: AppSettings,
 ) -> io::Result<AppSettings> {
     let compiled_policy = RequestPolicy::compile(&draft);
-    settings.update(|current| {
-        *current = draft.clone();
-    })?;
-    let saved = settings.settings().clone();
+    settings.commit(draft)?;
+    let saved = settings.snapshot().as_ref().clone();
     request_policy_store.replace(compiled_policy.policy);
     log_request_policy_diagnostics(&compiled_policy.diagnostics);
     Ok(saved)
@@ -354,7 +377,6 @@ fn log_request_policy_diagnostics(diagnostics: &[RequestPolicyDiagnostic]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn proxy_bind_address_uses_ipv4_unspecified_address() {
@@ -365,15 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn save_settings_draft_persists_and_replaces_request_policy() -> io::Result<()> {
+    fn save_settings_draft_commits_and_replaces_request_policy() -> io::Result<()> {
         use crate::settings::{
             ProxyMapRemoteRule, ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
             RecordingPrefilterPatternSettings,
         };
 
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("config.yml");
-        let mut manager = SettingsManager::load_from_path(&path)?;
+        let mut session = SettingsSession::temporary(AppSettings::default());
         let store = RequestPolicyStore::default();
         let mut draft = AppSettings::default();
         draft.server.port = 9013;
@@ -398,10 +418,10 @@ mod tests {
             }],
         });
 
-        let saved = save_settings_draft(&mut manager, &store, draft)?;
+        let saved = save_settings_draft(&mut session, &store, draft)?;
 
         assert_eq!(9013, saved.server.port);
-        assert!(fs::read_to_string(&path)?.contains("9013"));
+        assert_eq!(session.snapshot().server.port, 9013);
         let original_uri = "https://api.example.com/orders?x=1"
             .parse()
             .expect("test URI should parse");

@@ -20,6 +20,28 @@ fn unsaved_settings_dialog_renders_centered_action_labels() {
     assert!(rendered.contains("Save [Enter]"));
     assert!(rendered.contains("Discard [Esc]"));
 }
+#[test]
+fn ephemeral_unsaved_settings_dialog_uses_apply_action_label() {
+    let mut app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+    });
+    app.open_settings_popup();
+    app.settings_popup
+        .draft_mut_for_tests()
+        .recording
+        .start_record_on_launch = false;
+    app.handle_key_event(key(KeyCode::Esc));
+
+    let (_ui, buffer) = render_to_buffer(&mut app);
+    let rendered = (0..buffer.area.height)
+        .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered.contains("Apply [Enter]"), "{rendered}");
+    assert!(!rendered.contains("Save [Enter]"), "{rendered}");
+}
 
 #[test]
 fn unsaved_settings_dialog_suppresses_parent_footer_key_hints() {

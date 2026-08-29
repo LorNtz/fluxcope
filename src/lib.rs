@@ -4,6 +4,7 @@ pub mod benchmark_support;
 mod ca;
 pub mod capture;
 mod cli;
+mod instance;
 mod logging;
 mod mapping;
 mod private_fs;
@@ -15,5 +16,6 @@ mod runtime;
 mod select;
 mod settings;
 mod ui;
-
-pub use runtime::run;
+pub async fn run() -> anyhow::Result<()> {
+    runtime::run(cli::ProxyStartup::default()).await
+}

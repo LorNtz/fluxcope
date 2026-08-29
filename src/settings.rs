@@ -1,11 +1,13 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::fs;
 use std::{
-    env, io,
+    env, fs, io,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+use crate::{cli::ConfigSelection, instance::DefaultConfigLease};
 
 const DEFAULT_PROXY_PORT: u16 = 8989;
 const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.fluxcope/certificate/";
@@ -15,6 +17,8 @@ const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "fluxcope-ca.pem";
 #[serde(default)]
 pub struct AppSettings {
     pub server: ServerSettings,
+    #[serde(default, skip_serializing_if = "McpSettings::is_default")]
+    pub mcp: McpSettings,
     pub certificate: CertificateSettings,
     pub recording: RecordingSettings,
     pub ui: UiSettings,
@@ -29,6 +33,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             server: ServerSettings::default(),
+            mcp: McpSettings::default(),
             certificate: CertificateSettings::default(),
             recording: RecordingSettings::default(),
             ui: UiSettings::default(),
@@ -49,6 +54,22 @@ impl Default for ServerSettings {
             port: DEFAULT_PROXY_PORT,
         }
     }
+}
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub struct McpSettings {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enable: bool,
+}
+
+impl McpSettings {
+    fn is_default(&self) -> bool {
+        !self.enable
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -292,6 +313,155 @@ impl Default for ProxyMapLocalRule {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConfigMode {
+    DefaultOwned,
+    ReadOnlyFile,
+    Temporary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PersistenceMode {
+    Persistent,
+    Ephemeral,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SettingsUiContext {
+    pub(crate) config_mode: ConfigMode,
+    pub(crate) persistence: PersistenceMode,
+}
+
+impl Default for SettingsUiContext {
+    fn default() -> Self {
+        Self {
+            config_mode: ConfigMode::DefaultOwned,
+            persistence: PersistenceMode::Persistent,
+        }
+    }
+}
+
+pub(crate) struct SettingsSession {
+    settings: Arc<AppSettings>,
+    mode: ConfigMode,
+    persistence: PersistenceMode,
+    source_path: Option<PathBuf>,
+    default_lease: Option<DefaultConfigLease>,
+    load_diagnostics: Vec<SettingsLoadDiagnostic>,
+}
+
+impl SettingsSession {
+    pub(crate) fn load(selection: &ConfigSelection) -> anyhow::Result<Self> {
+        match selection {
+            ConfigSelection::DefaultOwned => {
+                let path = default_config_path()?;
+                let lease = DefaultConfigLease::acquire(&default_config_lock_path()?)
+                    .context("failed to acquire default configuration ownership")?;
+                let mut manager = SettingsManager::load_from_path(&path)
+                    .context("failed to load default configuration")?;
+                let source_path = fs::canonicalize(&path)
+                    .context("failed to resolve default configuration path")?;
+                Ok(Self {
+                    settings: Arc::new(manager.settings().clone()),
+                    mode: ConfigMode::DefaultOwned,
+                    persistence: PersistenceMode::Persistent,
+                    source_path: Some(source_path),
+                    default_lease: Some(lease),
+                    load_diagnostics: manager.take_load_diagnostics(),
+                })
+            }
+            ConfigSelection::ReadOnlyFile(path) => {
+                let source_path = fs::canonicalize(path).with_context(|| {
+                    format!("failed to resolve configuration {}", path.display())
+                })?;
+                let content = fs::read_to_string(&source_path).with_context(|| {
+                    format!("failed to read configuration {}", source_path.display())
+                })?;
+                let (settings, load_diagnostics) = if content.trim().is_empty() {
+                    (AppSettings::default(), Vec::new())
+                } else {
+                    deserialize_settings_tolerantly(&content)?
+                };
+                Ok(Self {
+                    settings: Arc::new(settings),
+                    mode: ConfigMode::ReadOnlyFile,
+                    persistence: PersistenceMode::Ephemeral,
+                    source_path: Some(source_path),
+                    default_lease: None,
+                    load_diagnostics,
+                })
+            }
+            ConfigSelection::Temporary { port, .. } => {
+                let mut settings = AppSettings::default();
+                settings.server.port = *port;
+                Ok(Self::temporary(settings))
+            }
+        }
+    }
+
+    pub(crate) fn temporary(settings: AppSettings) -> Self {
+        Self {
+            settings: Arc::new(settings),
+            mode: ConfigMode::Temporary,
+            persistence: PersistenceMode::Ephemeral,
+            source_path: None,
+            default_lease: None,
+            load_diagnostics: Vec::new(),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<AppSettings> {
+        Arc::clone(&self.settings)
+    }
+
+    pub(crate) fn commit(&mut self, candidate: AppSettings) -> io::Result<PersistenceMode> {
+        if self.persistence == PersistenceMode::Persistent {
+            let path = self.source_path.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "persistent settings session has no source path",
+                )
+            })?;
+            write_settings_atomically(path, &candidate)?;
+        }
+        self.settings = Arc::new(candidate);
+        Ok(self.persistence)
+    }
+
+    pub(crate) fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    pub(crate) fn ui_context(&self) -> SettingsUiContext {
+        debug_assert_eq!(
+            self.default_lease.is_some(),
+            self.mode == ConfigMode::DefaultOwned
+        );
+        SettingsUiContext {
+            config_mode: self.mode,
+            persistence: self.persistence,
+        }
+    }
+
+    pub(crate) fn take_load_diagnostics(&mut self) -> Vec<SettingsLoadDiagnostic> {
+        std::mem::take(&mut self.load_diagnostics)
+    }
+
+    pub(crate) fn certificate_store_dir(&self) -> io::Result<PathBuf> {
+        expand_home_path(&self.settings.certificate.store_dir)
+    }
+
+    pub(crate) fn certificate_pem_filename(&self) -> &str {
+        &self.settings.certificate.pem_filename
+    }
+
+    pub(crate) fn recording_settings(&self) -> &RecordingSettings {
+        &self.settings.recording
+    }
+}
+
 pub struct SettingsManager {
     path: PathBuf,
     settings: AppSettings,
@@ -402,23 +572,31 @@ impl SettingsManager {
     }
 
     fn write_settings(&self, settings: &AppSettings) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            crate::private_fs::ensure_directory(parent)?;
-        }
-
-        let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
-        if let Some(mut previous) = read_yaml_value(&self.path)? {
-            let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
-            preserve_semantic_noop_entries(&mut value, &previous, settings)?;
-        }
-
-        let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
-        crate::private_fs::write_file(&self.path, content.as_bytes())
+        write_settings_atomically(&self.path, settings)
     }
+}
+fn write_settings_atomically(path: &Path, settings: &AppSettings) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    crate::private_fs::ensure_directory(directory)?;
+
+    let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
+    if let Some(mut previous) = read_yaml_value(path)? {
+        let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
+        preserve_semantic_noop_entries(&mut value, &previous, settings)?;
+    }
+    let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
+
+    crate::private_fs::write_file(path, content.as_bytes())
 }
 
 fn default_config_path() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".fluxcope/config.yml"))
+}
+fn default_config_lock_path() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".wirelens/run/default-config.lock"))
 }
 
 fn expand_home_path(path: &str) -> io::Result<PathBuf> {

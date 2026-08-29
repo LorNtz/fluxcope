@@ -30,7 +30,7 @@ use crate::{
     logging::{LogRecord, LoggingMetrics, LoggingMetricsSnapshot, LoggingStatus},
     request_policy::RequestPolicyStore,
     request_search::{RequestSearchClient, RequestSearchDispatch, SearchJobOutcome},
-    settings::SettingsManager,
+    settings::SettingsSession,
     ui::RootView,
 };
 
@@ -52,7 +52,7 @@ pub(super) struct AppRuntime {
     request_search: RequestSearchClient,
     request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
     tui: Tui,
-    settings: SettingsManager,
+    settings: SettingsSession,
     request_policy_store: RequestPolicyStore,
     policy: RenderPolicy,
     services: ServiceSupervisor,
@@ -74,7 +74,7 @@ impl AppRuntime {
         request_search: RequestSearchClient,
         request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
         tui: Tui,
-        settings: SettingsManager,
+        settings: SettingsSession,
         request_policy_store: RequestPolicyStore,
         policy: RenderPolicy,
         services: ServiceSupervisor,

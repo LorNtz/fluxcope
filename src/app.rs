@@ -12,6 +12,7 @@ mod single_line_input;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use crate::settings::SettingsUiContext;
 #[cfg(test)]
 use crate::settings::UiSettings;
 use crate::{
@@ -120,6 +121,7 @@ impl App {
             recording,
             log_retention,
             CaptureRetentionPolicy::default(),
+            SettingsUiContext::default(),
         )
     }
 
@@ -128,8 +130,15 @@ impl App {
         recording: RecordingState,
         log_retention: LogRetentionPolicy,
         capture_retention: CaptureRetentionPolicy,
+        settings_context: SettingsUiContext,
     ) -> Self {
-        Self::with_policies(settings, recording, log_retention, capture_retention)
+        Self::with_policies(
+            settings,
+            recording,
+            log_retention,
+            capture_retention,
+            settings_context,
+        )
     }
 
     fn with_policies(
@@ -137,6 +146,7 @@ impl App {
         recording: RecordingState,
         log_retention: LogRetentionPolicy,
         capture_retention: CaptureRetentionPolicy,
+        settings_context: SettingsUiContext,
     ) -> Self {
         let ui_settings = settings.ui.clone();
         Self {
@@ -147,7 +157,7 @@ impl App {
             detail_panel: DetailPanel::new(),
             log_panel: LogPanel::with_retention(log_retention),
             certificate_popup: CertificatePopup::new(),
-            settings_popup: SettingsPopup::new(),
+            settings_popup: SettingsPopup::with_context(settings_context),
             settings,
             pending_settings_save: None,
             decode_client: None,
