@@ -5,6 +5,8 @@ mod ca;
 pub mod capture;
 mod cli;
 mod instance;
+#[cfg(unix)]
+mod instance_registry;
 mod logging;
 mod mapping;
 mod private_fs;

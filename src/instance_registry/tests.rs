@@ -1,0 +1,502 @@
+#![cfg(unix)]
+
+use super::{RegistryPublisher, RegistryScan, RegistryScanner, validate_descriptor_metadata};
+use crate::{
+    instance::InstanceIdentity,
+    settings::{AppSettings, ConfigMode, PersistenceMode, SettingsSession},
+};
+use serde_json::Value;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    net::SocketAddr,
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink},
+    path::{Path, PathBuf},
+};
+use tempfile::TempDir;
+
+const ENDPOINT_A: &str = "127.0.0.1:19001";
+const ENDPOINT_B: &str = "[::1]:19002";
+
+struct RegistryFixture {
+    home: TempDir,
+}
+
+impl RegistryFixture {
+    fn new() -> Self {
+        Self {
+            home: tempfile::tempdir().expect("temporary Wirelens home"),
+        }
+    }
+
+    fn home(&self) -> &Path {
+        self.home.path()
+    }
+
+    fn run_dir(&self) -> PathBuf {
+        self.home().join("run")
+    }
+
+    fn instances_dir(&self) -> PathBuf {
+        self.run_dir().join("instances")
+    }
+
+    fn prepare(&self, endpoint: &str) -> RegistryPublisher {
+        let endpoint = endpoint.parse::<SocketAddr>().expect("proxy endpoint");
+        let identity = InstanceIdentity::new(endpoint).expect("instance identity");
+        let settings = SettingsSession::temporary(AppSettings::default());
+        RegistryPublisher::prepare(self.home(), identity, &settings)
+            .expect("registry publisher should prepare")
+    }
+
+    fn publish(&self, endpoint: &str) -> RegistryPublisher {
+        let mut publisher = self.prepare(endpoint);
+        publisher
+            .publish()
+            .expect("descriptor should publish atomically");
+        publisher
+    }
+
+    fn scanner(&self) -> RegistryScanner {
+        RegistryScanner::new(self.home()).expect("registry scanner")
+    }
+
+    fn scan(&self) -> RegistryScan {
+        self.scanner().scan_all().expect("registry scan")
+    }
+
+    fn rewrite_descriptor(&self, path: &Path, mutate: impl FnOnce(&mut Value)) {
+        let bytes = fs::read(path).expect("published descriptor");
+        let mut descriptor: Value = serde_json::from_slice(&bytes).expect("descriptor JSON");
+        mutate(&mut descriptor);
+        let bytes = serde_json::to_vec(&descriptor).expect("mutated descriptor JSON");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .expect("open descriptor for mutation");
+        file.write_all(&bytes).expect("rewrite descriptor");
+        file.sync_all().expect("sync descriptor mutation");
+    }
+
+    fn rejected_by_code(report: &RegistryScan, code: &str) -> usize {
+        report
+            .rejected
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == code)
+            .count()
+    }
+}
+
+#[test]
+fn publisher_binds_before_publication_and_publishes_owner_only_descriptor() {
+    let fixture = RegistryFixture::new();
+    let mut publisher = fixture.prepare(ENDPOINT_A);
+
+    assert!(publisher.socket_path().exists());
+    assert!(
+        fs::metadata(publisher.socket_path())
+            .expect("socket metadata")
+            .file_type()
+            .is_socket()
+    );
+    assert!(!publisher.descriptor_path().exists());
+    assert_eq!(
+        fs::metadata(fixture.run_dir())
+            .expect("run directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(fixture.instances_dir())
+            .expect("instances directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(publisher.socket_path())
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    publisher.publish().expect("publish descriptor");
+
+    let descriptor_metadata = fs::metadata(publisher.descriptor_path()).expect("descriptor");
+    assert!(descriptor_metadata.is_file());
+    assert_eq!(descriptor_metadata.permissions().mode() & 0o777, 0o600);
+    assert!(
+        fs::read_dir(fixture.instances_dir())
+            .expect("instances directory")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp")),
+        "atomic publication must not leave temporary files"
+    );
+
+    let report = fixture.scan();
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.omitted, 0);
+    assert_eq!(report.candidates.len(), 1);
+    let descriptor = &report.candidates[0];
+    assert_eq!(
+        descriptor.proxy_endpoint(),
+        publisher.identity().proxy_endpoint()
+    );
+    assert_eq!(descriptor.local_proxy_url(), "http://127.0.0.1:19001");
+    assert_eq!(descriptor.run_id(), publisher.identity().run_id());
+    assert_eq!(descriptor.started_at(), publisher.identity().started_at());
+    assert_eq!(descriptor.pid(), std::process::id());
+    assert_eq!(descriptor.socket_path(), publisher.socket_path());
+    assert_eq!(descriptor.config_mode(), ConfigMode::Temporary);
+    assert_eq!(descriptor.persistence(), PersistenceMode::Ephemeral);
+    assert_eq!(descriptor.config_source(), None);
+    assert_eq!(descriptor.binary_version(), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn endpoint_and_run_derived_registry_names_are_stable_and_bounded() {
+    let fixture = RegistryFixture::new();
+    let first = fixture.prepare(ENDPOINT_A);
+    let second = fixture.prepare(ENDPOINT_A);
+
+    let descriptor_name = first
+        .descriptor_path()
+        .file_name()
+        .expect("descriptor name")
+        .to_string_lossy();
+    let first_socket_name = first
+        .socket_path()
+        .file_name()
+        .expect("socket name")
+        .to_string_lossy();
+    let second_socket_name = second
+        .socket_path()
+        .file_name()
+        .expect("socket name")
+        .to_string_lossy();
+
+    assert_eq!(first.descriptor_path(), second.descriptor_path());
+    assert_ne!(first.socket_path(), second.socket_path());
+    assert_eq!(descriptor_name.len(), 69);
+    assert!(descriptor_name.ends_with(".json"));
+    assert!(first_socket_name.len() <= 69);
+    assert!(first_socket_name.ends_with(".sock"));
+    assert!(second_socket_name.len() <= 69);
+}
+
+#[test]
+fn scanner_rejects_symlink_descriptor() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let descriptor_path = publisher.descriptor_path().to_path_buf();
+    let target_path = fixture.instances_dir().join("descriptor-target");
+    fs::rename(&descriptor_path, &target_path).expect("move descriptor target");
+    symlink(&target_path, &descriptor_path).expect("descriptor symlink");
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_symlink"),
+        1
+    );
+    assert!(report.candidates.is_empty());
+}
+
+#[test]
+fn metadata_validation_rejects_a_descriptor_owned_by_another_user() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let metadata = fs::metadata(publisher.descriptor_path()).expect("descriptor metadata");
+    let other_uid = metadata.uid().wrapping_add(1);
+
+    let diagnostic = validate_descriptor_metadata(&metadata, other_uid)
+        .expect_err("wrong owner must be rejected");
+
+    assert_eq!(diagnostic.code(), "descriptor_wrong_owner");
+}
+
+#[test]
+fn scanner_rejects_group_or_world_accessible_descriptor() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    fs::set_permissions(
+        publisher.descriptor_path(),
+        fs::Permissions::from_mode(0o640),
+    )
+    .expect("weaken descriptor permissions");
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_permissions"),
+        1
+    );
+    assert!(report.candidates.is_empty());
+}
+
+#[test]
+fn scanner_refuses_a_group_or_world_accessible_registry_directory() {
+    let fixture = RegistryFixture::new();
+    let _publisher = fixture.publish(ENDPOINT_A);
+    fs::set_permissions(fixture.instances_dir(), fs::Permissions::from_mode(0o750))
+        .expect("weaken registry permissions");
+
+    assert!(
+        RegistryScanner::new(fixture.home()).is_err(),
+        "scanner must not trust a registry writable or searchable by other users"
+    );
+}
+
+#[test]
+fn scanner_rejects_descriptor_larger_than_64_kib_before_json_parsing() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    OpenOptions::new()
+        .write(true)
+        .open(publisher.descriptor_path())
+        .expect("open descriptor")
+        .set_len(64 * 1024 + 1)
+        .expect("enlarge descriptor");
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_too_large"),
+        1
+    );
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_invalid_json"),
+        0,
+        "the size limit must be enforced before parsing"
+    );
+}
+
+#[test]
+fn scanner_rejects_malformed_descriptor_without_aborting_the_scan() {
+    let fixture = RegistryFixture::new();
+    let good = fixture.publish(ENDPOINT_A);
+    let bad = fixture.publish(ENDPOINT_B);
+    fs::write(bad.descriptor_path(), b"{not-json").expect("malformed descriptor");
+    fs::set_permissions(bad.descriptor_path(), fs::Permissions::from_mode(0o600))
+        .expect("owner-only descriptor");
+
+    let report = fixture.scan();
+
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), good.identity().run_id());
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_invalid_json"),
+        1
+    );
+}
+
+#[test]
+fn scanner_rejects_unknown_descriptor_schema_version() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    fixture.rewrite_descriptor(publisher.descriptor_path(), |descriptor| {
+        let current = descriptor["schema_version"]
+            .as_u64()
+            .expect("numeric schema version");
+        descriptor["schema_version"] = Value::from(current + 1);
+    });
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_schema_version"),
+        1
+    );
+}
+
+#[test]
+fn scanner_rejects_unsupported_rpc_version() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    fixture.rewrite_descriptor(publisher.descriptor_path(), |descriptor| {
+        let current = descriptor["rpc_version"]
+            .as_u64()
+            .expect("numeric RPC version");
+        descriptor["rpc_version"] = Value::from(current + 1);
+    });
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_rpc_version"),
+        1
+    );
+}
+
+#[test]
+fn scanner_rejects_socket_path_outside_the_owner_registry_root() {
+    use std::os::unix::net::UnixListener;
+
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let escaped_path = fixture.home().join("escaped.sock");
+    let _escaped_listener = UnixListener::bind(&escaped_path).expect("escaped socket");
+    fixture.rewrite_descriptor(publisher.descriptor_path(), |descriptor| {
+        descriptor["socket_path"] = Value::from(escaped_path.to_string_lossy().into_owned());
+    });
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "socket_path_escape"),
+        1
+    );
+}
+
+#[test]
+fn scanner_requires_socket_basename_to_match_endpoint_and_run_identity() {
+    use std::os::unix::net::UnixListener;
+
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let wrong_socket = publisher
+        .socket_path()
+        .with_file_name("wrong-identity.sock");
+    let _wrong_listener = UnixListener::bind(&wrong_socket).expect("wrong identity socket");
+    fixture.rewrite_descriptor(publisher.descriptor_path(), |descriptor| {
+        descriptor["socket_path"] = Value::from(wrong_socket.to_string_lossy().into_owned());
+    });
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "socket_name_mismatch"),
+        1
+    );
+}
+
+#[test]
+fn scanner_rejects_regular_file_at_the_declared_socket_path() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    fs::remove_file(publisher.socket_path()).expect("remove listener pathname");
+    let mut replacement = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(publisher.socket_path())
+        .expect("regular socket replacement");
+    replacement
+        .write_all(b"not a socket")
+        .expect("replacement data");
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "socket_not_socket"),
+        1
+    );
+}
+
+#[test]
+fn scanner_requires_descriptor_filename_to_match_the_embedded_endpoint_hash() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let mut wrong_name = publisher
+        .descriptor_path()
+        .file_name()
+        .expect("descriptor filename")
+        .to_string_lossy()
+        .into_owned();
+    let replacement = if wrong_name.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    wrong_name.replace_range(..1, replacement);
+    let wrong_name = fixture.instances_dir().join(wrong_name);
+    fs::rename(publisher.descriptor_path(), &wrong_name).expect("rename descriptor");
+
+    let report = fixture.scan();
+
+    assert_eq!(
+        RegistryFixture::rejected_by_code(&report, "descriptor_name_mismatch"),
+        1
+    );
+}
+
+#[test]
+fn scanner_inspects_at_most_256_matching_descriptor_files() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let mut created = 0;
+    for index in 0..=256_u16 {
+        let path = fixture.instances_dir().join(format!("{index:064x}.json"));
+        if path == publisher.descriptor_path() {
+            continue;
+        }
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .expect("capped descriptor fixture");
+        file.write_all(b"{}").expect("descriptor fixture");
+        created += 1;
+        if created == 256 {
+            break;
+        }
+    }
+    assert_eq!(created, 256);
+
+    let report = fixture.scan();
+
+    assert_eq!(report.candidates.len() + report.rejected.len(), 256);
+    assert_eq!(report.omitted, 1);
+}
+
+#[test]
+fn endpoint_read_does_not_scan_an_unrelated_invalid_descriptor() {
+    let fixture = RegistryFixture::new();
+    let good = fixture.publish(ENDPOINT_A);
+    let bad = fixture.publish(ENDPOINT_B);
+    fs::write(bad.descriptor_path(), b"invalid").expect("invalid unrelated descriptor");
+    fs::set_permissions(bad.descriptor_path(), fs::Permissions::from_mode(0o600))
+        .expect("owner-only descriptor");
+
+    let report = fixture
+        .scanner()
+        .read_endpoint(ENDPOINT_A.parse().expect("endpoint"))
+        .expect("targeted descriptor read");
+
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), good.identity().run_id());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.omitted, 0);
+}
+
+#[test]
+fn stale_cleanup_refuses_to_remove_a_descriptor_with_a_changed_run_id() {
+    let fixture = RegistryFixture::new();
+    let first = fixture.publish(ENDPOINT_A);
+    let second = fixture.publish(ENDPOINT_A);
+    let replacement_run_id = second.identity().run_id().clone();
+    let replacement_descriptor = second.descriptor_path().to_path_buf();
+    let replacement_socket = second.socket_path().to_path_buf();
+
+    drop(first);
+
+    assert!(replacement_descriptor.exists());
+    assert!(replacement_socket.exists());
+    let report = fixture.scan();
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), &replacement_run_id);
+
+    drop(second);
+    assert!(!replacement_descriptor.exists());
+    assert!(!replacement_socket.exists());
+}

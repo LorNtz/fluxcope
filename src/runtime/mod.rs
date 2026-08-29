@@ -2,10 +2,12 @@ mod event_loop;
 mod policy;
 mod services;
 
+#[cfg(any(test, not(unix)))]
+use std::path::PathBuf;
 use std::{
     convert::Infallible,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -29,7 +31,7 @@ use crate::{
         start_decode_service,
     },
     cli::{ConfigSelection, McpOverride, ProxyStartup},
-    logging::AppLogger,
+    logging::{AppLogger, endpoint_log_path},
     proxy_handler::LogHandler,
     recording::RecordingState,
     request_policy::{
@@ -37,6 +39,11 @@ use crate::{
     },
     request_search::start_request_search_service,
     settings::{AppSettings, SettingsSession},
+};
+#[cfg(unix)]
+use crate::{
+    instance::InstanceIdentity,
+    instance_registry::{RegistryPublisher, wirelens_home_dir},
 };
 use event_loop::{AppRuntime, Tui};
 use policy::RuntimePolicy;
@@ -58,7 +65,20 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let mut settings =
         SettingsSession::load(&startup.config).context("failed to load Fluxcope settings")?;
     let settings_snapshot = settings.snapshot();
-    let proxy_addr = resolve_proxy_bind_addr(&startup.config, &settings_snapshot);
+    let requested_proxy_addr = resolve_proxy_bind_addr(&startup.config, &settings_snapshot);
+    let proxy_listener = bind_proxy_listener(requested_proxy_addr)?;
+    let proxy_addr = proxy_listener
+        .local_addr()
+        .context("failed to read bound proxy address")?;
+    #[cfg(unix)]
+    let identity = InstanceIdentity::new(proxy_addr)?;
+    #[cfg(unix)]
+    let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
+    #[cfg(unix)]
+    let mut registry_publisher = RegistryPublisher::prepare(&wirelens_home, identity, &settings)
+        .context("failed to prepare instance registry publication")?;
+    #[cfg(not(unix))]
+    let wirelens_home = PathBuf::from(".");
     let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
     let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
@@ -66,7 +86,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let shutdown = CancellationToken::new();
 
     let logging = AppLogger::init(
-        settings.path().with_file_name("fluxcope.log"),
+        endpoint_log_path(&wirelens_home, proxy_addr),
         policy.logging.clone(),
         shutdown.child_token(),
     )
@@ -83,8 +103,6 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     for diagnostic in settings.take_load_diagnostics() {
         log::error!("{}", diagnostic.message);
     }
-
-    verify_proxy_port_available(proxy_addr)?;
 
     let compiled_policy = RequestPolicy::compile(&settings_snapshot);
     log_request_policy_diagnostics(&compiled_policy.diagnostics);
@@ -130,7 +148,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     };
 
     let proxy_task = start_proxy(
-        proxy_addr,
+        proxy_listener,
         ca,
         capture_publisher,
         body_tasks.clone(),
@@ -138,6 +156,11 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         recording.clone(),
         shutdown.child_token(),
     )?;
+    #[cfg(unix)]
+    if let Err(error) = registry_publisher.publish() {
+        shutdown.cancel();
+        return Err(error).context("failed to publish instance descriptor");
+    }
 
     let tui = Tui::enter().context("failed to initialize terminal UI")?;
     let mut app = App::with_runtime_policies(
@@ -191,16 +214,18 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     .await
 }
 
-fn verify_proxy_port_available(proxy_addr: SocketAddr) -> Result<()> {
-    std::net::TcpListener::bind(proxy_addr)
-        .with_context(|| {
-            format!("failed to bind proxy address {proxy_addr}; another instance may be running")
-        })
-        .map(drop)
+fn bind_proxy_listener(proxy_addr: SocketAddr) -> Result<TcpListener> {
+    let listener = TcpListener::bind(proxy_addr).with_context(|| {
+        format!("failed to bind proxy address {proxy_addr}; another instance may be running")
+    })?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to make proxy listener nonblocking")?;
+    Ok(listener)
 }
 
 fn start_proxy(
-    proxy_addr: SocketAddr,
+    proxy_listener: TcpListener,
     ca: ca::CaData,
     capture_publisher: CapturePublisher,
     body_tasks: BodyTaskTracker,
@@ -208,6 +233,11 @@ fn start_proxy(
     recording: RecordingState,
     shutdown: CancellationToken,
 ) -> Result<JoinHandle<Result<()>>> {
+    let proxy_addr = proxy_listener
+        .local_addr()
+        .context("failed to read proxy listener address")?;
+    let proxy_listener = tokio::net::TcpListener::from_std(proxy_listener)
+        .context("failed to create proxy listener")?;
     let key =
         KeyPair::try_from(ca.key_der().as_slice()).context("failed to decode proxy CA key")?;
     let issuer = Issuer::from_ca_cert_der(&CertificateDer::from(ca.cert_der()), key)
@@ -215,7 +245,7 @@ fn start_proxy(
     let authority = RcgenAuthority::new(issuer, 1_000, aws_lc_rs::default_provider());
 
     let proxy = Proxy::builder()
-        .with_addr(proxy_addr)
+        .with_listener(proxy_listener)
         .with_ca(authority)
         .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(LogHandler::new(
@@ -387,6 +417,55 @@ mod tests {
             SocketAddr::from(([0, 0, 0, 0], 8989)),
             proxy_bind_addr(8989)
         );
+    }
+
+    #[test]
+    fn proxy_listener_is_bound_and_nonblocking_before_proxy_service_startup() {
+        let listener =
+            bind_proxy_listener("127.0.0.1:0".parse().expect("ephemeral loopback endpoint"))
+                .expect("bind proxy listener");
+        let endpoint = listener.local_addr().expect("bound proxy endpoint");
+
+        let error = listener
+            .accept()
+            .expect_err("nonblocking listener should not wait for a client");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        let client = std::net::TcpStream::connect(endpoint)
+            .expect("bound listener should be connectable before proxy startup");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let (_server, peer) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    panic!("timed out waiting for the queued proxy connection");
+                }
+                Err(error) => panic!("failed to accept queued proxy connection: {error}"),
+            }
+        };
+        assert_eq!(peer, client.local_addr().expect("client endpoint"));
+    }
+
+    #[test]
+    fn bound_proxy_listener_exclusively_owns_its_actual_endpoint() {
+        let listener =
+            bind_proxy_listener("127.0.0.1:0".parse().expect("ephemeral loopback endpoint"))
+                .expect("bind proxy listener");
+        let endpoint = listener.local_addr().expect("actual proxy endpoint");
+
+        let duplicate = std::net::TcpListener::bind(endpoint)
+            .expect_err("bound endpoint must remain exclusively owned");
+        assert_eq!(duplicate.kind(), io::ErrorKind::AddrInUse);
+
+        drop(listener);
+        std::net::TcpListener::bind(endpoint)
+            .expect("dropping the retained listener should release the endpoint");
     }
     #[test]
     fn every_config_selection_resolves_the_expected_proxy_endpoint() {

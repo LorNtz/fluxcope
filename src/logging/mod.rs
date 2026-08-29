@@ -13,7 +13,7 @@ use log::{Level, Metadata, Record, SetLoggerError};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use writer::LoggingStatus;
+pub(crate) use writer::{LoggingStatus, endpoint_log_path};
 
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 

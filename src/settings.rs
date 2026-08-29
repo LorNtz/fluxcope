@@ -313,7 +313,7 @@ impl Default for ProxyMapLocalRule {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConfigMode {
     DefaultOwned,
@@ -321,7 +321,7 @@ pub(crate) enum ConfigMode {
     Temporary,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PersistenceMode {
     Persistent,
