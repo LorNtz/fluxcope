@@ -43,3 +43,26 @@ Main ran `cargo test control_rpc --all-features` after formatting: all 38 contro
 ## Self-review
 
 Reviewed the full Task 4 implementation against the brief after GREEN. Request and response parsing is strict and trailing-data checked; operation arguments remain raw at the envelope boundary and are deserialized exactly once into deny-unknown typed arguments. Declared lengths are rejected before payload reservation. Response serialization acquires its pessimistic byte lease before allocating the output, writes JSON once into the final prefixed capped buffer, and retains actual allocation plus call permits through socket write completion. Parse and serialization workers own cloned call leases, so cancellation cannot release admission while blocking work is still running. The server enforces the 32-call and 32 MiB limits, same-effective-UID peers, run identity, deadline cancellation, EOF cancellation, and one call per connection; the client uses one outer deadline and validates response version, request ID, and endpoint/run scope. No unresolved Task 4 correctness or security concerns were found.
+
+## Fix round 1 RED intent
+
+Added test-first regressions for the three Important review findings before production changes:
+
+- strict envelope parsing, typed operation-argument parsing, and trailing-data validation must all run in the same lease-owning blocking worker, with a cancellation gate proving the call permit remains held until that worker exits;
+- response-budget acquisition and response serialization accept the request's clamped deadline plus disconnect cancellation, serialization workers retain leases after outer cancellation, server writes cannot outlive that deadline, and a disconnected server call escapes a blocked response-budget wait; and
+- the capped final-buffer writer exposes test allocation-growth instrumentation and must serialize 65,536 tiny tokens with bounded geometric growth rather than per-token exact reserve/copy.
+
+Main confirmed the focused RED run failed on the intended missing full typed-parse helper, deadline-aware serialization, allocation-growth instrumentation, and injectable response budget.
+
+## Fix round 1 implementation
+
+- Combined strict envelope parsing, typed argument validation, and trailing-data completion in one blocking worker that owns the active-call lease; the server now consumes the worker's request ID, clamped deadline, and typed request/error outcome without doing JSON work on Tokio.
+- Added deadline- and cancellation-aware pessimistic response-budget acquisition plus blocking serialization. Detached blocking workers retain their cloned call and byte leases until actual worker exit after outer cancellation.
+- Kept the same cancellation token and clamped deadline across handler dispatch, response-budget wait, serialization, and split-socket write while racing peer EOF throughout response completion.
+- Replaced exact per-token reserve with capped geometric final-buffer growth, retained capacity accounting, and test-only allocation-growth observation.
+
+Main formatted the review fixes and ran `cargo test control_rpc --all-features`: all 44 control RPC tests passed.
+
+## Fix round 1 GREEN evidence
+
+The focused suite proves typed argument parsing stays off Tokio in the same lease-owning worker as strict envelope parsing; response-budget waits, blocking serialization, and socket writes honor the same clamped deadline and disconnect token without releasing worker leases early; and 65,536 tiny serialization tokens use bounded geometric allocation growth. The three Important review findings are closed. Expected crate-private downstream-consumption warnings remain until later tasks consume the staged APIs.

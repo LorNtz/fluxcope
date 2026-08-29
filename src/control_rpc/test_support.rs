@@ -4,8 +4,17 @@ use crate::{
     instance_registry::InstanceDescriptor,
 };
 use serde_json::{Value, json};
-use std::{net::SocketAddr, path::Path, str::FromStr};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    str::FromStr,
+    sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard},
+    thread::ThreadId,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+};
 
 pub(crate) const RUN_ID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 pub(crate) const OTHER_RUN_ID: &str = "AQEBAQEBAQEBAQEBAQEBAQ";
@@ -125,4 +134,83 @@ pub(crate) fn descriptor(socket_path: &Path) -> InstanceDescriptor {
     });
     let encoded = serde_json::to_string(&value).expect("serialize test instance descriptor");
     serde_json::from_str(&encoded).expect("test instance descriptor")
+}
+
+struct ArgumentParseProbeInner {
+    request_id: String,
+    entered: mpsc::Sender<ThreadId>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+static ARGUMENT_PARSE_PROBE_SERIAL: Mutex<()> = Mutex::new(());
+static ARGUMENT_PARSE_PROBE: LazyLock<Mutex<Option<Arc<ArgumentParseProbeInner>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub(crate) struct ArgumentParseProbe {
+    _serial: MutexGuard<'static, ()>,
+    entered: mpsc::Receiver<ThreadId>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ArgumentParseProbe {
+    pub(crate) async fn entered(&mut self) -> ThreadId {
+        self.entered.recv().await.expect("argument parser entered")
+    }
+
+    pub(crate) fn release(&self) {
+        let (lock, wake) = &*self.release;
+        *lock.lock().expect("argument parser gate") = true;
+        wake.notify_all();
+    }
+}
+
+impl Drop for ArgumentParseProbe {
+    fn drop(&mut self) {
+        self.release();
+        *ARGUMENT_PARSE_PROBE
+            .lock()
+            .expect("argument parser probe slot") = None;
+    }
+}
+
+pub(crate) fn install_argument_parse_probe(request_id: &str) -> ArgumentParseProbe {
+    let serial = ARGUMENT_PARSE_PROBE_SERIAL
+        .lock()
+        .expect("argument parser probe serial lock");
+    let (entered_tx, entered_rx) = mpsc::channel(1);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    *ARGUMENT_PARSE_PROBE
+        .lock()
+        .expect("argument parser probe slot") = Some(Arc::new(ArgumentParseProbeInner {
+        request_id: request_id.to_owned(),
+        entered: entered_tx,
+        release: Arc::clone(&release),
+    }));
+    ArgumentParseProbe {
+        _serial: serial,
+        entered: entered_rx,
+        release,
+    }
+}
+
+pub(crate) fn notify_argument_parse_probe(request_id: &str) {
+    let probe = ARGUMENT_PARSE_PROBE
+        .lock()
+        .expect("argument parser probe slot")
+        .clone();
+    let Some(probe) = probe else {
+        return;
+    };
+    if probe.request_id != request_id {
+        return;
+    }
+    probe
+        .entered
+        .blocking_send(std::thread::current().id())
+        .expect("argument parser observer");
+    let (lock, wake) = &*probe.release;
+    let mut released = lock.lock().expect("argument parser gate");
+    while !*released {
+        released = wake.wait(released).expect("argument parser gate wait");
+    }
 }

@@ -173,6 +173,13 @@ impl RequestEnvelope {
         })
     }
 
+    pub(crate) fn clamped_deadline(&self, received_at: Instant) -> Instant {
+        let maximum = match self.operation {
+            ControlOperationKind::DescribeInstance => DESCRIBE_INSTANCE_MAX_DEADLINE,
+        };
+        received_at + Duration::from_millis(self.deadline_ms).min(maximum)
+    }
+
     pub(crate) fn validate(self, received_at: Instant) -> Result<ControlRequest, ControlError> {
         if self.protocol_version != RPC_VERSION {
             return Err(ControlError::new(
@@ -189,17 +196,16 @@ impl RequestEnvelope {
         validate_identifier("client.name", &self.client.name)?;
         validate_identifier("client.version", &self.client.version)?;
 
-        let (operation, maximum_deadline) = match self.operation {
+        #[cfg(test)]
+        crate::control_rpc::test_support::notify_argument_parse_probe(&self.request_id);
+
+        let operation = match self.operation {
             ControlOperationKind::DescribeInstance => {
                 parse_arguments::<DescribeInstanceArguments>(&self.arguments)?;
-                (
-                    ControlOperation::DescribeInstance,
-                    DESCRIBE_INSTANCE_MAX_DEADLINE,
-                )
+                ControlOperation::DescribeInstance
             }
         };
-        let declared = Duration::from_millis(self.deadline_ms);
-        let deadline = received_at + declared.min(maximum_deadline);
+        let deadline = self.clamped_deadline(received_at);
         Ok(ControlRequest {
             request_id: self.request_id,
             run_id: self.run_id,

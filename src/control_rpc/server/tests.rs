@@ -4,6 +4,9 @@ use super::{
 };
 use crate::{
     control_rpc::{
+        framing::{
+            CallAdmission, RESPONSE_MAX_BYTES, ResponseSerializationBudget, serialize_json_frame,
+        },
         protocol::{
             ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
             InstanceScope,
@@ -40,6 +43,7 @@ enum HandlerMode {
         started: mpsc::Sender<()>,
         release: watch::Receiver<bool>,
     },
+    LargeResponse,
 }
 
 #[derive(Clone)]
@@ -85,6 +89,16 @@ impl ControlRpcHandler for TestHandler {
                         .wait_for(|released| *released)
                         .await
                         .expect("release sender");
+                }
+                HandlerMode::LargeResponse => {
+                    return Err(ControlError {
+                        code: ControlErrorCode::InstanceUnavailable,
+                        message: "large bounded response".to_owned(),
+                        retryable: true,
+                        details: serde_json::json!({
+                            "payload": "x".repeat(6 * 1024 * 1024),
+                        }),
+                    });
                 }
             }
             Ok(ControlResult::DescribeInstance { instance: scope })
@@ -186,6 +200,73 @@ async fn server_clamps_deadline_and_preserves_declared_call_context() {
         .await
         .expect("server task")
         .expect("serve one request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_serialization_and_write_remain_inside_the_request_deadline() {
+    let identity = InstanceIdentity::new(endpoint()).expect("instance identity");
+    let handler = handler(&identity, HandlerMode::LargeResponse);
+    let server = ControlRpcServer::new(identity.clone(), handler);
+    let (server_stream, mut client_stream) = UnixStream::pair().expect("Unix stream pair");
+    let server_task = tokio::spawn(async move { server.serve_connection(server_stream).await });
+
+    write_payload(
+        &mut client_stream,
+        &request_json(identity.run_id().as_str(), 250),
+    )
+    .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("the clamped request deadline bounds response completion")
+        .expect("server task");
+    if let Err(error) = result {
+        assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_cancels_response_budget_wait_before_a_lease_is_available() {
+    let identity = InstanceIdentity::new(endpoint()).expect("instance identity");
+    let handler = handler(&identity, HandlerMode::Success);
+    let budget = ResponseSerializationBudget::new(RESPONSE_MAX_BYTES);
+    let framing_admission = CallAdmission::new(1);
+    let held = serialize_json_frame(
+        "held",
+        RESPONSE_MAX_BYTES,
+        budget.clone(),
+        framing_admission
+            .acquire()
+            .await
+            .expect("framing call permit"),
+    )
+    .await
+    .expect("held response lease");
+    let server =
+        ControlRpcServer::new_with_response_budget(identity.clone(), handler.clone(), budget);
+    let (server_stream, mut client_stream) = UnixStream::pair().expect("Unix stream pair");
+    let server_task = tokio::spawn(async move { server.serve_connection(server_stream).await });
+
+    write_payload(
+        &mut client_stream,
+        &request_json(identity.run_id().as_str(), 5_000),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while handler.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handler returned before budget wait");
+    drop(client_stream);
+
+    tokio::time::timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("disconnect cancels response budget wait")
+        .expect("server task")
+        .expect("disconnect handled");
+    drop(held);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

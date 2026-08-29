@@ -1,19 +1,20 @@
 use super::{
     CallAdmission, REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, RESPONSE_SERIALIZATION_BUDGET_BYTES,
-    ResponseSerializationBudget, read_json_frame, run_blocking_with_call_lease,
-    serialize_json_frame,
+    ResponseSerializationBudget, read_json_frame, read_validated_request_frame_with_call_lease,
+    run_blocking_with_call_lease, serialize_json_frame, serialize_json_frame_until,
 };
 use crate::control_rpc::{
     protocol::{ControlErrorCode, RequestEnvelope},
-    test_support::{framed, request_json},
+    test_support::{RUN_ID, framed, install_argument_parse_probe, request_json, request_value},
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +88,45 @@ async fn request_frame_cap_accepts_the_normal_wire_envelope() {
         .expect("bounded request frame");
 
     assert_eq!(envelope.protocol_version, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_arguments_are_parsed_in_the_lease_owning_blocking_worker() {
+    const PROBE_REQUEST_ID: &str = "argument-parse-probe";
+    let runtime_thread = std::thread::current().id();
+    let admission = CallAdmission::new(1);
+    let lease = admission.acquire().await.expect("call permit");
+    let mut probe = install_argument_parse_probe(PROBE_REQUEST_ID);
+    let mut request = request_value(RUN_ID, 1_000);
+    request["request_id"] = serde_json::json!(PROBE_REQUEST_ID);
+    let payload = serde_json::to_vec(&request).expect("probe request JSON");
+    let frame = framed(&payload);
+    let task = tokio::spawn(async move {
+        let mut input = frame.as_slice();
+        read_validated_request_frame_with_call_lease(
+            &mut input,
+            REQUEST_MAX_BYTES,
+            lease,
+            Instant::now(),
+        )
+        .await
+    });
+
+    let parse_thread = tokio::time::timeout(Duration::from_secs(1), probe.entered())
+        .await
+        .expect("typed argument parser entered");
+    assert_ne!(parse_thread, runtime_thread);
+    task.abort();
+    assert!(
+        admission.try_acquire().is_err(),
+        "the blocking typed parser must retain the call lease after outer cancellation"
+    );
+
+    probe.release();
+    tokio::time::timeout(Duration::from_secs(1), admission.acquire())
+        .await
+        .expect("typed parser worker exits")
+        .expect("call permit after parser exit");
 }
 
 #[derive(Clone)]
@@ -170,6 +210,129 @@ async fn response_larger_than_eight_mib_is_rejected_by_the_capped_writer() {
         .expect_err("response exceeds cap after JSON quoting");
 
     assert_eq!(error.code, ControlErrorCode::RpcFrameTooLarge);
+}
+
+#[tokio::test]
+async fn response_budget_wait_obeys_the_same_operation_deadline_and_cancellation() {
+    let admission = CallAdmission::new(3);
+    let budget = ResponseSerializationBudget::new(RESPONSE_MAX_BYTES);
+    let held = serialize_json_frame(
+        "held",
+        RESPONSE_MAX_BYTES,
+        budget.clone(),
+        admission.acquire().await.expect("held call permit"),
+    )
+    .await
+    .expect("held frame");
+
+    let deadline_error = serialize_json_frame_until(
+        "deadline",
+        RESPONSE_MAX_BYTES,
+        budget.clone(),
+        admission.acquire().await.expect("deadline call permit"),
+        Instant::now() + Duration::from_millis(25),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("budget wait deadline");
+    assert_eq!(deadline_error.code, ControlErrorCode::InstanceUnavailable);
+
+    let cancelled = CancellationToken::new();
+    let cancellation = cancelled.clone();
+    let cancelled_call = serialize_json_frame_until(
+        "cancelled",
+        RESPONSE_MAX_BYTES,
+        budget,
+        admission.acquire().await.expect("cancelled call permit"),
+        Instant::now() + Duration::from_secs(1),
+        cancelled,
+    );
+    tokio::pin!(cancelled_call);
+    cancellation.cancel();
+    let cancellation_error = cancelled_call.await.expect_err("budget wait cancellation");
+    assert_eq!(
+        cancellation_error.code,
+        ControlErrorCode::InstanceUnavailable
+    );
+    drop(held);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_response_serialization_keeps_worker_leases_until_worker_exit() {
+    let admission = CallAdmission::new(1);
+    let budget = ResponseSerializationBudget::new(RESPONSE_SERIALIZATION_BUDGET_BYTES);
+    let lease = admission.acquire().await.expect("call permit");
+    let (started_tx, mut started_rx) = mpsc::channel(1);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let value = SerializationGate {
+        started: started_tx,
+        release: Arc::clone(&release),
+    };
+    let cancelled = CancellationToken::new();
+    let cancel = cancelled.clone();
+    let task = tokio::spawn(serialize_json_frame_until(
+        value,
+        RESPONSE_MAX_BYTES,
+        budget,
+        lease,
+        Instant::now() + Duration::from_secs(1),
+        cancelled,
+    ));
+    started_rx.recv().await.expect("serializer worker started");
+
+    cancel.cancel();
+    let error = task
+        .await
+        .expect("serialization task")
+        .expect_err("serialization cancellation");
+    assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
+    assert!(
+        admission.try_acquire().is_err(),
+        "cancelled serializer worker must retain the call permit"
+    );
+
+    {
+        let (lock, wake) = &*release;
+        *lock.lock().expect("serializer gate") = true;
+        wake.notify_all();
+    }
+    tokio::time::timeout(Duration::from_secs(1), admission.acquire())
+        .await
+        .expect("serializer worker exits")
+        .expect("call permit after serializer exit");
+}
+
+struct ManyTinyValues(usize);
+
+impl Serialize for ManyTinyValues {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0))?;
+        for _ in 0..self.0 {
+            sequence.serialize_element(&0_u8)?;
+        }
+        sequence.end()
+    }
+}
+
+#[tokio::test]
+async fn capped_writer_uses_bounded_geometric_growth_for_tiny_tokens() {
+    let admission = CallAdmission::new(1);
+    let frame = serialize_json_frame(
+        ManyTinyValues(65_536),
+        RESPONSE_MAX_BYTES,
+        ResponseSerializationBudget::new(RESPONSE_SERIALIZATION_BUDGET_BYTES),
+        admission.acquire().await.expect("call permit"),
+    )
+    .await
+    .expect("bounded tiny-token serialization");
+
+    assert!(
+        frame.allocation_growth_count() <= 32,
+        "bounded geometric growth must avoid per-token reallocations"
+    );
 }
 
 #[derive(Clone)]
