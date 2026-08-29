@@ -1,11 +1,17 @@
 use super::{
-    ControlError, ControlErrorCode, ControlOperation, ControlOperationKind, DeclaredClient,
+    ControlError, ControlErrorCode, ControlOperation, ControlOperationKind, ControlResult,
+    DeclaredClient,
     RPC_VERSION, RequestEnvelope, ResponseEnvelope, decode_request_payload,
     decode_response_payload,
 };
-use crate::control_rpc::test_support::{
-    ENDPOINT, OTHER_ENDPOINT, OTHER_RUN_ID, RUN_ID, describe_result, instance_scope, request_value,
-    run_id, scope_value, success_response_value,
+use crate::{
+    capture::CaptureSequence,
+    control::capture_query::{CaptureQuery, CaptureSearchCursor},
+    control_rpc::test_support::{
+        ENDPOINT, OTHER_ENDPOINT, OTHER_RUN_ID, RUN_ID, describe_result, instance_scope,
+        request_value, run_id, scope_value, success_response_value,
+    },
+    settings::{ConfigMode, PersistenceMode},
 };
 use serde_json::{json, value::RawValue};
 use std::time::{Duration, Instant};
@@ -308,4 +314,224 @@ fn response_rejects_mismatched_request_id_and_instance_scope() {
         .expect_err("mismatched instance scope");
         assert_eq!(error.code, ControlErrorCode::InstanceGenerationConflict);
     }
+}
+
+fn task8_request(operation: &str, arguments: serde_json::Value, deadline_ms: u64) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "protocol_version": RPC_VERSION,
+        "request_id": "task-8-request",
+        "run_id": RUN_ID,
+        "deadline_ms": deadline_ms,
+        "client": {"name": "test-client", "version": "1.0"},
+        "operation": operation,
+        "arguments": arguments
+    }))
+    .expect("request JSON")
+}
+
+#[test]
+fn task8_requests_decode_to_operation_specific_typed_arguments() {
+    let received_at = Instant::now();
+    let cases = [
+        (
+            "get_status",
+            json!({}),
+            ControlOperation::GetStatus,
+        ),
+        (
+            "set_recording_enabled",
+            json!({"enabled": true}),
+            ControlOperation::SetRecordingEnabled { enabled: true },
+        ),
+        (
+            "search_captures",
+            json!({
+                "query": {"method": "get", "mapping_path": "remote_only"},
+                "cursor": {"next_older_sequence": 30},
+                "limit": 10
+            }),
+            ControlOperation::SearchCaptures {
+                query: CaptureQuery {
+                    method: Some("get".to_owned()),
+                    mapping_path: Some(crate::control::capture_query::MappingPath::RemoteOnly),
+                    ..CaptureQuery::default()
+                },
+                cursor: Some(CaptureSearchCursor::new(CaptureSequence::new(30))),
+                limit: Some(10),
+            },
+        ),
+        (
+            "get_capture",
+            json!({"capture_id": 7, "expected_revision": 3}),
+            ControlOperation::GetCapture {
+                capture_id: CaptureSequence::new(7),
+                expected_revision: Some(3),
+            },
+        ),
+    ];
+
+    for (operation, arguments, expected) in cases {
+        let request = decode_request_payload(
+            &task8_request(operation, arguments, 5_000),
+            received_at,
+        )
+        .expect("valid Task 8 request");
+        assert_eq!(request.operation, expected);
+        assert_eq!(request.deadline, received_at + Duration::from_secs(5));
+    }
+}
+
+#[test]
+fn task8_operations_reject_unknown_missing_malformed_and_out_of_range_arguments() {
+    let invalid = [
+        ("get_status", json!({"unexpected": true})),
+        ("set_recording_enabled", json!({})),
+        (
+            "set_recording_enabled",
+            json!({"enabled": true, "unexpected": true}),
+        ),
+        (
+            "search_captures",
+            json!({"query": {}, "cursor": "30", "limit": 10}),
+        ),
+        (
+            "search_captures",
+            json!({"query": {"mapping_path": "remote-local"}}),
+        ),
+        (
+            "search_captures",
+            json!({"query": {"started_at_min": "not-a-time"}}),
+        ),
+        (
+            "search_captures",
+            json!({"query": {"sequence_min": 9, "sequence_max": 8}}),
+        ),
+        ("search_captures", json!({"query": {}, "limit": 0})),
+        ("search_captures", json!({"query": {}, "limit": 101})),
+        ("get_capture", json!({})),
+        ("get_capture", json!({"capture_id": "seven"})),
+        (
+            "get_capture",
+            json!({"capture_id": 7, "unexpected": true}),
+        ),
+    ];
+
+    for (operation, arguments) in invalid {
+        let error = decode_request_payload(
+            &task8_request(operation, arguments, 1_000),
+            Instant::now(),
+        )
+        .expect_err("invalid operation arguments");
+        assert_eq!(
+            error.code,
+            ControlErrorCode::InvalidArgument,
+            "{operation} should reject malformed arguments"
+        );
+    }
+
+    let mut trailing = task8_request("get_status", json!({}), 1_000);
+    trailing.extend_from_slice(br#" true"#);
+    assert_invalid_request(&trailing);
+}
+
+#[test]
+fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
+    let received_at = Instant::now();
+    for (operation, arguments) in [
+        ("get_status", json!({})),
+        ("set_recording_enabled", json!({"enabled": false})),
+        ("search_captures", json!({"query": {}})),
+        ("get_capture", json!({"capture_id": 1})),
+    ] {
+        let request = decode_request_payload(
+            &task8_request(operation, arguments, u64::MAX),
+            received_at,
+        )
+        .expect("valid request");
+        assert_eq!(
+            request.deadline,
+            received_at + Duration::from_secs(30),
+            "{operation} deadline"
+        );
+    }
+}
+
+#[test]
+fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
+    let status = ControlResult::GetStatus {
+        instance: instance_scope(),
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+        recording_enabled: true,
+        retained_capture_count: 4,
+        settings_revision: 9,
+    };
+    let recording = ControlResult::SetRecordingEnabled {
+        instance: instance_scope(),
+        previous: false,
+        current: true,
+    };
+    let search = ControlResult::SearchCaptures {
+        instance: instance_scope(),
+        captures: Vec::new(),
+        next_cursor: None,
+    };
+
+    assert_eq!(
+        serde_json::to_value(status).expect("status JSON"),
+        json!({
+            "operation": "get_status",
+            "instance": scope_value(ENDPOINT, RUN_ID),
+            "config_mode": "temporary",
+            "persistence": "ephemeral",
+            "recording_enabled": true,
+            "retained_capture_count": 4,
+            "settings_revision": 9
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(recording).expect("recording JSON"),
+        json!({
+            "operation": "set_recording_enabled",
+            "instance": scope_value(ENDPOINT, RUN_ID),
+            "previous": false,
+            "current": true
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(search).expect("search JSON"),
+        json!({
+            "operation": "search_captures",
+            "instance": scope_value(ENDPOINT, RUN_ID),
+            "captures": [],
+            "next_cursor": null
+        })
+    );
+}
+
+#[test]
+fn capture_not_found_and_revision_conflict_are_distinct_typed_errors() {
+    let not_found = ControlError::new(
+        ControlErrorCode::CaptureNotFound,
+        "capture is not retained",
+        false,
+        json!({"capture_id": 7}),
+    );
+    let conflict = ControlError::new(
+        ControlErrorCode::CaptureRevisionConflict,
+        "capture revision changed",
+        false,
+        json!({"capture_id": 7, "expected_revision": 2, "current_revision": 3}),
+    );
+
+    assert_eq!(not_found.code.as_str(), "capture_not_found");
+    assert_eq!(conflict.code.as_str(), "capture_revision_conflict");
+    assert_eq!(
+        serde_json::to_value(not_found).expect("not found JSON")["details"],
+        json!({"capture_id": 7})
+    );
+    assert_eq!(
+        serde_json::to_value(conflict).expect("conflict JSON")["details"],
+        json!({"capture_id": 7, "expected_revision": 2, "current_revision": 3})
+    );
 }

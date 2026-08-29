@@ -1,5 +1,7 @@
 #[cfg(unix)]
 pub(crate) mod broker;
+#[cfg(unix)]
+mod capture;
 mod schema;
 mod telemetry;
 

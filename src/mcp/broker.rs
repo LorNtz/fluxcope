@@ -873,7 +873,7 @@ fn validate_client_identifier(field: &str, value: &str) -> Result<(), McpDomainE
     Ok(())
 }
 
-fn to_mcp_error(error: McpDomainError) -> ErrorData {
+pub(super) fn to_mcp_error(error: McpDomainError) -> ErrorData {
     let data = json!({
         "code": error.code(),
         "retryable": error.retryable(),
@@ -2100,4 +2100,203 @@ mod tests {
             .await
             .expect("borrowed descriptor probe");
     }
+    mod mcp {
+        pub(super) mod capture {
+            use super::super::*;
+            use crate::{
+                capture::{
+                    CaptureRecord, CaptureSequence, CaptureSnapshotMode, CapturedExchange,
+                },
+                control::capture_query::{
+                    CaptureQuery, CompiledCaptureQuery, match_capture_page,
+                },
+                control_rpc::protocol::ControlOperation,
+            };
+            use hyper::Method;
+            use serde_json::{Map, Value, json};
+
+            struct CaptureProbe;
+
+            impl InstanceProbe for CaptureProbe {
+                fn describe<'a>(
+                    &'a self,
+                    descriptor: &'a InstanceDescriptor,
+                    _client: DeclaredClient,
+                    _deadline: Instant,
+                    _cancelled: CancellationToken,
+                ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>>
+                {
+                    Box::pin(async move { Ok(describe(descriptor, 1)) })
+                }
+
+                fn call<'a>(
+                    &'a self,
+                    descriptor: &'a InstanceDescriptor,
+                    operation: ControlOperation,
+                    _client: DeclaredClient,
+                    _deadline: Instant,
+                    cancelled: CancellationToken,
+                ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>>
+                {
+                    Box::pin(async move {
+                        let instance = InstanceScope {
+                            proxy_endpoint: descriptor.proxy_endpoint(),
+                            run_id: descriptor.run_id().clone(),
+                        };
+                        match operation {
+                            ControlOperation::SearchCaptures {
+                                query,
+                                cursor,
+                                limit,
+                            } => {
+                                let sequence = if descriptor.proxy_endpoint().port() == 19801 {
+                                    11
+                                } else {
+                                    22
+                                };
+                                let record = CaptureRecord::from_completed(CapturedExchange {
+                                    sequence: CaptureSequence::new(sequence),
+                                    method: Method::GET,
+                                    uri: format!("https://instance-{sequence}.example/capture"),
+                                    mapped_uri: None,
+                                    local_path: None,
+                                    status: Some(200),
+                                    req_headers: vec![],
+                                    res_headers: vec![],
+                                    req_body: None,
+                                    res_body: None,
+                                });
+                                let snapshots =
+                                    vec![record.snapshot(CaptureSnapshotMode::MetadataOnly)];
+                                let page = match_capture_page(
+                                    &snapshots,
+                                    &CompiledCaptureQuery::compile(query)?,
+                                    cursor,
+                                    limit.unwrap_or(20),
+                                    &cancelled,
+                                )?;
+                                Ok(ControlResult::SearchCaptures {
+                                    instance,
+                                    captures: page.captures,
+                                    next_cursor: page.next_cursor,
+                                })
+                            }
+                            ControlOperation::SetRecordingEnabled { enabled } => {
+                                Ok(ControlResult::SetRecordingEnabled {
+                                    instance,
+                                    previous: !enabled,
+                                    current: enabled,
+                                })
+                            }
+                            other => Err(ControlError::invalid_argument(format!(
+                                "unexpected capture probe operation: {other:?}"
+                            ))),
+                        }
+                    })
+                }
+            }
+
+            fn arguments(value: Value) -> Map<String, Value> {
+                value.as_object().expect("tool argument object").clone()
+            }
+
+            fn tool_json(result: &rmcp::model::CallToolResult) -> Value {
+                result
+                    .structured_content
+                    .clone()
+                    .expect("structured tool result")
+            }
+
+            #[tokio::test]
+            async fn child_transport_enforces_selection_and_never_cross_routes_capture_rows() {
+                let first = descriptor(19801, RUN_A);
+                let second = descriptor(19802, RUN_B);
+                let registry = FakeRegistry::new(vec![first.clone(), second.clone()]);
+                let broker = Broker::with_dependencies(
+                    PathBuf::from("/test/.wirelens/run/instances"),
+                    registry,
+                    Arc::new(CaptureProbe),
+                );
+                let (client_transport, server_transport) = duplex(64 * 1024);
+                let server = tokio::spawn(async move {
+                    let service = broker.serve(server_transport).await.expect("serve broker");
+                    service.waiting().await.expect("broker shutdown");
+                });
+                let client = ClientInfo::new(
+                    ClientCapabilities::default(),
+                    Implementation::new("capture-routing-test", "1.0"),
+                )
+                .with_protocol_version(ProtocolVersion::LATEST)
+                .serve(client_transport)
+                .await
+                .expect("initialize client");
+
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("search_captures")
+                            .with_arguments(arguments(json!({"query": {}}))),
+                    )
+                    .await
+                    .expect_err("multiple instances require a selector");
+
+                for (descriptor, expected_sequence) in [(first, 11), (second, 22)] {
+                    let search = client
+                        .call_tool(
+                            CallToolRequestParams::new("search_captures").with_arguments(
+                                arguments(json!({
+                                    "instance": {
+                                        "proxy_endpoint": descriptor.proxy_endpoint(),
+                                        "run_id": descriptor.run_id()
+                                    },
+                                    "query": CaptureQuery::default(),
+                                    "limit": 10
+                                })),
+                            ),
+                        )
+                        .await
+                        .expect("selected search");
+                    let value = tool_json(&search);
+                    assert_eq!(
+                        value["instance"]["proxy_endpoint"],
+                        descriptor.proxy_endpoint().to_string()
+                    );
+                    assert_eq!(value["instance"]["run_id"], descriptor.run_id().to_string());
+                    assert_eq!(
+                        value["captures"][0]["capture_sequence"],
+                        expected_sequence
+                    );
+                }
+
+                let mutation = client
+                    .call_tool(
+                        CallToolRequestParams::new("set_recording_enabled").with_arguments(
+                            arguments(json!({
+                                "instance": {
+                                    "proxy_endpoint": "127.0.0.1:19801",
+                                    "run_id": RUN_A
+                                },
+                                "enabled": true
+                            })),
+                        ),
+                    )
+                    .await
+                    .expect("selected mutation");
+                assert_eq!(
+                    tool_json(&mutation),
+                    json!({
+                        "instance": {
+                            "proxy_endpoint": "127.0.0.1:19801",
+                            "run_id": RUN_A
+                        },
+                        "previous": false,
+                        "current": true
+                    })
+                );
+
+                client.cancel().await.expect("close client");
+                server.await.expect("server task");
+            }
+        }
+    }
+
 }

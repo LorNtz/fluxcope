@@ -1,3 +1,5 @@
+pub(crate) mod capture_query;
+
 use crate::{
     control_rpc::protocol::InstanceScope,
     settings::{ConfigMode, PersistenceMode},

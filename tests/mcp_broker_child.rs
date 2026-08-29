@@ -36,7 +36,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_only_stateless_tools() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -70,11 +70,18 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_only_stateless_tools(
             .iter()
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>(),
-        vec!["get_broker_status", "get_status", "list_instances"]
+        vec![
+            "get_broker_status",
+            "get_status",
+            "list_instances",
+            "search_captures",
+            "set_recording_enabled",
+        ]
     );
     for tool in &tools {
         let annotations = tool.annotations.as_ref().expect("tool annotations");
-        assert_eq!(annotations.read_only_hint, Some(true));
+        let expected_read_only = tool.name != "set_recording_enabled";
+        assert_eq!(annotations.read_only_hint, Some(expected_read_only));
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
@@ -89,6 +96,21 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_only_stateless_tools(
         .find(|tool| tool.name == "get_status")
         .expect("get_status schema");
     assert!(get_status.input_schema["properties"]["instance"].is_object());
+    let set_recording = tools
+        .iter()
+        .find(|tool| tool.name == "set_recording_enabled")
+        .expect("set_recording_enabled schema");
+    assert!(set_recording.input_schema["properties"]["instance"].is_object());
+    assert!(set_recording.input_schema["properties"]["enabled"].is_object());
+    let search = tools
+        .iter()
+        .find(|tool| tool.name == "search_captures")
+        .expect("search_captures schema");
+    assert!(search.input_schema["properties"]["instance"].is_object());
+    assert!(search.input_schema["properties"]["query"].is_object());
+    assert!(search.input_schema["properties"]["cursor"].is_object());
+    assert!(search.input_schema["properties"]["limit"].is_object());
+    assert!(tools.iter().all(|tool| tool.name != "get_capture"));
     for name in ["get_broker_status", "list_instances"] {
         let tool = tools
             .iter()

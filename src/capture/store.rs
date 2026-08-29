@@ -388,6 +388,45 @@ mod tests {
         assert_eq!(clearing.kind, CaptureChangeKind::Clear);
     }
 
+    #[test]
+    fn cursor_lookup_returns_newest_capture_at_or_before_the_requested_sequence() {
+        let mut store = CaptureStore::new(CaptureRetentionPolicy::default());
+        for sequence in [2, 5, 9, 14] {
+            store.insert(capture(sequence, "cursor"));
+        }
+
+        let cases = [
+            (0, None),
+            (2, Some(2)),
+            (4, Some(2)),
+            (9, Some(9)),
+            (13, Some(9)),
+            (u64::MAX, Some(14)),
+        ];
+        for (cursor, expected) in cases {
+            assert_eq!(
+                store
+                    .next_at_or_before(CaptureSequence::new(cursor))
+                    .map(|capture| capture.sequence().value()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_lookup_returns_the_stored_arc_without_cloning_a_store_snapshot() {
+        let mut store = CaptureStore::new(CaptureRetentionPolicy::default());
+        let expected = capture(10_000, "bounded-last");
+        store.insert(capture(1, "bounded-first"));
+        store.insert(Arc::clone(&expected));
+
+        let actual = store
+            .next_at_or_before(CaptureSequence::new(20_000))
+            .expect("newest capture");
+
+        assert!(Arc::ptr_eq(&actual, &expected));
+    }
+
     async fn admit(
         publisher: &CapturePublisher,
         rx: &mut mpsc::Receiver<Arc<CaptureRecord>>,

@@ -645,6 +645,9 @@ impl Drop for RunningPrivateControl {
 }
 
 #[cfg(test)]
+mod task8_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{RuntimeControlHandler, RuntimeGateway};
     use crate::{
