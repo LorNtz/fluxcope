@@ -8,7 +8,10 @@ use super::{
     },
 };
 use crate::{
-    control_rpc::protocol::{ControlError, InstanceScope},
+    control_rpc::{
+        client::connect_failure,
+        protocol::{ControlError, InstanceScope},
+    },
     instance::InstanceIdentity,
     instance_registry::{InstanceDescriptor, RegistryPublisher, RegistryScanner},
     settings::{AppSettings, SettingsSession},
@@ -40,6 +43,13 @@ impl StubProbe {
     fn unavailable() -> Self {
         Self {
             result: Err(ControlError::instance_unavailable("stale private service")),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn stale_connect() -> Self {
+        Self {
+            result: Err(connect_failure(io::Error::from(io::ErrorKind::NotFound))),
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -212,14 +222,13 @@ fn enabled_control_bind_failure_is_a_fatal_startup_error_without_publication() {
         .expect_err("same run socket bind must fail");
 
     assert!(matches!(error, PrivateControlStartupError::ControlBind(_)));
-    let instances = home.path().join("run/instances");
-    assert!(
-        !instances.exists()
-            || std::fs::read_dir(instances)
-                .expect("instances directory")
-                .next()
-                .is_none()
-    );
+    let report = RegistryScanner::new(home.path())
+        .expect("scanner")
+        .scan_all()
+        .expect("scan registry");
+    assert!(report.candidates.is_empty());
+    assert!(report.rejected.is_empty());
+    assert_eq!(report.omitted, 0);
 }
 
 #[tokio::test]
@@ -349,7 +358,7 @@ async fn unavailable_private_probe_replaces_only_the_exact_stale_descriptor() {
     let mut running = prepared
         .start(handler, CancellationToken::new())
         .expect("start replacement control");
-    let probe = StubProbe::unavailable();
+    let probe = StubProbe::stale_connect();
 
     running
         .publish_after_probe(
@@ -372,6 +381,49 @@ async fn unavailable_private_probe_replaces_only_the_exact_stale_descriptor() {
         .shutdown(Duration::from_secs(1))
         .await
         .expect("graceful shutdown");
+}
+
+#[tokio::test]
+async fn generic_unavailable_probe_never_prunes_the_existing_descriptor() {
+    let home = TempDir::new().expect("temporary Wirelens home");
+    let endpoint = "127.0.0.1:19033";
+    let existing_identity = identity(endpoint);
+    let existing_run_id = existing_identity.run_id().clone();
+    let mut existing = RegistryPublisher::prepare(home.path(), existing_identity, &settings())
+        .expect("existing publisher");
+    existing.publish().expect("existing descriptor");
+    let replacement_identity = identity(endpoint);
+    let (handler, _control_rx) = runtime_handler();
+    let prepared =
+        PrivateControlStartup::prepare(true, home.path(), replacement_identity, &settings())
+            .expect("prepare replacement")
+            .expect("enabled control");
+    let mut running = prepared
+        .start(handler, CancellationToken::new())
+        .expect("start replacement control");
+    let probe = StubProbe::unavailable();
+
+    let error = running
+        .publish_after_probe(
+            &probe,
+            Instant::now() + Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("generic unavailable cannot authorize replacement");
+
+    assert!(matches!(error, PrivateControlStartupError::Probe(_)));
+    assert_eq!(probe.calls(), 1);
+    let report = RegistryScanner::new(home.path())
+        .expect("scanner")
+        .read_endpoint(endpoint.parse().expect("endpoint"))
+        .expect("read existing descriptor");
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), &existing_run_id);
+    running
+        .rollback(Duration::from_secs(1))
+        .await
+        .expect("rollback unpublished replacement");
 }
 
 #[tokio::test]

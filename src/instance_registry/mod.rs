@@ -26,6 +26,7 @@ const DESCRIPTOR_SCHEMA_VERSION: u16 = 1;
 const DESCRIPTOR_RPC_VERSION: u16 = 1;
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const MAX_SCAN_FILES: usize = 256;
+const MAX_RECONCILE_DIRECTORY_ENTRIES: usize = MAX_SCAN_FILES + 2;
 const SOCKET_HASH_HEX_BYTES: usize = 24;
 const REGISTRY_INDEX_VERSION: u16 = 1;
 const REGISTRY_INDEX_FILENAME: &str = ".registry-index.json";
@@ -285,6 +286,7 @@ where
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    let parent = File::open(instances_root)?;
     let result = (|| {
         let mut temporary = OpenOptions::new()
             .write(true)
@@ -297,7 +299,7 @@ where
         temporary.sync_all()?;
         fs::rename(&temporary_path, &index_path)?;
         observer();
-        File::open(instances_root)?.sync_all()
+        parent.sync_all()
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
@@ -313,6 +315,64 @@ fn ensure_registry_index(instances_root: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+fn reconcile_registry_index<O>(
+    run_root: &Path,
+    instances_root: &Path,
+    mut observer: O,
+) -> io::Result<()>
+where
+    O: FnMut(),
+{
+    let mut relevant = Vec::with_capacity(MAX_SCAN_FILES + 1);
+    let mut visited = 0usize;
+    for entry in fs::read_dir(instances_root)? {
+        observer();
+        visited = visited.saturating_add(1);
+        if visited > MAX_RECONCILE_DIRECTORY_ENTRIES {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "registry reconciliation directory entry bound exceeded",
+            ));
+        }
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_descriptor_name(&name) {
+            continue;
+        }
+        relevant.push(name);
+        if relevant.len() > MAX_SCAN_FILES {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "registry reconciliation exceeds 256 descriptor entries",
+            ));
+        }
+    }
+    relevant.sort_unstable();
+    let scanner = RegistryScanner::new_from_run_root(run_root)?;
+    let mut index = read_registry_index(instances_root)?;
+    if index.descriptors.len() > MAX_SCAN_FILES {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "instance registry descriptor capacity of 256 reached",
+        ));
+    }
+    let mut changed = false;
+    for name in relevant {
+        if index.descriptors.binary_search(&name).is_ok() {
+            continue;
+        }
+        if scanner.read_descriptor(&instances_root.join(&name)).is_ok() {
+            index.descriptors.push(name);
+            index.descriptors.sort_unstable();
+            changed = true;
+        }
+    }
+    if changed {
+        write_registry_index(instances_root, &mut index, || {})?;
+    }
+    Ok(())
 }
 
 pub(crate) struct RegistryPublisher {
@@ -633,6 +693,13 @@ pub(crate) struct RegistryScanner {
 
 impl RegistryScanner {
     pub(crate) fn initialize(wirelens_home: &Path) -> io::Result<Self> {
+        Self::initialize_internal(wirelens_home, || {})
+    }
+
+    fn initialize_internal<O>(wirelens_home: &Path, observer: O) -> io::Result<Self>
+    where
+        O: FnMut(),
+    {
         ensure_owner_only_directory(wirelens_home)?;
         let run_root = wirelens_home.join("run");
         let instances_root = run_root.join("instances");
@@ -640,7 +707,19 @@ impl RegistryScanner {
         ensure_owner_only_directory(&instances_root)?;
         let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
         ensure_registry_index(&instances_root)?;
+        reconcile_registry_index(&run_root, &instances_root, observer)?;
         Self::new_from_run_root(&run_root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_with_reconciliation_observer<O>(
+        wirelens_home: &Path,
+        observer: O,
+    ) -> io::Result<Self>
+    where
+        O: FnMut(),
+    {
+        Self::initialize_internal(wirelens_home, observer)
     }
 
     pub(crate) fn new(wirelens_home: &Path) -> io::Result<Self> {
@@ -692,15 +771,16 @@ impl RegistryScanner {
     }
 
     pub(crate) fn read_endpoint(&self, endpoint: SocketAddr) -> io::Result<RegistryScan> {
-        let name = descriptor_name(endpoint);
-        let index = read_registry_index(&self.instances_root)?;
+        let path = self.instances_root.join(descriptor_name(endpoint));
         let mut scan = RegistryScan {
             candidates: Vec::new(),
             rejected: Vec::new(),
             omitted: 0,
         };
-        if index.descriptors.binary_search(&name).is_ok() {
-            self.inspect(&self.instances_root.join(name), &mut scan);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => self.inspect(&path, &mut scan),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         Ok(scan)
     }

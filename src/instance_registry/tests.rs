@@ -2,7 +2,7 @@
 
 use super::{
     InstanceDescriptor, RegistryMutationLock, RegistryPublisher, RegistryScan, RegistryScanner,
-    validate_descriptor_metadata,
+    read_registry_index, validate_descriptor_metadata, write_registry_index,
 };
 use crate::{
     instance::InstanceIdentity,
@@ -44,6 +44,25 @@ impl RegistryFixture {
 
     fn instances_dir(&self) -> PathBuf {
         self.run_dir().join("instances")
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.instances_dir().join(".registry-index.json")
+    }
+
+    fn replace_index(&self, descriptors: &[String]) {
+        let mut index = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.index_path())
+            .expect("registry index");
+        serde_json::to_writer(
+            &mut index,
+            &serde_json::json!({"version": 1, "descriptors": descriptors}),
+        )
+        .expect("write registry index");
+        index.flush().expect("flush registry index");
+        index.sync_all().expect("sync registry index");
     }
 
     fn prepare(&self, endpoint: &str) -> RegistryPublisher {
@@ -724,4 +743,106 @@ fn stale_cleanup_deduplicates_a_batch_and_syncs_the_registry_once() {
     assert_eq!(removed, 3);
     assert_eq!(durable_syncs, 1);
     assert!(fixture.scan().candidates.is_empty());
+}
+
+#[test]
+fn initialize_migrates_a_valid_legacy_descriptor_into_the_index() {
+    let fixture = RegistryFixture::new();
+    let published = fixture.publish("127.0.0.1:20400");
+    fs::remove_file(fixture.index_path()).expect("remove post-index registry metadata");
+
+    let scanner = RegistryScanner::initialize(fixture.home()).expect("migrate legacy registry");
+    let report = scanner.scan_all().expect("scan migrated registry");
+
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), published.identity().run_id());
+}
+
+#[test]
+fn exact_endpoint_read_recovers_a_valid_crash_orphan_missing_from_the_index() {
+    let fixture = RegistryFixture::new();
+    let published = fixture.publish("127.0.0.1:20401");
+    fixture.replace_index(&[]);
+
+    let report = fixture
+        .scanner()
+        .read_endpoint(published.identity().proxy_endpoint())
+        .expect("read deterministic crash orphan");
+
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].run_id(), published.identity().run_id());
+}
+
+#[test]
+fn reconciliation_rejects_more_than_256_relevant_entries_deterministically() {
+    let fixture = RegistryFixture::new();
+    let prepared = fixture.prepare("127.0.0.1:20402");
+    let mut created = 0usize;
+    for index in 0..=257_u16 {
+        let path = fixture.instances_dir().join(format!("{index:064x}.json"));
+        if path == prepared.descriptor_path() {
+            continue;
+        }
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .expect("legacy descriptor-shaped entry");
+        created += 1;
+        if created == 257 {
+            break;
+        }
+    }
+    assert_eq!(created, 257);
+
+    for _ in 0..2 {
+        let error = RegistryScanner::initialize(fixture.home())
+            .err()
+            .expect("over-cap reconciliation must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            error.to_string(),
+            "registry reconciliation exceeds 256 descriptor entries"
+        );
+    }
+}
+
+#[test]
+fn reconciliation_stops_before_unrelated_directory_junk_can_be_unbounded() {
+    let fixture = RegistryFixture::new();
+    let _prepared = fixture.prepare("127.0.0.1:20403");
+    for index in 0..300_u16 {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(fixture.instances_dir().join(format!("junk-{index:04}")))
+            .expect("unrelated registry junk");
+    }
+    let mut inspected = 0usize;
+    let error =
+        RegistryScanner::initialize_with_reconciliation_observer(fixture.home(), || inspected += 1)
+            .err()
+            .expect("bounded reconciliation rejects an overfull directory");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    assert!(inspected <= 259);
+}
+
+#[test]
+fn index_rewrite_syncs_the_parent_handle_opened_before_the_atomic_rename() {
+    let fixture = RegistryFixture::new();
+    let _prepared = fixture.prepare("127.0.0.1:20404");
+    let instances = fixture.instances_dir();
+    let moved = fixture.run_dir().join("instances-moved");
+    let mut index = read_registry_index(&instances).expect("registry index");
+
+    write_registry_index(&instances, &mut index, || {
+        fs::rename(&instances, &moved).expect("move registry directory after index rename");
+    })
+    .expect("sync already-open parent directory handle");
+
+    assert!(moved.join(".registry-index.json").exists());
+    fs::rename(&moved, &instances).expect("restore registry directory");
 }

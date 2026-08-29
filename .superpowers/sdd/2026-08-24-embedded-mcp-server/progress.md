@@ -1,0 +1,13 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-24-embedded-mcp-server.md
+Task 1: fix round 1/5 (1 addressed, 0 open — unrelated Cargo.lock upgrades removed; commits 1d076e3..6b03805)
+Task 1: complete (commits ffdc861..6b03805, review clean)
+Task 2: fix round 1/5 (4 addressed, 0 open — symlink, umask, subprocess lease, runtime matrix; commits e9523f7..182f625)
+Task 2: complete (commits 6b03805..182f625, review clean)
+Task 3: fix round 1/5 (5 addressed, 0 open — registry lock/bounds/home/no-overwrite/listener lease; commits 9f158bf..c0888e0)
+Task 3: complete (commits 182f625..c0888e0, review clean)
+Task 4: fix round 1/5 (3 addressed, 0 open — blocking typed parse, bounded response deadline/EOF, geometric writer growth; commits ea8d2b7..34ff16b)
+Task 4: complete (commits c0888e0..34ff16b, review clean)
+Task 5: fix round 1/5 (4 addressed, 0 open — cancellation-safe stale handling, Unix gates, single-await task ownership, startup supervision; commits 0b3d233..919270b)
+Task 5: complete (commits 34ff16b..919270b, review clean)
+Task 6: fix round 1/5 (all lifecycle/bounded-work review findings addressed — typed stale cleanup, bounded registry index/reconciliation, fair probe waves, cancellation-safe batched cleanup; commits a95e7f4..1f68ad0)
+Task 6: complete (commits 919270b..1f68ad0, review clean)

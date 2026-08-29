@@ -532,7 +532,7 @@ impl RunningPrivateControl {
                         proposed: proposed_run,
                     });
                 }
-                Err(error) if error.code == ControlErrorCode::InstanceUnavailable => {
+                Err(error) if error.is_definitive_stale_connect() => {
                     self.ensure_running().await?;
                     if cancelled.is_cancelled() {
                         return Err(cancelled_publication_error());
