@@ -351,13 +351,15 @@ impl RegistryPublisher {
         result
     }
 
-    fn remove_stale_for_replacement_internal<F>(
+    fn remove_stale_for_replacement_internal<O, G>(
         &mut self,
         expected: &InstanceDescriptor,
-        observer: F,
+        observer: O,
+        guard: G,
     ) -> io::Result<bool>
     where
-        F: FnOnce(),
+        O: FnOnce(),
+        G: FnOnce() -> bool,
     {
         if expected.proxy_endpoint != self.identity.proxy_endpoint() {
             return Ok(false);
@@ -373,6 +375,9 @@ impl RegistryPublisher {
             || current.run_id != expected.run_id
             || current.socket_path != expected.socket_path
         {
+            return Ok(false);
+        }
+        if !guard() {
             return Ok(false);
         }
         fs::remove_file(&self.descriptor_path)?;
@@ -391,7 +396,18 @@ impl RegistryPublisher {
         &mut self,
         expected: &InstanceDescriptor,
     ) -> io::Result<bool> {
-        self.remove_stale_for_replacement_internal(expected, || {})
+        self.remove_stale_for_replacement_internal(expected, || {}, || true)
+    }
+
+    pub(crate) fn remove_stale_for_replacement_if<G>(
+        &mut self,
+        expected: &InstanceDescriptor,
+        guard: G,
+    ) -> io::Result<bool>
+    where
+        G: FnOnce() -> bool,
+    {
+        self.remove_stale_for_replacement_internal(expected, || {}, guard)
     }
 
     #[cfg(test)]
@@ -403,7 +419,7 @@ impl RegistryPublisher {
     where
         F: FnOnce(),
     {
-        self.remove_stale_for_replacement_internal(expected, observer)
+        self.remove_stale_for_replacement_internal(expected, observer, || true)
     }
 
     fn cleanup_internal<F>(&mut self, observer: F) -> io::Result<()>

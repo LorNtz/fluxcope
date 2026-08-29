@@ -268,10 +268,30 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     };
 
     #[cfg(unix)]
+    if let Some(running) = running_control.as_mut() {
+        if let Err(error) = running.ensure_running().await {
+            shutdown.cancel();
+            services.shutdown(policy.render.shutdown_grace).await;
+            if let Some(running) = running_control.take() {
+                let _ = running.rollback(policy.render.shutdown_grace).await;
+            }
+            return Err(anyhow::Error::new(error));
+        }
+    }
+
+    #[cfg(unix)]
     let control_publisher = if let Some(running) = running_control.take() {
-        let (publisher, task) = running.into_supervised_parts();
-        services.track_result(ServiceKind::ControlRpc, task);
-        Some(publisher)
+        match running.into_supervised_parts() {
+            Ok((publisher, task)) => {
+                services.track_result(ServiceKind::ControlRpc, task);
+                Some(publisher)
+            }
+            Err(error) => {
+                shutdown.cancel();
+                services.shutdown(policy.render.shutdown_grace).await;
+                return Err(anyhow::Error::new(error));
+            }
+        }
     } else {
         None
     };

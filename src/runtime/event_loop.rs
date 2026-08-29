@@ -771,6 +771,7 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_describe_returns_authoritative_identity_and_live_owned_state() {
         use crate::{
@@ -803,6 +804,7 @@ mod tests {
         assert_eq!(snapshot.settings_revision, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unsupported_runtime_operation_is_invalid_argument() {
         use crate::{
@@ -829,6 +831,7 @@ mod tests {
         assert!(!error.retryable);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_channel_describe_is_processed_without_marking_the_frame_dirty() {
         use crate::{
@@ -866,6 +869,7 @@ mod tests {
         assert_eq!(reply.instance().instance.run_id, expected_run_id);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_shutdown_closes_command_ingress_before_service_cleanup() {
         use crate::{

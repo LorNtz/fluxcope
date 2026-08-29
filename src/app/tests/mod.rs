@@ -165,6 +165,7 @@ fn app_with_proxy_presets(active: &str) -> App {
 
 mod body_display;
 mod body_viewer;
+#[cfg(unix)]
 mod control;
 mod focus_input;
 mod request_search;

@@ -404,14 +404,32 @@ impl fmt::Debug for RunningPrivateControl {
     }
 }
 
+fn control_service_completion_error(
+    phase: &str,
+    completion: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> PrivateControlStartupError {
+    let message = match completion {
+        Ok(Ok(())) => format!("private control service exited {phase}"),
+        Ok(Err(error)) => format!("private control service failed {phase}: {error:#}"),
+        Err(error) => format!("private control service task failed {phase}: {error}"),
+    };
+    PrivateControlStartupError::ServiceStart(io::Error::other(message))
+}
+
+fn cancelled_publication_error() -> PrivateControlStartupError {
+    PrivateControlStartupError::Probe(ControlError::instance_unavailable(
+        "descriptor publication was cancelled",
+    ))
+}
+
 impl RunningPrivateControl {
     pub(super) async fn wait_until_ready(
         &mut self,
     ) -> std::result::Result<(), PrivateControlStartupError> {
         let Some(mut ready) = self.ready.take() else {
-            return Ok(());
+            return self.ensure_running().await;
         };
-        let task = self.task.as_mut().ok_or_else(|| {
+        let mut task = self.task.take().ok_or_else(|| {
             PrivateControlStartupError::ServiceStart(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "private control service task is unavailable",
@@ -419,21 +437,41 @@ impl RunningPrivateControl {
         })?;
         tokio::select! {
             biased;
-            completion = task => {
-                let message = match completion {
-                    Ok(Ok(())) => "private control service exited before readiness".to_owned(),
-                    Ok(Err(error)) => format!("private control service failed before readiness: {error:#}"),
-                    Err(error) => format!("private control service task failed before readiness: {error}"),
-                };
-                Err(PrivateControlStartupError::ServiceStart(io::Error::other(message)))
+            completion = &mut task => {
+                Err(control_service_completion_error("before readiness", completion))
             },
-            result = &mut ready => result.map_err(|_| {
-                PrivateControlStartupError::ServiceStart(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "private control service exited before readiness",
-                ))
-            }),
+            result = &mut ready => {
+                self.task = Some(task);
+                result.map_err(|_| {
+                    PrivateControlStartupError::ServiceStart(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "private control service exited before readiness",
+                    ))
+                })
+            },
         }
+    }
+
+    pub(super) async fn ensure_running(
+        &mut self,
+    ) -> std::result::Result<(), PrivateControlStartupError> {
+        let Some(task) = self.task.as_ref() else {
+            return Err(PrivateControlStartupError::ServiceStart(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "private control service task is unavailable",
+            )));
+        };
+        if !task.is_finished() {
+            return Ok(());
+        }
+        let task = self
+            .task
+            .take()
+            .expect("finished private control task was just observed");
+        Err(control_service_completion_error(
+            "before supervision handoff",
+            task.await,
+        ))
     }
 
     pub(super) async fn publish_after_probe<P>(
@@ -446,62 +484,135 @@ impl RunningPrivateControl {
         P: ExistingDescriptorProbe,
     {
         self.wait_until_ready().await?;
+        self.ensure_running().await?;
         if cancelled.is_cancelled() {
-            return Err(PrivateControlStartupError::Probe(
-                ControlError::instance_unavailable("descriptor publication was cancelled"),
-            ));
+            return Err(cancelled_publication_error());
         }
-        let publisher = self.publisher.as_mut().ok_or_else(|| {
-            PrivateControlStartupError::Publication(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "private control publisher is unavailable",
-            ))
-        })?;
-        let report = RegistryScanner::new(publisher.wirelens_home())
-            .and_then(|scanner| scanner.read_endpoint(publisher.identity().proxy_endpoint()))
+        let (wirelens_home, endpoint, proposed_run) = {
+            let publisher = self.publisher.as_ref().ok_or_else(|| {
+                PrivateControlStartupError::Publication(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "private control publisher is unavailable",
+                ))
+            })?;
+            (
+                publisher.wirelens_home().to_path_buf(),
+                publisher.identity().proxy_endpoint(),
+                publisher.identity().run_id().clone(),
+            )
+        };
+        let report = RegistryScanner::new(&wirelens_home)
+            .and_then(|scanner| scanner.read_endpoint(endpoint))
             .map_err(PrivateControlStartupError::Publication)?;
         if let Some(existing) = report.candidates.first() {
-            match probe.probe(existing, deadline, cancelled).await {
+            let mut task = self.task.take().ok_or_else(|| {
+                PrivateControlStartupError::ServiceStart(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "private control service task is unavailable",
+                ))
+            })?;
+            let probe_call = probe.probe(existing, deadline, cancelled.clone());
+            tokio::pin!(probe_call);
+            let probe_result = tokio::select! {
+                biased;
+                completion = &mut task => {
+                    return Err(control_service_completion_error(
+                        "during descriptor probe",
+                        completion,
+                    ));
+                },
+                result = &mut probe_call => result,
+            };
+            self.task = Some(task);
+            self.ensure_running().await?;
+            if cancelled.is_cancelled() {
+                return Err(cancelled_publication_error());
+            }
+            match probe_result {
                 Ok(scope) => {
                     return Err(PrivateControlStartupError::LiveEndpointConflict {
                         existing: scope.run_id,
-                        proposed: publisher.identity().run_id().clone(),
+                        proposed: proposed_run,
                     });
                 }
                 Err(error) if error.code == ControlErrorCode::InstanceUnavailable => {
-                    let removed = publisher
-                        .remove_stale_for_replacement(existing)
+                    self.ensure_running().await?;
+                    if cancelled.is_cancelled() {
+                        return Err(cancelled_publication_error());
+                    }
+                    let removed = self
+                        .publisher
+                        .as_mut()
+                        .ok_or_else(|| {
+                            PrivateControlStartupError::Publication(io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                "private control publisher is unavailable",
+                            ))
+                        })?
+                        .remove_stale_for_replacement_if(existing, || !cancelled.is_cancelled())
                         .map_err(PrivateControlStartupError::Publication)?;
+                    if cancelled.is_cancelled() {
+                        return Err(cancelled_publication_error());
+                    }
                     if !removed {
                         return Err(PrivateControlStartupError::Publication(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             "endpoint descriptor changed after its private probe",
                         )));
                     }
+                    self.ensure_running().await?;
                 }
                 Err(error) if error.code == ControlErrorCode::InstanceGenerationConflict => {
                     return Err(PrivateControlStartupError::LiveEndpointConflict {
                         existing: existing.run_id().clone(),
-                        proposed: publisher.identity().run_id().clone(),
+                        proposed: proposed_run,
                     });
                 }
                 Err(error) => return Err(PrivateControlStartupError::Probe(error)),
             }
         }
-        publisher
+        self.ensure_running().await?;
+        if cancelled.is_cancelled() {
+            return Err(cancelled_publication_error());
+        }
+        self.publisher
+            .as_mut()
+            .ok_or_else(|| {
+                PrivateControlStartupError::Publication(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "private control publisher is unavailable",
+                ))
+            })?
             .publish()
-            .map_err(PrivateControlStartupError::Publication)
+            .map_err(PrivateControlStartupError::Publication)?;
+        tokio::task::yield_now().await;
+        self.ensure_running().await
     }
 
-    pub(super) fn into_supervised_parts(mut self) -> (RegistryPublisher, JoinHandle<Result<()>>) {
-        (
+    pub(super) fn into_supervised_parts(
+        mut self,
+    ) -> std::result::Result<(RegistryPublisher, JoinHandle<Result<()>>), PrivateControlStartupError>
+    {
+        let task = self.task.as_ref().ok_or_else(|| {
+            PrivateControlStartupError::ServiceStart(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "private control service task is unavailable",
+            ))
+        })?;
+        if task.is_finished() {
+            return Err(PrivateControlStartupError::ServiceStart(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "private control service exited before supervision handoff",
+            )));
+        }
+        Ok((
             self.publisher
                 .take()
                 .expect("running private control always owns its publisher"),
             self.task
                 .take()
                 .expect("running private control always owns its task"),
-        )
+        ))
     }
 
     pub(super) async fn shutdown(

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::{captured, captured_with_sequence, ui_settings};
 use crate::{app::App, recording::RecordingState};
 
