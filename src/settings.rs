@@ -359,6 +359,7 @@ impl SettingsSession {
                 let path = default_config_path()?;
                 let lease = DefaultConfigLease::acquire(&default_config_lock_path()?)
                     .context("failed to acquire default configuration ownership")?;
+                reject_default_config_symlink(&path)?;
                 let mut manager = SettingsManager::load_from_path(&path)
                     .context("failed to load default configuration")?;
                 let source_path = fs::canonicalize(&path)
@@ -597,6 +598,18 @@ fn default_config_path() -> io::Result<PathBuf> {
 }
 fn default_config_lock_path() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".wirelens/run/default-config.lock"))
+}
+
+fn reject_default_config_symlink(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "default configuration path must not be a symlink",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn expand_home_path(path: &str) -> io::Result<PathBuf> {

@@ -45,17 +45,20 @@ use services::{ServiceKind, ServiceSupervisor};
 fn proxy_bind_addr(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
 }
+fn resolve_proxy_bind_addr(selection: &ConfigSelection, settings: &AppSettings) -> SocketAddr {
+    match selection {
+        ConfigSelection::Temporary { host, port } => SocketAddr::new(*host, *port),
+        ConfigSelection::DefaultOwned | ConfigSelection::ReadOnlyFile(_) => {
+            proxy_bind_addr(settings.server.port)
+        }
+    }
+}
 
 pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let mut settings =
         SettingsSession::load(&startup.config).context("failed to load Fluxcope settings")?;
     let settings_snapshot = settings.snapshot();
-    let proxy_addr = match &startup.config {
-        ConfigSelection::Temporary { host, port } => SocketAddr::new(*host, *port),
-        ConfigSelection::DefaultOwned | ConfigSelection::ReadOnlyFile(_) => {
-            proxy_bind_addr(settings_snapshot.server.port)
-        }
-    };
+    let proxy_addr = resolve_proxy_bind_addr(&startup.config, &settings_snapshot);
     let mcp_enabled = effective_mcp_enabled(startup.mcp, &settings_snapshot);
     let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
@@ -384,6 +387,58 @@ mod tests {
             SocketAddr::from(([0, 0, 0, 0], 8989)),
             proxy_bind_addr(8989)
         );
+    }
+    #[test]
+    fn every_config_selection_resolves_the_expected_proxy_endpoint() {
+        let mut settings = AppSettings::default();
+        settings.server.port = 9345;
+        let cases = [
+            (
+                ConfigSelection::DefaultOwned,
+                SocketAddr::from(([0, 0, 0, 0], 9345)),
+            ),
+            (
+                ConfigSelection::ReadOnlyFile(PathBuf::from("readonly.yml")),
+                SocketAddr::from(([0, 0, 0, 0], 9345)),
+            ),
+            (
+                ConfigSelection::Temporary {
+                    host: IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                    port: 9346,
+                },
+                SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9346)),
+            ),
+        ];
+
+        for (selection, expected) in cases {
+            assert_eq!(
+                resolve_proxy_bind_addr(&selection, &settings),
+                expected,
+                "unexpected endpoint for {selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mcp_override_has_cli_over_settings_precedence() {
+        let cases = [
+            (McpOverride::Inherit, false, false),
+            (McpOverride::Inherit, true, true),
+            (McpOverride::Enabled, false, true),
+            (McpOverride::Enabled, true, true),
+            (McpOverride::Disabled, false, false),
+            (McpOverride::Disabled, true, false),
+        ];
+
+        for (mcp_override, configured, expected) in cases {
+            let mut settings = AppSettings::default();
+            settings.mcp.enable = configured;
+            assert_eq!(
+                effective_mcp_enabled(mcp_override, &settings),
+                expected,
+                "unexpected MCP result for {mcp_override:?} over configured={configured}"
+            );
+        }
     }
 
     #[test]

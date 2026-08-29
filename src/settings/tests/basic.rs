@@ -260,6 +260,48 @@ fn default_owned_session_persists_under_an_isolated_home() -> io::Result<()> {
     assert_eq!(saved.server.port, 9101);
     Ok(())
 }
+#[cfg(unix)]
+#[test]
+fn default_owned_rejects_symlink_config_without_touching_target() -> io::Result<()> {
+    const CHILD_MARKER: &str = "WIRELENS_SYMLINK_SETTINGS_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let error = SettingsSession::load(&ConfigSelection::DefaultOwned)
+            .err()
+            .expect("default-owned symlink configuration must be rejected");
+        assert!(
+            error.to_string().contains("symlink"),
+            "unexpected startup error: {error:#}"
+        );
+        return Ok(());
+    }
+
+    let home = tempfile::tempdir()?;
+    let wirelens_directory = home.path().join(".wirelens");
+    fs::create_dir_all(&wirelens_directory)?;
+    let target = home.path().join("symlink-target.yml");
+    let original = "server:\n  port: 9120\n";
+    fs::write(&target, original)?;
+    let config = wirelens_directory.join("config.yml");
+    std::os::unix::fs::symlink(&target, &config)?;
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "settings::tests::basic::default_owned_rejects_symlink_config_without_touching_target",
+            "--nocapture",
+        ])
+        .env("HOME", home.path())
+        .env(CHILD_MARKER, "1")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "symlink settings child failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::symlink_metadata(&config)?.file_type().is_symlink());
+    assert_eq!(fs::read_to_string(target)?, original);
+    Ok(())
+}
 
 #[cfg(unix)]
 #[test]
