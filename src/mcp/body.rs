@@ -13,7 +13,10 @@ use crate::{
     control::{
         body::{
             BodyContentRequest, BodyPage, BodyRepresentation, DEFAULT_BODY_PAGE_LENGTH,
-            MAX_BODY_PAGE_LENGTH,
+            DEFAULT_BODY_SEARCH_CONTEXT_BYTES, DEFAULT_BODY_SEARCH_LIMIT,
+            ExtractCaptureBodyRequest, ExtractCaptureBodyResult, ExtractSelector,
+            MAX_BODY_PAGE_LENGTH, SearchCaptureBodyRequest, SearchCaptureBodyResult, SelectionPage,
+            SelectionResourceRequest, parse_selection_resource_uri,
         },
         json_walk::{
             FieldMatchMode, FindJsonPointersRequest, FindJsonPointersResult, JsonPointerPattern,
@@ -108,8 +111,118 @@ pub(crate) struct ProbeJsonPointerPatternOutput {
     #[serde(flatten)]
     pub(crate) result: ProbeJsonPointerPatternResult,
 }
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SearchCaptureBodyInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    pub(crate) capture_id: CaptureSequence,
+    pub(crate) capture_revision: u64,
+    #[schemars(with = "String")]
+    pub(crate) side: BodySide,
+    pub(crate) query: String,
+    #[schemars(range(min = 1, max = 50))]
+    pub(crate) limit: Option<usize>,
+    #[schemars(range(min = 0, max = 1024))]
+    pub(crate) context_bytes: Option<usize>,
+}
+
+impl SearchCaptureBodyInput {
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        self.instance.selector()
+    }
+
+    pub(crate) fn operation(
+        &self,
+    ) -> Result<crate::control_rpc::protocol::ControlOperation, ControlError> {
+        let request = SearchCaptureBodyRequest {
+            capture_id: self.capture_id,
+            capture_revision: self.capture_revision,
+            side: self.side,
+            query: self.query.clone(),
+            limit: self.limit.unwrap_or(DEFAULT_BODY_SEARCH_LIMIT),
+            context_bytes: self
+                .context_bytes
+                .unwrap_or(DEFAULT_BODY_SEARCH_CONTEXT_BYTES),
+        };
+        request.validate()?;
+        Ok(crate::control_rpc::protocol::ControlOperation::SearchCaptureBody(Box::new(request)))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtractCaptureBodyInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    pub(crate) capture_id: CaptureSequence,
+    pub(crate) capture_revision: u64,
+    #[schemars(with = "String")]
+    pub(crate) side: BodySide,
+    pub(crate) selector: ExtractSelector,
+}
+
+impl ExtractCaptureBodyInput {
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        self.instance.selector()
+    }
+
+    pub(crate) fn operation(
+        &self,
+    ) -> Result<crate::control_rpc::protocol::ControlOperation, ControlError> {
+        let request = ExtractCaptureBodyRequest {
+            capture_id: self.capture_id,
+            capture_revision: self.capture_revision,
+            side: self.side,
+            selector: self.selector.clone(),
+        };
+        request.validate()?;
+        Ok(crate::control_rpc::protocol::ControlOperation::ExtractCaptureBody(Box::new(request)))
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SearchCaptureBodyOutput {
+    pub(crate) instance: InstanceSelector,
+    #[serde(flatten)]
+    pub(crate) result: SearchCaptureBodyResult,
+}
+
+#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtractCaptureBodyOutput {
+    pub(crate) instance: InstanceSelector,
+    #[serde(flatten)]
+    pub(crate) result: ExtractCaptureBodyResult,
+}
 
 pub(super) const CONTENT_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}";
+pub(super) const JSON_POINTER_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}";
+pub(super) const FORM_FIELD_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SelectionResourceUri(SelectionResourceRequest);
+
+impl SelectionResourceUri {
+    pub(super) fn parse(raw: &str) -> Result<Self, ControlError> {
+        parse_selection_resource_uri(raw).map(Self)
+    }
+
+    pub(super) fn proxy_endpoint(&self) -> SocketAddr {
+        self.0.proxy_endpoint
+    }
+
+    pub(super) fn run_id(&self) -> &RunId {
+        &self.0.run_id
+    }
+
+    pub(super) fn request(&self) -> crate::control::body::SelectionContentRequest {
+        self.0.content_request()
+    }
+
+    pub(super) fn as_request(&self) -> &SelectionResourceRequest {
+        &self.0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BodyResourceUri {
@@ -368,6 +481,42 @@ pub(super) fn body_page_resource_contents(
     Ok(contents.with_meta(MetaObject(metadata)))
 }
 
+pub(super) fn selection_page_resource_contents(
+    requested: &SelectionResourceUri,
+    page: SelectionPage,
+) -> Result<ResourceContents, ControlError> {
+    let next_uri = page.next_uri.clone();
+    let request = requested.as_request();
+    let wirelens = json!({
+        "requested_range": page.requested_range,
+        "actual_range": page.actual_range,
+        "selected_bytes": page.selected_bytes,
+        "next_offset": page.next_offset,
+        "next_uri": next_uri,
+        "proxy_endpoint": request.proxy_endpoint.to_string(),
+        "run_id": request.run_id.to_string(),
+        "capture_id": request.capture_id.value(),
+        "capture_revision": request.capture_revision,
+        "side": request.side,
+        "selector_kind": request.selector.kind(),
+        "stream": page.source.stream,
+        "observed_bytes": page.source.observed_bytes,
+        "retained_bytes": page.source.retained_bytes,
+        "source_truncated": page.source.truncated,
+        "source_truncation_reason": page.source.truncation_reason,
+        "decoded_encoding_chain": page.source.decoded_encoding_chain,
+        "decoded_output_limited": page.source.decoded_output_limited,
+        "media_type": page.media_type.clone(),
+    });
+    let mut metadata = Map::new();
+    metadata.insert("wirelens".to_owned(), wirelens);
+    let text = String::from_utf8(page.content.to_vec())
+        .map_err(|_| ControlError::internal("selected resource page was not valid UTF-8"))?;
+    Ok(ResourceContents::text(text, request.to_uri()?)
+        .with_mime_type(page.media_type)
+        .with_meta(MetaObject(metadata)))
+}
+
 fn side_segment(side: BodySide) -> &'static str {
     match side {
         BodySide::Request => "request",
@@ -409,3 +558,5 @@ fn invalid_uri(message: impl Into<String>) -> ControlError {
 mod task10_tests;
 #[cfg(test)]
 mod task11_tests;
+#[cfg(test)]
+mod task12_tests;

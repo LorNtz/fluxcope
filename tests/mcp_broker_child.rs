@@ -37,7 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task11_contract() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -78,12 +78,14 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task11_contract() -> 
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>(),
         vec![
+            "extract_capture_body",
             "find_json_pointers",
             "get_broker_status",
             "get_capture",
             "get_status",
             "list_instances",
             "probe_json_pointer_pattern",
+            "search_capture_body",
             "search_captures",
             "set_recording_enabled",
             "wait_for_capture",
@@ -195,6 +197,60 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task11_contract() -> 
         &probe_json.input_schema["properties"]["pattern"],
     );
     assert_eq!(pattern["type"], json!("string"));
+    let body_search = tools
+        .iter()
+        .find(|tool| tool.name == "search_capture_body")
+        .expect("search_capture_body schema");
+    let body_extract = tools
+        .iter()
+        .find(|tool| tool.name == "extract_capture_body")
+        .expect("extract_capture_body schema");
+    for tool in [body_search, body_extract] {
+        let required = tool.input_schema["required"]
+            .as_array()
+            .expect("targeted body tool required fields");
+        for field in ["instance", "capture_id", "capture_revision", "side"] {
+            assert!(
+                required.contains(&json!(field)),
+                "{} requires {field}",
+                tool.name
+            );
+        }
+        let instance = resolve_local_schema(
+            tool.input_schema.as_ref(),
+            &tool.input_schema["properties"]["instance"],
+        );
+        let instance_required = instance["required"]
+            .as_array()
+            .expect("targeted body instance required fields");
+        assert!(instance_required.contains(&json!("proxy_endpoint")));
+        assert!(instance_required.contains(&json!("run_id")));
+    }
+    assert!(
+        body_search.input_schema["required"]
+            .as_array()
+            .expect("search required")
+            .contains(&json!("query"))
+    );
+    assert_eq!(
+        body_search.input_schema["properties"]["limit"]["minimum"],
+        json!(1)
+    );
+    assert_eq!(
+        body_search.input_schema["properties"]["limit"]["maximum"],
+        json!(50)
+    );
+    assert_eq!(
+        body_search.input_schema["properties"]["context_bytes"]["maximum"],
+        json!(1024)
+    );
+    assert!(
+        body_extract.input_schema["required"]
+            .as_array()
+            .expect("extract required")
+            .contains(&json!("selector"))
+    );
+
     let wait = tools
         .iter()
         .find(|tool| tool.name == "wait_for_capture")
@@ -286,10 +342,18 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task11_contract() -> 
     assert!(resources.resources.is_empty());
     assert!(resources.next_cursor.is_none());
     let templates = client.list_resource_templates(None).await?;
-    assert_eq!(templates.resource_templates.len(), 1);
+    assert_eq!(templates.resource_templates.len(), 3);
     assert_eq!(
-        templates.resource_templates[0].uri_template,
-        "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}"
+        templates
+            .resource_templates
+            .iter()
+            .map(|template| template.uri_template.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}",
+            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}",
+            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}",
+        ]
     );
     assert!(templates.next_cursor.is_none());
 

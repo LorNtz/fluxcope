@@ -370,13 +370,22 @@ impl WalkPath<'_> {
 pub(crate) trait JsonWalkObserver {
     fn value_start(&mut self, _path: WalkPath<'_>) {}
     fn value_end(&mut self) {}
-    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, encoded_bytes: Option<usize>);
+    fn scalar(
+        &mut self,
+        path: WalkPath<'_>,
+        kind: JsonType,
+        encoded_bytes: Option<usize>,
+        _encoded_token: Option<&[u8]>,
+    );
     fn object_start(&mut self, path: WalkPath<'_>);
     fn object_end(&mut self, path: WalkPath<'_>, child_count: usize);
     fn array_start(&mut self, path: WalkPath<'_>);
     fn array_end(&mut self, path: WalkPath<'_>, length: usize);
     fn object_key(&mut self, _path: WalkPath<'_>, _key: &str) {}
     fn wants_scalar_encoded_bytes(&self) -> bool {
+        false
+    }
+    fn wants_scalar_token(&self) -> bool {
         false
     }
     fn should_descend(&self) -> bool;
@@ -612,12 +621,16 @@ fn scalar_event(
     if frames.last().is_none_or(|frame| frame.descend) {
         let view = walk_path(path, value);
         observer.value_start(view);
-        let encoded_bytes = if observer.wants_scalar_encoded_bytes() {
-            Some(event_end - source_token_start(input, event_call_start, event_end, cancelled)?)
-        } else {
-            None
-        };
-        observer.scalar(view, kind, encoded_bytes);
+        let token_start = (observer.wants_scalar_encoded_bytes() || observer.wants_scalar_token())
+            .then(|| source_token_start(input, event_call_start, event_end, cancelled))
+            .transpose()?;
+        let encoded_bytes = observer
+            .wants_scalar_encoded_bytes()
+            .then(|| event_end - token_start.expect("requested scalar token start"));
+        let encoded_token = observer
+            .wants_scalar_token()
+            .then(|| &input[token_start.expect("requested scalar token start")..event_end]);
+        observer.scalar(view, kind, encoded_bytes, encoded_token);
         observer.value_end();
     }
     path.truncate(value.restore_path_len);
@@ -867,7 +880,13 @@ impl FieldFinder<'_> {
 }
 
 impl JsonWalkObserver for FieldFinder<'_> {
-    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, encoded_bytes: Option<usize>) {
+    fn scalar(
+        &mut self,
+        path: WalkPath<'_>,
+        kind: JsonType,
+        encoded_bytes: Option<usize>,
+        _encoded_token: Option<&[u8]>,
+    ) {
         if self.consume_pending_match() {
             self.record(
                 path,
@@ -1143,7 +1162,13 @@ impl JsonWalkObserver for PatternProbe<'_> {
         self.depth_stack.pop();
     }
 
-    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, _encoded_bytes: Option<usize>) {
+    fn scalar(
+        &mut self,
+        path: WalkPath<'_>,
+        kind: JsonType,
+        _encoded_bytes: Option<usize>,
+        _encoded_token: Option<&[u8]>,
+    ) {
         self.terminal(path, kind);
     }
 
@@ -1380,6 +1405,256 @@ fn enforce_probe_result_size(
         result.truncated = true;
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JsonSelection {
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JsonSelectionMiss {
+    pub(crate) longest_valid_prefix: JsonPointer,
+    pub(crate) next: Vec<JsonNextSegmentHint>,
+    pub(crate) omitted_next: usize,
+}
+
+enum SelectedContainer {
+    Object { first: bool },
+    Array { first: bool },
+}
+
+struct JsonSelector<'a> {
+    target: &'a JsonPointer,
+    output: Vec<u8>,
+    containers: Vec<SelectedContainer>,
+    capturing: bool,
+    selected: bool,
+    error: Option<ControlError>,
+    longest_prefix: JsonPointer,
+    longest_depth: usize,
+    next: Vec<JsonNextSegmentHint>,
+    omitted_next: usize,
+    cancelled: &'a AtomicBool,
+}
+
+impl JsonSelector<'_> {
+    fn append(&mut self, bytes: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        for chunk in bytes.chunks(32 * 1_024) {
+            if self.cancelled.load(Ordering::Relaxed) {
+                self.error = Some(ControlError::cancelled("JSON extraction cancelled"));
+                return;
+            }
+            if self.output.len().saturating_add(chunk.len()) > MAX_JSON_INPUT_BYTES {
+                self.error = Some(ControlError::new(
+                    ControlErrorCode::JsonSizeLimit,
+                    "selected JSON representation exceeds the size limit",
+                    false,
+                    serde_json::json!({"maximum_bytes": MAX_JSON_INPUT_BYTES}),
+                ));
+                return;
+            }
+            self.output.extend_from_slice(chunk);
+        }
+    }
+
+    fn begin_value(&mut self, path: WalkPath<'_>) {
+        if !self.capturing && !self.selected && path.raw == self.target.as_str() {
+            self.capturing = true;
+            self.selected = true;
+            return;
+        }
+        if self.capturing
+            && let Some(SelectedContainer::Array { first }) = self.containers.last_mut()
+        {
+            let separator = if *first { b"" as &[u8] } else { b"," };
+            *first = false;
+            self.append(separator);
+        }
+    }
+
+    fn note_value(&mut self, path: WalkPath<'_>, kind: JsonType) {
+        let target = self.target.as_str();
+        let is_prefix = path.raw.is_empty()
+            || target == path.raw
+            || target
+                .strip_prefix(path.raw)
+                .is_some_and(|suffix| suffix.starts_with('/'));
+        if is_prefix && path.depth >= self.longest_depth {
+            if path.depth > self.longest_depth || self.longest_prefix.as_str() != path.raw {
+                self.longest_prefix = path.into_owned();
+                self.longest_depth = path.depth;
+                self.next.clear();
+                self.omitted_next = 0;
+            }
+            return;
+        }
+        if path.depth != self.longest_depth.saturating_add(1)
+            || parent_pointer(path.raw) != self.longest_prefix.as_str()
+        {
+            return;
+        }
+        let Some(segment) = path.segment else {
+            return;
+        };
+        if self.next.len() >= MAX_JSON_HINTS {
+            self.omitted_next += 1;
+            return;
+        }
+        let segment = decode_segment(segment, false).unwrap_or_else(|_| segment.to_owned());
+        self.next.push(JsonNextSegmentHint {
+            segment,
+            value_type: kind,
+        });
+    }
+
+    fn finish_value(&mut self) {
+        if self.capturing && self.containers.is_empty() {
+            self.capturing = false;
+        }
+    }
+}
+
+impl JsonWalkObserver for JsonSelector<'_> {
+    fn value_start(&mut self, path: WalkPath<'_>) {
+        self.begin_value(path);
+    }
+
+    fn value_end(&mut self) {
+        self.finish_value();
+    }
+
+    fn scalar(
+        &mut self,
+        path: WalkPath<'_>,
+        kind: JsonType,
+        _encoded_bytes: Option<usize>,
+        encoded_token: Option<&[u8]>,
+    ) {
+        self.note_value(path, kind);
+        if self.capturing {
+            if let Some(token) = encoded_token {
+                self.append(token);
+            } else {
+                self.error = Some(ControlError::internal(
+                    "JSON extraction did not receive a scalar token",
+                ));
+            }
+        }
+    }
+
+    fn object_start(&mut self, path: WalkPath<'_>) {
+        self.note_value(path, JsonType::Object);
+        if self.capturing {
+            self.append(b"{");
+            self.containers
+                .push(SelectedContainer::Object { first: true });
+        }
+    }
+
+    fn object_end(&mut self, _path: WalkPath<'_>, _child_count: usize) {
+        if self.capturing
+            && matches!(
+                self.containers.last(),
+                Some(SelectedContainer::Object { .. })
+            )
+        {
+            self.append(b"}");
+            self.containers.pop();
+        }
+    }
+
+    fn array_start(&mut self, path: WalkPath<'_>) {
+        self.note_value(path, JsonType::Array);
+        if self.capturing {
+            self.append(b"[");
+            self.containers
+                .push(SelectedContainer::Array { first: true });
+        }
+    }
+
+    fn array_end(&mut self, _path: WalkPath<'_>, _length: usize) {
+        if self.capturing
+            && matches!(
+                self.containers.last(),
+                Some(SelectedContainer::Array { .. })
+            )
+        {
+            self.append(b"]");
+            self.containers.pop();
+        }
+    }
+
+    fn object_key(&mut self, _path: WalkPath<'_>, key: &str) {
+        if !self.capturing {
+            return;
+        }
+        let Some(SelectedContainer::Object { first }) = self.containers.last_mut() else {
+            return;
+        };
+        let separator = if *first { b"" as &[u8] } else { b"," };
+        *first = false;
+        self.append(separator);
+        match serde_json::to_vec(key) {
+            Ok(encoded) => self.append(&encoded),
+            Err(_) => {
+                self.error = Some(ControlError::internal(
+                    "failed to encode selected JSON object key",
+                ));
+                return;
+            }
+        }
+        self.append(b":");
+    }
+
+    fn wants_scalar_token(&self) -> bool {
+        true
+    }
+
+    fn should_descend(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+pub(crate) fn extract_json_selection(
+    input: &[u8],
+    pointer: &JsonPointer,
+    cancelled: &AtomicBool,
+) -> Result<Result<JsonSelection, JsonSelectionMiss>, ControlError> {
+    let mut selector = JsonSelector {
+        target: pointer,
+        output: Vec::new(),
+        containers: Vec::with_capacity(16),
+        capturing: false,
+        selected: false,
+        error: None,
+        longest_prefix: JsonPointer(String::new()),
+        longest_depth: 0,
+        next: Vec::with_capacity(MAX_JSON_HINTS),
+        omitted_next: 0,
+        cancelled,
+    };
+    walk_json(input, &mut selector, cancelled)?;
+    if let Some(error) = selector.error {
+        return Err(error);
+    }
+    if selector.selected {
+        return Ok(Ok(JsonSelection {
+            bytes: selector.output,
+        }));
+    }
+    Ok(Err(JsonSelectionMiss {
+        longest_valid_prefix: selector.longest_prefix,
+        next: selector.next,
+        omitted_next: selector.omitted_next,
+    }))
+}
+
+fn parent_pointer(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
 fn malformed_json(message: &'static str) -> ControlError {

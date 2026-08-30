@@ -2,7 +2,11 @@ use crate::{
     capture::CaptureSequence,
     control::{
         WaitForCaptureRequest, WaitForCaptureResult,
-        body::{BodyContentRequest, BodyPage},
+        body::{
+            BodyContentRequest, BodyPage, ExtractCaptureBodyRequest, ExtractCaptureBodyResult,
+            SearchCaptureBodyRequest, SearchCaptureBodyResult, SelectionContentRequest,
+            SelectionPage,
+        },
         capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
         json_walk::{
             FindJsonPointersRequest, FindJsonPointersResult, ProbeJsonPointerPatternRequest,
@@ -41,6 +45,9 @@ pub(crate) enum ControlOperationKind {
     GetCapture,
     WaitForCapture,
     ReadCaptureBody,
+    SearchCaptureBody,
+    ExtractCaptureBody,
+    ReadSelectedBody,
     FindJsonPointers,
     ProbeJsonPointerPattern,
 }
@@ -84,6 +91,9 @@ pub(crate) enum ControlOperation {
     },
     WaitForCapture(Box<WaitForCaptureRequest>),
     ReadCaptureBody(Box<BodyContentRequest>),
+    SearchCaptureBody(Box<SearchCaptureBodyRequest>),
+    ExtractCaptureBody(Box<ExtractCaptureBodyRequest>),
+    ReadSelectedBody(Box<SelectionContentRequest>),
     FindJsonPointers(Box<FindJsonPointersRequest>),
     ProbeJsonPointerPattern(Box<ProbeJsonPointerPatternRequest>),
 }
@@ -98,6 +108,9 @@ impl ControlOperation {
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture(_) => ControlOperationKind::WaitForCapture,
             Self::ReadCaptureBody(_) => ControlOperationKind::ReadCaptureBody,
+            Self::SearchCaptureBody(_) => ControlOperationKind::SearchCaptureBody,
+            Self::ExtractCaptureBody(_) => ControlOperationKind::ExtractCaptureBody,
+            Self::ReadSelectedBody(_) => ControlOperationKind::ReadSelectedBody,
             Self::FindJsonPointers(_) => ControlOperationKind::FindJsonPointers,
             Self::ProbeJsonPointerPattern(_) => ControlOperationKind::ProbeJsonPointerPattern,
         }
@@ -185,6 +198,20 @@ pub(crate) enum ControlResult {
         instance: InstanceScope,
         page: Box<BodyPage>,
     },
+    SearchCaptureBody {
+        instance: InstanceScope,
+        #[serde(flatten)]
+        result: Box<SearchCaptureBodyResult>,
+    },
+    ExtractCaptureBody {
+        instance: InstanceScope,
+        #[serde(flatten)]
+        result: Box<ExtractCaptureBodyResult>,
+    },
+    ReadSelectedBody {
+        instance: InstanceScope,
+        page: Box<SelectionPage>,
+    },
     FindJsonPointers {
         instance: InstanceScope,
         #[serde(flatten)]
@@ -207,6 +234,9 @@ impl ControlResult {
             | Self::GetCapture { instance, .. }
             | Self::WaitForCapture { instance, .. }
             | Self::ReadCaptureBody { instance, .. }
+            | Self::SearchCaptureBody { instance, .. }
+            | Self::ExtractCaptureBody { instance, .. }
+            | Self::ReadSelectedBody { instance, .. }
             | Self::FindJsonPointers { instance, .. }
             | Self::ProbeJsonPointerPattern { instance, .. } => instance,
         }
@@ -221,6 +251,9 @@ impl ControlResult {
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture { .. } => ControlOperationKind::WaitForCapture,
             Self::ReadCaptureBody { .. } => ControlOperationKind::ReadCaptureBody,
+            Self::SearchCaptureBody { .. } => ControlOperationKind::SearchCaptureBody,
+            Self::ExtractCaptureBody { .. } => ControlOperationKind::ExtractCaptureBody,
+            Self::ReadSelectedBody { .. } => ControlOperationKind::ReadSelectedBody,
             Self::FindJsonPointers { .. } => ControlOperationKind::FindJsonPointers,
             Self::ProbeJsonPointerPattern { .. } => ControlOperationKind::ProbeJsonPointerPattern,
         }
@@ -246,6 +279,8 @@ pub(crate) enum ControlErrorCode {
     DeadlineExceeded,
     Cancelled,
     UndecodableBody,
+    BodyNotTextual,
+    NotFound,
     MalformedJson,
     JsonDepthLimit,
     JsonSizeLimit,
@@ -287,6 +322,8 @@ impl ControlErrorCode {
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
             Self::UndecodableBody => "undecodable_body",
+            Self::BodyNotTextual => "body_not_textual",
+            Self::NotFound => "not_found",
             Self::MalformedJson => "malformed_json",
             Self::JsonDepthLimit => "json_depth_limit",
             Self::JsonSizeLimit => "json_size_limit",
@@ -481,6 +518,18 @@ impl RequestEnvelope {
                 ControlOperationKind::ReadCaptureBody,
                 serialize_arguments(&*request)?,
             ),
+            ControlOperation::SearchCaptureBody(request) => (
+                ControlOperationKind::SearchCaptureBody,
+                serialize_arguments(&*request)?,
+            ),
+            ControlOperation::ExtractCaptureBody(request) => (
+                ControlOperationKind::ExtractCaptureBody,
+                serialize_arguments(&*request)?,
+            ),
+            ControlOperation::ReadSelectedBody(request) => (
+                ControlOperationKind::ReadSelectedBody,
+                serialize_arguments(&*request)?,
+            ),
             ControlOperation::FindJsonPointers(request) => (
                 ControlOperationKind::FindJsonPointers,
                 serialize_arguments(&*request)?,
@@ -510,6 +559,9 @@ impl RequestEnvelope {
             | ControlOperationKind::SearchCaptures
             | ControlOperationKind::GetCapture
             | ControlOperationKind::ReadCaptureBody
+            | ControlOperationKind::SearchCaptureBody
+            | ControlOperationKind::ExtractCaptureBody
+            | ControlOperationKind::ReadSelectedBody
             | ControlOperationKind::FindJsonPointers
             | ControlOperationKind::ProbeJsonPointerPattern => ORDINARY_MAX_DEADLINE,
         };
@@ -572,6 +624,21 @@ impl RequestEnvelope {
                 let request = parse_arguments::<BodyContentRequest>(&self.arguments)?;
                 request.validate()?;
                 ControlOperation::ReadCaptureBody(Box::new(request))
+            }
+            ControlOperationKind::SearchCaptureBody => {
+                let request = parse_arguments::<SearchCaptureBodyRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::SearchCaptureBody(Box::new(request))
+            }
+            ControlOperationKind::ExtractCaptureBody => {
+                let request = parse_arguments::<ExtractCaptureBodyRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::ExtractCaptureBody(Box::new(request))
+            }
+            ControlOperationKind::ReadSelectedBody => {
+                let request = parse_arguments::<SelectionContentRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::ReadSelectedBody(Box::new(request))
             }
             ControlOperationKind::FindJsonPointers => {
                 let request = parse_arguments::<FindJsonPointersRequest>(&self.arguments)?;
@@ -743,3 +810,5 @@ mod task9_tests;
 
 #[cfg(test)]
 mod task10_tests;
+#[cfg(test)]
+mod task12_tests;

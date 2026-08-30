@@ -36,8 +36,11 @@ use crate::{
         WaitForCaptureRequest, WaitForCaptureResult,
         body::{
             BodyContentRequest, BodyPage, BodyPageSource, BodyRange, BodyRepresentation,
-            CaptureBodyMetadataReply, CaptureBodySnapshotReply, MAX_TERMINAL_DECODED_CACHE_BYTES,
-            media_type,
+            CaptureBodyMetadataReply, CaptureBodySnapshotReply, ExtractCaptureBodyRequest,
+            ExtractCaptureBodyResult, MAX_TERMINAL_DECODED_CACHE_BYTES, SearchCaptureBodyRequest,
+            SearchCaptureBodyResult, SelectionContentRequest, SelectionPage,
+            SelectionResourceRequest, content_resource_base_uri, extract_capture_body,
+            extract_selected_bytes, media_type, page_selected_representation, search_capture_body,
         },
         capture_query::{
             CAPTURE_SEARCH_BATCH_SIZE, CAPTURE_SEARCH_PAGE_JSON_BUDGET, CaptureDetail,
@@ -928,7 +931,8 @@ impl BodyJobScheduler {
                 target,
                 deadline,
                 cancelled,
-                move |decoded, status, cancelled| {
+                false,
+                move |decoded, status, _headers, _instance, cancelled| {
                     reject_limited_structured_input(decoded)?;
                     let mut result = find_json_pointers(
                         &decoded.bytes,
@@ -971,7 +975,8 @@ impl BodyJobScheduler {
                 target,
                 deadline,
                 cancelled,
-                move |decoded, status, cancelled| {
+                false,
+                move |decoded, status, _headers, _instance, cancelled| {
                     reject_limited_structured_input(decoded)?;
                     let mut result = probe_json(&decoded.bytes, &pattern, cancelled)?;
                     result.capture_revision = capture_revision;
@@ -986,22 +991,244 @@ impl BodyJobScheduler {
         })
     }
 
+    async fn search_capture_body(
+        &self,
+        request: SearchCaptureBodyRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        let capture_id = request.capture_id;
+        let capture_revision = request.capture_revision;
+        let side = request.side;
+        let query = request.query;
+        let limit = request.limit;
+        let context_bytes = request.context_bytes;
+        let target = decoded_inspection_target(capture_id, capture_revision, side);
+        let (instance, result) = self
+            .inspect_decoded_body(
+                target,
+                deadline,
+                cancelled,
+                false,
+                move |decoded, status, _headers, instance, cancelled| {
+                    let decoded_uri = content_resource_base_uri(
+                        instance,
+                        capture_id,
+                        capture_revision,
+                        side,
+                        BodyRepresentation::Decoded,
+                    );
+                    let raw_uri = content_resource_base_uri(
+                        instance,
+                        capture_id,
+                        capture_revision,
+                        side,
+                        BodyRepresentation::Raw,
+                    );
+                    let search = search_capture_body(
+                        &decoded.bytes,
+                        &query,
+                        limit,
+                        context_bytes,
+                        &decoded_uri,
+                        &raw_uri,
+                        cancelled,
+                    )
+                    .map_err(|error| {
+                        body_operation_error(
+                            error,
+                            capture_revision,
+                            status.preview_limit.is_some(),
+                        )
+                    })?;
+                    Ok(SearchCaptureBodyResult {
+                        capture_revision,
+                        total_matches: search.total_matches,
+                        omitted_matches: search.omitted_matches,
+                        decoded_bytes_inspected: decoded.bytes.len(),
+                        matches: search.matches,
+                        stream: status.stream,
+                        observed_bytes: status.observed_bytes,
+                        retained_bytes: status.retained_bytes,
+                        source_truncated: status.preview_limit.is_some(),
+                        source_truncation_reason: status.preview_limit,
+                        decoded_encoding_chain: decoded.encoding_chain.clone(),
+                    })
+                },
+            )
+            .await?;
+        Ok(ControlResult::SearchCaptureBody {
+            instance,
+            result: Box::new(result),
+        })
+    }
+
+    async fn extract_capture_body(
+        &self,
+        request: ExtractCaptureBodyRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        let capture_id = request.capture_id;
+        let capture_revision = request.capture_revision;
+        let side = request.side;
+        let selector = request.selector;
+        let selector_kind = selector.kind();
+        let target = decoded_inspection_target(capture_id, capture_revision, side);
+        let (instance, result) = self
+            .inspect_decoded_body(
+                target,
+                deadline,
+                cancelled,
+                true,
+                move |decoded, status, headers, instance, cancelled| {
+                    reject_limited_structured_input(decoded)?;
+                    reject_truncated_structured_source(status)?;
+                    let selection = SelectionResourceRequest {
+                        proxy_endpoint: instance.proxy_endpoint,
+                        run_id: instance.run_id.clone(),
+                        capture_id,
+                        capture_revision,
+                        side,
+                        selector: selector.clone(),
+                        offset: 0,
+                        length: crate::control::body::DEFAULT_BODY_PAGE_LENGTH,
+                    };
+                    let selection_uri = selection.base_uri()?;
+                    let extracted = extract_capture_body(
+                        &decoded.bytes,
+                        media_type(headers).as_deref(),
+                        &selector,
+                        &selection_uri,
+                        cancelled,
+                    )
+                    .map_err(|error| {
+                        body_operation_error(
+                            error,
+                            capture_revision,
+                            status.preview_limit.is_some(),
+                        )
+                    })?;
+                    Ok(ExtractCaptureBodyResult {
+                        capture_revision,
+                        selector_kind,
+                        selected_bytes: extracted.selected_bytes,
+                        media_type: extracted.media_type,
+                        inline: extracted.inline,
+                        resource_uri: extracted.resource_uri,
+                        stream: status.stream,
+                        observed_bytes: status.observed_bytes,
+                        retained_bytes: status.retained_bytes,
+                        source_truncated: status.preview_limit.is_some(),
+                        source_truncation_reason: status.preview_limit,
+                        decoded_encoding_chain: decoded.encoding_chain.clone(),
+                    })
+                },
+            )
+            .await?;
+        Ok(ControlResult::ExtractCaptureBody {
+            instance,
+            result: Box::new(result),
+        })
+    }
+
+    async fn read_selected_body(
+        &self,
+        request: SelectionContentRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        let capture_id = request.capture_id;
+        let capture_revision = request.capture_revision;
+        let side = request.side;
+        let selector = request.selector;
+        let offset = request.offset;
+        let length = request.length;
+        let target = decoded_inspection_target(capture_id, capture_revision, side);
+        let (instance, page) = self
+            .inspect_decoded_body(
+                target,
+                deadline,
+                cancelled,
+                true,
+                move |decoded, status, headers, instance, cancelled| {
+                    reject_limited_structured_input(decoded)?;
+                    reject_truncated_structured_source(status)?;
+                    let selection = SelectionResourceRequest {
+                        proxy_endpoint: instance.proxy_endpoint,
+                        run_id: instance.run_id.clone(),
+                        capture_id,
+                        capture_revision,
+                        side,
+                        selector: selector.clone(),
+                        offset,
+                        length,
+                    };
+                    let selection_uri = selection.base_uri()?;
+                    let (selected, selected_media_type) = extract_selected_bytes(
+                        &decoded.bytes,
+                        media_type(headers).as_deref(),
+                        &selector,
+                        cancelled,
+                    )
+                    .map_err(|error| {
+                        body_operation_error(
+                            error,
+                            capture_revision,
+                            status.preview_limit.is_some(),
+                        )
+                    })?;
+                    let window =
+                        page_selected_representation(&selected, offset, length, &selection_uri)?;
+                    Ok(SelectionPage {
+                        content: window.content,
+                        media_type: selected_media_type,
+                        selected_bytes: window.total_bytes,
+                        requested_range: window.requested_range,
+                        actual_range: window.actual_range,
+                        next_offset: window.next_offset,
+                        next_uri: window.next_uri,
+                        source: decoded_source(status, decoded),
+                    })
+                },
+            )
+            .await?;
+        Ok(ControlResult::ReadSelectedBody {
+            instance,
+            page: Box::new(page),
+        })
+    }
+
     async fn inspect_decoded_body<R, F>(
         &self,
         request: BodyContentRequest,
         deadline: Instant,
         cancelled: CancellationToken,
+        require_complete_source: bool,
         work: F,
     ) -> Result<(InstanceScope, R), ControlError>
     where
         R: Send + 'static,
-        F: FnOnce(&DecodedBytes, &BodyStatus, &AtomicBool) -> Result<R, ControlError>
+        F: FnOnce(
+                &DecodedBytes,
+                &BodyStatus,
+                &CapturedHeaders,
+                &InstanceScope,
+                &AtomicBool,
+            ) -> Result<R, ControlError>
             + Send
             + 'static,
     {
         self.apply_pending_changes();
         let metadata = self.metadata(&request, cancelled.clone()).await?;
         validate_body_metadata(&request, &metadata)?;
+        if require_complete_source {
+            reject_truncated_structured_source(&metadata.status)
+                .map_err(|error| body_operation_error(error, request.capture_revision, true))?;
+        }
         let mut plan = self.admission_plan(&request, &metadata);
         let admission_deadline = tokio::time::Instant::from_std(deadline);
         let mut queued = self.admission.try_admit_mcp_until(
@@ -1017,6 +1244,10 @@ impl BodyJobScheduler {
             self.apply_pending_changes();
             let current = self.metadata(&request, cancelled.clone()).await?;
             validate_body_metadata(&request, &current)?;
+            if require_complete_source {
+                reject_truncated_structured_source(&current.status)
+                    .map_err(|error| body_operation_error(error, request.capture_revision, true))?;
+            }
             let current_plan = self.admission_plan(&request, &current);
             if plan.requires_readmission(&current_plan) {
                 let charge_bytes = current_plan.charge_bytes;
@@ -1030,16 +1261,20 @@ impl BodyJobScheduler {
             }
             let work = work
                 .take()
-                .ok_or_else(|| ControlError::internal("JSON body work was already consumed"))?;
+                .ok_or_else(|| ControlError::internal("decoded body work was already consumed"))?;
             if let Some(decoded) = current_plan.cached {
+                let work_headers = current.headers.clone();
                 let instance = current.instance;
+                let work_instance = instance.clone();
                 let result = inspect_cached_body_off_thread(
                     decoded,
                     current.status,
                     active,
                     deadline,
                     cancelled,
-                    work,
+                    move |decoded, status, cancelled| {
+                        work(decoded, status, &work_headers, &work_instance, cancelled)
+                    },
                 )
                 .await?;
                 return Ok((instance, result));
@@ -1051,6 +1286,8 @@ impl BodyJobScheduler {
             let cache_epoch =
                 (self.change_feed.epoch() == snapshot_epoch).then_some(snapshot_epoch);
             let instance = snapshot.instance.clone();
+            let work_instance = instance.clone();
+            let work_headers = snapshot.headers.clone();
             let status = snapshot.status.clone();
             let (decoded, result) = decode_and_inspect_body_off_thread(
                 snapshot.preview.clone(),
@@ -1059,7 +1296,9 @@ impl BodyJobScheduler {
                 active,
                 deadline,
                 cancelled,
-                work,
+                move |decoded, status, cancelled| {
+                    work(decoded, status, &work_headers, &work_instance, cancelled)
+                },
             )
             .await?;
             if should_cache_decoded_body(&snapshot.status)
@@ -1308,6 +1547,62 @@ fn reject_limited_structured_input(decoded: &DecodedBytes) -> Result<(), Control
         ));
     }
     Ok(())
+}
+fn reject_truncated_structured_source(status: &BodyStatus) -> Result<(), ControlError> {
+    if status.preview_limit.is_some() {
+        return Err(ControlError::new(
+            ControlErrorCode::ResourceLimit,
+            "retained capture body is incomplete",
+            false,
+            serde_json::json!({
+                "source_truncated": true,
+                "truncation_reason": status.preview_limit,
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn decoded_inspection_target(
+    capture_id: CaptureSequence,
+    capture_revision: u64,
+    side: BodySide,
+) -> BodyContentRequest {
+    BodyContentRequest {
+        capture_id,
+        capture_revision,
+        side,
+        representation: BodyRepresentation::Decoded,
+        offset: 0,
+        length: 1,
+    }
+}
+
+fn decoded_source(status: &BodyStatus, decoded: &DecodedBytes) -> BodyPageSource {
+    BodyPageSource {
+        stream: status.stream,
+        observed_bytes: status.observed_bytes,
+        retained_bytes: status.retained_bytes,
+        truncated: status.preview_limit.is_some(),
+        truncation_reason: status.preview_limit,
+        decoded_encoding_chain: decoded.encoding_chain.clone(),
+        decoded_output_limited: decoded.output_limited,
+    }
+}
+
+fn body_operation_error(
+    mut error: ControlError,
+    capture_revision: u64,
+    source_truncated: bool,
+) -> ControlError {
+    let mut details = match error.details {
+        serde_json::Value::Object(details) => details,
+        _ => serde_json::Map::new(),
+    };
+    details.insert("capture_revision".to_owned(), capture_revision.into());
+    details.insert("source_truncated".to_owned(), source_truncated.into());
+    error.details = serde_json::Value::Object(details);
+    error
 }
 
 async fn inspect_cached_body_off_thread<R, F>(
@@ -1855,6 +2150,21 @@ impl ControlRpcHandler for RuntimeControlHandler {
                 ControlOperation::ReadCaptureBody(request) => {
                     body_jobs.read(*request, _context.deadline, cancelled).await
                 }
+                ControlOperation::SearchCaptureBody(request) => {
+                    body_jobs
+                        .search_capture_body(*request, _context.deadline, cancelled)
+                        .await
+                }
+                ControlOperation::ExtractCaptureBody(request) => {
+                    body_jobs
+                        .extract_capture_body(*request, _context.deadline, cancelled)
+                        .await
+                }
+                ControlOperation::ReadSelectedBody(request) => {
+                    body_jobs
+                        .read_selected_body(*request, _context.deadline, cancelled)
+                        .await
+                }
                 ControlOperation::FindJsonPointers(request) => {
                     body_jobs
                         .find_json_pointers(*request, _context.deadline, cancelled)
@@ -2369,6 +2679,8 @@ impl RunningPrivateControl {
         self.shutdown(grace).await
     }
 }
+#[cfg(test)]
+mod task12_tests;
 
 impl Drop for RunningPrivateControl {
     fn drop(&mut self) {

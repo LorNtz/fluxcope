@@ -54,8 +54,11 @@ use crate::{
 
 use super::{
     body::{
-        BodyResourceUri, CONTENT_RESOURCE_TEMPLATE, FindJsonPointersInput, FindJsonPointersOutput,
-        ProbeJsonPointerPatternInput, ProbeJsonPointerPatternOutput, body_page_resource_contents,
+        BodyResourceUri, CONTENT_RESOURCE_TEMPLATE, ExtractCaptureBodyInput,
+        ExtractCaptureBodyOutput, FORM_FIELD_RESOURCE_TEMPLATE, FindJsonPointersInput,
+        FindJsonPointersOutput, JSON_POINTER_RESOURCE_TEMPLATE, ProbeJsonPointerPatternInput,
+        ProbeJsonPointerPatternOutput, SearchCaptureBodyInput, SearchCaptureBodyOutput,
+        SelectionResourceUri, body_page_resource_contents, selection_page_resource_contents,
     },
     capture::{
         BodyRepresentationLinks, CaptureBodyResources, GetCaptureInput, GetCaptureResult,
@@ -990,6 +993,94 @@ impl Broker {
         })
     }
 
+    pub(crate) async fn search_capture_body_impl(
+        &self,
+        input: SearchCaptureBodyInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<SearchCaptureBodyOutput, McpDomainError> {
+        let operation = input.operation()?;
+        let resolved = self
+            .resolve_with_client(
+                input.selector(),
+                SelectorRequirement::TargetedBody,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .await?;
+        let ControlResult::SearchCaptureBody { instance, result } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected body search result",
+            ));
+        };
+        let result = *result;
+        if instance.proxy_endpoint != resolved.descriptor.proxy_endpoint()
+            || instance.run_id != *resolved.descriptor.run_id()
+            || result.capture_revision != input.capture_revision
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched body search identity",
+            ));
+        }
+        Ok(SearchCaptureBodyOutput {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            result,
+        })
+    }
+
+    pub(crate) async fn extract_capture_body_impl(
+        &self,
+        input: ExtractCaptureBodyInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ExtractCaptureBodyOutput, McpDomainError> {
+        let operation = input.operation()?;
+        let resolved = self
+            .resolve_with_client(
+                input.selector(),
+                SelectorRequirement::TargetedBody,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .await?;
+        let ControlResult::ExtractCaptureBody { instance, result } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected body extraction result",
+            ));
+        };
+        let result = *result;
+        if instance.proxy_endpoint != resolved.descriptor.proxy_endpoint()
+            || instance.run_id != *resolved.descriptor.run_id()
+            || result.capture_revision != input.capture_revision
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched body extraction identity",
+            ));
+        }
+        Ok(ExtractCaptureBodyOutput {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            result,
+        })
+    }
+
     pub(crate) async fn find_json_pointers_impl(
         &self,
         input: FindJsonPointersInput,
@@ -1122,6 +1213,54 @@ impl Broker {
         }
         let relayed_bytes = u64::try_from(page.content.len()).unwrap_or(u64::MAX);
         let content = body_page_resource_contents(&requested, *page)?;
+        self.telemetry.record_bytes_relayed(relayed_bytes);
+        Ok(ReadResourceResult::new(vec![content]))
+    }
+
+    async fn read_selection_resource_impl(
+        &self,
+        requested: SelectionResourceUri,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ReadResourceResult, McpDomainError> {
+        let selector = InstanceSelector {
+            proxy_endpoint: Some(requested.proxy_endpoint()),
+            run_id: Some(requested.run_id().clone()),
+        };
+        let resolved = self
+            .resolve_with_client(
+                selector,
+                SelectorRequirement::Resource,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(
+                &resolved.descriptor,
+                ControlOperation::ReadSelectedBody(Box::new(requested.request())),
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        let ControlResult::ReadSelectedBody { instance, page } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected selected body result",
+            ));
+        };
+        if instance.proxy_endpoint != requested.proxy_endpoint()
+            || &instance.run_id != requested.run_id()
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched selected body identity",
+            ));
+        }
+        let relayed_bytes = u64::try_from(page.content.len()).unwrap_or(u64::MAX);
+        let content = selection_page_resource_contents(&requested, *page)?;
         self.telemetry.record_bytes_relayed(relayed_bytes);
         Ok(ReadResourceResult::new(vec![content]))
     }
@@ -1421,6 +1560,62 @@ impl Broker {
     }
 
     #[tool(
+        name = "search_capture_body",
+        description = "Search one exact revision-pinned decoded capture body with bounded Unicode-folded matches and context",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn search_capture_body(
+        &self,
+        Parameters(input): Parameters<SearchCaptureBodyInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<SearchCaptureBodyOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.search_capture_body_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "extract_capture_body",
+        description = "Extract one exact JSON pointer or URL-form field from a revision-pinned decoded capture body",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn extract_capture_body(
+        &self,
+        Parameters(input): Parameters<ExtractCaptureBodyInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<ExtractCaptureBodyOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.extract_capture_body_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
         name = "find_json_pointers",
         description = "Find bounded exact JSON field pointers and structural metadata in one revision-pinned decoded capture body without returning values",
         annotations(
@@ -1536,12 +1731,22 @@ impl ServerHandler for Broker {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
-        let template = ResourceTemplate::new(CONTENT_RESOURCE_TEMPLATE, "capture_body_content")
+        let content = ResourceTemplate::new(CONTENT_RESOURCE_TEMPLATE, "capture_body_content")
             .with_description(
                 "A revision-pinned byte page from one retained request or response body",
             );
+        let json = ResourceTemplate::new(
+            JSON_POINTER_RESOURCE_TEMPLATE,
+            "capture_body_json_pointer_selection",
+        )
+        .with_description("A UTF-8 page from one exact compact JSON-pointer selection");
+        let form = ResourceTemplate::new(
+            FORM_FIELD_RESOURCE_TEMPLATE,
+            "capture_body_form_field_selection",
+        )
+        .with_description("A UTF-8 page from one exact URL-form field selection");
         std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
-            template,
+            content, json, form,
         ])))
     }
 
@@ -1551,17 +1756,35 @@ impl ServerHandler for Broker {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
-        let requested = BodyResourceUri::parse(&request.uri).map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
-        self.read_body_resource_impl(
-            requested,
-            client,
-            Instant::now() + ORDINARY_DEADLINE,
-            context.ct.clone(),
-        )
-        .await
-        .map(Into::into)
-        .map_err(to_mcp_error)
+        if request
+            .uri
+            .split_once('?')
+            .map_or(request.uri.as_str(), |(path, _)| path)
+            .contains("/extract/")
+        {
+            let requested = SelectionResourceUri::parse(&request.uri).map_err(to_mcp_error)?;
+            self.read_selection_resource_impl(
+                requested,
+                client,
+                Instant::now() + ORDINARY_DEADLINE,
+                context.ct.clone(),
+            )
+            .await
+            .map(Into::into)
+            .map_err(to_mcp_error)
+        } else {
+            let requested = BodyResourceUri::parse(&request.uri).map_err(to_mcp_error)?;
+            self.read_body_resource_impl(
+                requested,
+                client,
+                Instant::now() + ORDINARY_DEADLINE,
+                context.ct.clone(),
+            )
+            .await
+            .map(Into::into)
+            .map_err(to_mcp_error)
+        }
     }
 }
 
@@ -3218,5 +3441,6 @@ mod tests {
 
     mod task10_tests;
     mod task11_tests;
+    mod task12_tests;
     mod task9_tests;
 }
