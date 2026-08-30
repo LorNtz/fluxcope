@@ -5,8 +5,8 @@ use url::Url;
 
 #[derive(Clone, Debug, Default)]
 pub struct MappingEngine {
-    remote_rules: CompiledRules<RemoteTarget>,
-    local_rules: CompiledRules<PathBuf>,
+    remote_rules: CompiledRules<LocatedTarget<RemoteTarget>>,
+    local_rules: CompiledRules<LocatedTarget<PathBuf>>,
     diagnostics: Vec<MappingDiagnostic>,
 }
 
@@ -41,27 +41,53 @@ impl MappingEngine {
         let Some(original) = RequestUrl::from_uri(uri) else {
             return MappingDecision::default();
         };
-
         let remote_url = self
             .remote_rules
             .match_target(&original)
-            .map(|target| target.apply_to(&original.url));
-        let effective_url = remote_url.as_ref().unwrap_or(&original.url);
-        if self.local_rules.is_empty() {
-            return MappingDecision {
-                mapped_uri: remote_url.and_then(|url| url.as_str().parse().ok()),
-                local_path: None,
-            };
-        }
-        let effective_request = RequestUrl::from_url(effective_url.clone());
-        let local_path = effective_request
-            .as_ref()
-            .and_then(|request| self.local_rules.match_target(request))
-            .cloned();
+            .map(|matched| matched.target.apply_to(&original.url));
+        let local = if self.local_rules.is_empty() {
+            None
+        } else if let Some(remote_url) = &remote_url {
+            RequestUrl::from_url(remote_url.clone())
+                .as_ref()
+                .and_then(|request| self.local_rules.match_target(request))
+        } else {
+            self.local_rules.match_target(&original)
+        };
 
         MappingDecision {
             mapped_uri: remote_url.and_then(|url| url.as_str().parse().ok()),
-            local_path,
+            local_path: local.map(|matched| matched.target.clone()),
+        }
+    }
+
+    pub(crate) fn trace_request(&self, uri: &Uri) -> MappingTrace {
+        let Some(original) = RequestUrl::from_uri(uri) else {
+            return MappingTrace::default();
+        };
+        let remote = self.remote_rules.match_target(&original);
+        let remote_url = remote.map(|matched| matched.target.apply_to(&original.url));
+        let local = if self.local_rules.is_empty() {
+            None
+        } else if let Some(remote_url) = &remote_url {
+            RequestUrl::from_url(remote_url.clone())
+                .as_ref()
+                .and_then(|request| self.local_rules.match_target(request))
+        } else {
+            self.local_rules.match_target(&original)
+        };
+        let effective_url = remote_url.as_ref().unwrap_or(&original.url);
+
+        MappingTrace {
+            decision: MappingDecision {
+                mapped_uri: remote_url
+                    .as_ref()
+                    .and_then(|url| url.as_str().parse().ok()),
+                local_path: local.map(|matched| matched.target.clone()),
+            },
+            effective_uri: effective_url.as_str().parse().ok(),
+            remote_match: remote.map(|matched| matched.location),
+            local_match: local.map(|matched| matched.location),
         }
     }
 
@@ -79,6 +105,14 @@ impl MappingEngine {
 pub struct MappingDecision {
     pub mapped_uri: Option<Uri>,
     pub local_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MappingTrace {
+    pub decision: MappingDecision,
+    pub effective_uri: Option<Uri>,
+    pub remote_match: Option<MappingRuleLocation>,
+    pub local_match: Option<MappingRuleLocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +156,8 @@ pub enum DiagnosticSeverity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MappingDiagnosticCode {
+    #[allow(dead_code, reason = "consumed by Task 14 mapping explanation RPC")]
+    InvalidRequestUrl,
     MissingActivePreset,
     ActivePresetNotFound,
     InvalidRuleSource,
@@ -148,6 +184,13 @@ pub struct MappingLocation {
     pub table: MappingTable,
     pub rule_index: usize,
     pub field: MappingField,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MappingRuleLocation {
+    pub preset_index: usize,
+    pub table: MappingTable,
+    pub rule_index: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -232,6 +275,12 @@ struct RulePattern {
 }
 
 #[derive(Clone, Debug)]
+struct LocatedTarget<T> {
+    target: T,
+    location: MappingRuleLocation,
+}
+
+#[derive(Clone, Debug)]
 struct RemoteTarget {
     scheme: String,
     host: String,
@@ -293,7 +342,7 @@ fn active_preset<'a>(
         .presets
         .iter()
         .enumerate()
-        .find(|(_, preset)| preset.name == active_name)
+        .find(|(_, preset)| preset.name.trim() == active_name)
 }
 
 fn active_preset_diagnostic(proxy: &ProxySettings) -> Option<MappingDiagnostic> {
@@ -309,7 +358,7 @@ fn active_preset_diagnostic(proxy: &ProxySettings) -> Option<MappingDiagnostic> 
     (!proxy
         .presets
         .iter()
-        .any(|preset| preset.name == active_name))
+        .any(|preset| preset.name.trim() == active_name))
     .then(|| {
         MappingDiagnostic::warning(
             MappingDiagnosticCode::ActivePresetNotFound,
@@ -359,7 +408,17 @@ fn compile_remote_rules(
             }
         };
 
-        engine.remote_rules.insert(pattern, target);
+        engine.remote_rules.insert(
+            pattern,
+            LocatedTarget {
+                target,
+                location: MappingRuleLocation {
+                    preset_index,
+                    table: MappingTable::Remote,
+                    rule_index: index,
+                },
+            },
+        );
     }
 }
 
@@ -404,7 +463,17 @@ fn compile_local_rules(
             }
         };
 
-        engine.local_rules.insert(pattern, target);
+        engine.local_rules.insert(
+            pattern,
+            LocatedTarget {
+                target,
+                location: MappingRuleLocation {
+                    preset_index,
+                    table: MappingTable::Local,
+                    rule_index: index,
+                },
+            },
+        );
     }
 }
 
@@ -434,12 +503,13 @@ pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagn
     let mut diagnostics = Vec::new();
     let mut names = std::collections::HashSet::new();
     for (preset_index, preset) in proxy.presets.iter().enumerate() {
-        if preset.name.trim().is_empty() {
+        let name = preset.name.trim();
+        if name.is_empty() {
             diagnostics.push(MappingDiagnostic::warning(
                 MappingDiagnosticCode::EmptyPresetName,
                 "proxy preset names cannot be empty",
             ));
-        } else if !names.insert(preset.name.as_str()) {
+        } else if !names.insert(name) {
             diagnostics.push(MappingDiagnostic::warning(
                 MappingDiagnosticCode::DuplicatePresetName,
                 format!("duplicate proxy preset name: {}", preset.name),
@@ -455,30 +525,16 @@ pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagn
                 .map(|rule| (&rule.from, &rule.to)),
             &mut diagnostics,
         );
-        for (rule_index, rule) in preset.map_local.rules.iter().enumerate() {
-            if let Err(error) = parse_rule_url(&rule.from) {
-                diagnostics.push(rule_diagnostic(
-                    DiagnosticSeverity::Error,
-                    MappingDiagnosticCode::InvalidRuleSource,
-                    preset_index,
-                    MappingTable::Local,
-                    rule_index,
-                    MappingField::From,
-                    format!("map_local.from {error}"),
-                ));
-            }
-            if let Err(error) = expand_home_path(rule.to.trim()) {
-                diagnostics.push(rule_diagnostic(
-                    DiagnosticSeverity::Error,
-                    MappingDiagnosticCode::InvalidRuleTarget,
-                    preset_index,
-                    MappingTable::Local,
-                    rule_index,
-                    MappingField::To,
-                    format!("map_local.to {error}"),
-                ));
-            }
-        }
+        validate_rules(
+            preset_index,
+            MappingTable::Local,
+            preset
+                .map_local
+                .rules
+                .iter()
+                .map(|rule| (&rule.from, &rule.to)),
+            &mut diagnostics,
+        );
     }
     if let Some(diagnostic) = active_preset_diagnostic(proxy) {
         diagnostics.push(diagnostic);
@@ -489,6 +545,25 @@ pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagn
     diagnostics
 }
 
+pub(crate) fn validate_rule_values(
+    table: MappingTable,
+    from: &str,
+    to: &str,
+) -> Vec<(MappingField, String)> {
+    let mut errors = Vec::new();
+    if let Err(error) = parse_rule_url(from) {
+        errors.push((MappingField::From, format!("mapping source {error}")));
+    }
+    let target = match table {
+        MappingTable::Remote => parse_remote_target(to).map(|_| ()),
+        MappingTable::Local => expand_home_path(to.trim()).map(|_| ()),
+    };
+    if let Err(error) = target {
+        errors.push((MappingField::To, format!("mapping target {error}")));
+    }
+    errors
+}
+
 fn validate_rules<'a>(
     preset_index: usize,
     table: MappingTable,
@@ -496,26 +571,19 @@ fn validate_rules<'a>(
     diagnostics: &mut Vec<MappingDiagnostic>,
 ) {
     for (rule_index, (from, to)) in rules.enumerate() {
-        if let Err(error) = parse_rule_url(from) {
+        for (field, message) in validate_rule_values(table, from, to) {
+            let code = match field {
+                MappingField::From => MappingDiagnosticCode::InvalidRuleSource,
+                MappingField::To => MappingDiagnosticCode::InvalidRuleTarget,
+            };
             diagnostics.push(rule_diagnostic(
                 DiagnosticSeverity::Error,
-                MappingDiagnosticCode::InvalidRuleSource,
+                code,
                 preset_index,
                 table,
                 rule_index,
-                MappingField::From,
-                format!("map_remote.from {error}"),
-            ));
-        }
-        if let Err(error) = parse_remote_target(to) {
-            diagnostics.push(rule_diagnostic(
-                DiagnosticSeverity::Error,
-                MappingDiagnosticCode::InvalidRuleTarget,
-                preset_index,
-                table,
-                rule_index,
-                MappingField::To,
-                format!("map_remote.to {error}"),
+                field,
+                message,
             ));
         }
     }

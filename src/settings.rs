@@ -1,3 +1,5 @@
+pub(crate) mod mapping_ops;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
