@@ -154,4 +154,12 @@ The source-token whitespace scan now uses `scanned.is_multiple_of(32 * 1_024)` i
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed.
 - `cargo test --all-targets --all-features`: 703 passed.
 
-Scoped design and performance re-review is pending. The disclosed one-token parser-call cancellation bound will be included explicitly in that re-review.
+Scoped design and performance re-review passed. Both reviewers confirmed every first-round finding is addressed. They also confirmed that the parser's at-most-one-token cancellation delay is bounded by the 16 MiB decoded-input cap, satisfies Task 11's explicit between-event cancellation contract, and cannot leak a worker lease.
+
+## Final review
+
+- Design/security/correctness: PASS. Malformed-body data no longer appears in errors; original token spans drive encoded sizes; borrowed callback paths remain valid; object summaries are direct-child-only; path and serialized result bounds are enforced.
+- Performance/memory: PASS. Traversal is linear in decoded input with depth-bounded state; retained output and final enforcement are bounded; aggregate totals remain exact; nonmatching scalar tokens are not rescanned.
+- Remaining Critical/Important findings: none.
+
+**Completion:** GREEN — review clean.
