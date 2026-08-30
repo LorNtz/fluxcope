@@ -40,7 +40,7 @@ Validation:
 - `length == 0` and `length > 64 KiB` are `invalid_argument`;
 - an offset beyond the selected representation length returns an empty actual range at `total_bytes`, not a panic or wrap;
 - `next_offset` is the actual end when more selected bytes remain, otherwise `None`;
-- for decoded valid UTF-8, manual start/end boundaries must be UTF-8 character boundaries. A misaligned range is `invalid_argument` with `nearest_start` (floor boundary) and `nearest_end` (ceiling boundary). Tool-generated first/next URIs must always be aligned;
+- for decoded valid UTF-8, the requested start `offset` must be a character boundary. A misaligned start is `invalid_argument` with `nearest_start` (floor boundary) and `nearest_end` (ceiling boundary). The requested end is a maximum: page construction shortens the actual end to the greatest UTF-8 boundary at or before the requested/clamped end, so generated first pages remain readable and every generated `next_offset` is aligned;
 - raw/binary ranges are byte-exact and need no UTF-8 alignment.
 
 Media type is the trimmed retained `Content-Type` header value when present; no sniffing or JSON/form display formatting occurs.
