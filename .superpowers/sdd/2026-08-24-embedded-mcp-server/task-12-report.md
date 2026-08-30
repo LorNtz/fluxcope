@@ -98,3 +98,10 @@ Design re-review approved round 1. Performance re-review confirmed every origina
 - `cargo test --all-targets --all-features`: 732 passed.
 
 Performance re-review of the geometric-growth correction is pending.
+
+## Final review
+
+- Design/maintainability re-review: PASS. Decoded-limit metadata, complete form values, capped serialization, matcher ranges/windows, error safety, wire contracts, and real production-path coverage are approved.
+- Performance/memory re-review: PASS. Geometric writer growth, query-bounded matcher state, fixed query/wire bounds, bounded form cancellation, shared lease lifetime, and result/page ownership are approved.
+
+Task 12 is GREEN and review-clean.
