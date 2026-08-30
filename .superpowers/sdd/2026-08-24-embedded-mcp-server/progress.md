@@ -17,3 +17,4 @@ Task 8: initial GREEN (capture query/store/runtime/private RPC/MCP tools; focuse
 Task 8: fix round 1/5 (9 addressed, 0 open — typed MCP validation, cancellable matching, required mutation schema, non-empty status, atomic mutation result, production-path admission tests, admitted single compilation, response byte bound, bounded off-loop detail materialization; focused 15+22+20+8+2, full 581; re-review pending)
 Task 8: fix round 2/5 (2 addressed, 0 open — broker semantic validation moved to admitted blocking worker with 64-KiB pattern cap; cross-batch byte-limit rows resume inclusively; focused 16+23+20+9+2, full 585; re-review pending)
 Task 8: fix round 3/5 (1 addressed, 0 open — blocking public validation and downstream forwarding share one ordinary-call deadline; full 586; re-review pending)
+Task 8: complete (commits c158e54..b73ff86; focused 16+23+20+9+2, full 586; design PASS, performance PASS, review clean)

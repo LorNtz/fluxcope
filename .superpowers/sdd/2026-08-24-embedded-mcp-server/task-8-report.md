@@ -116,6 +116,11 @@ Strict Clippy may continue to report explicitly staged Task 9+ or unrelated pre-
 - Public search now creates one ordinary deadline before blocking validation, enforces it during validation, and forwards the same deadline through selector resolution/private RPC.
 - A deterministic gated validation timeout regression proves typed `deadline_exceeded`, detached-worker permit retention, and zero registry/probe dispatch.
 
+## Final review
+
+- Design Review: PASS after three fix rounds. Typed errors, schemas, cursor semantics, deadlines, identity consistency, and bounded worker lifetimes satisfy the Task 8 contract.
+- Performance Review: PASS. Query compilation/matching, page construction, runtime snapshots, and detail materialization remain admitted and bounded; batching stays 32 rows with O(log n) store access.
+
 ## Completion
 
-Status: `GREEN — round-three re-review pending`
+Status: `GREEN — review clean`
