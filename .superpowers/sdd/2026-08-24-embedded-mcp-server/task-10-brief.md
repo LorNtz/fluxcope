@@ -133,7 +133,7 @@ wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capt
 - `wirelens` scheme;
 - canonical socket authority including standard bracketed IPv6;
 - exact path segments shown above (no empty/missing/extra segments or traversal);
-- valid run ID, positive capture ID as accepted by `CaptureSequence`, revision, side, and representation;
+- valid run ID, canonical decimal `u64` capture ID (including `0`), canonical decimal revision, side, and representation;
 - optional single `offset` and optional single `length`, defaulting to `0` / `8192`;
 - no userinfo, fragment, unknown query key, duplicate key, malformed percent encoding, overflow, or semantically invalid length.
 
