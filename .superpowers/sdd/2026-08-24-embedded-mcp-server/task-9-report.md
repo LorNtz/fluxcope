@@ -28,15 +28,21 @@ The test author ran no formatter, build, lint, test, or Git commands.
 ## Modified files
 
 ```text
-src/runtime/control.rs
-src/runtime/control/task9_tests.rs
+src/capture/mod.rs
+src/control/mod.rs
+src/control_rpc/client.rs
 src/control_rpc/protocol.rs
 src/control_rpc/protocol/tests.rs
 src/control_rpc/protocol/task9_tests.rs
 src/control_rpc/server.rs
 src/control_rpc/server/task9_tests.rs
+src/mcp/mod.rs
 src/mcp/broker.rs
 src/mcp/broker/tests/task9_tests.rs
+src/mcp/capture.rs
+src/runtime/control.rs
+src/runtime/control/task9_tests.rs
+src/runtime/mod.rs
 tests/mcp_broker_child.rs
 .superpowers/sdd/2026-08-24-embedded-mcp-server/task-9-brief.md
 .superpowers/sdd/2026-08-24-embedded-mcp-server/task-9-report.md
@@ -52,6 +58,22 @@ cargo test mcp::broker --all-features
 cargo test --test mcp_broker_child --all-features
 ```
 
+## Implementation notes
+
+- Added strict wait milestones, timeout normalization, request/result consistency, and compact metadata result conversion.
+- Added the private `WaitForCapture` operation/result with strict wire decoding, operation identity checks, and an isolated 330-second deadline cap.
+- Injected the publisher-owned capture change feed into the runtime control service and implemented subscribe-before-query initial matching, bounded pending-sequence state, changed-sequence-only rechecks, successful unmatched timeout, typed cancellation/removal/materialization/feed-gap failures, and four-worker admission release before feed sleep.
+- Added exact-run public MCP routing, closed schemas, fixed absolute call deadlines, generation-replacement conflict conversion without retargeting, and the annotated `wait_for_capture` tool while keeping `get_capture` private.
+- Wrapped the broker server transport so transport EOF cancels the same rmcp service token before shutdown draining; this propagates disconnect cancellation to in-flight request contexts without polling.
+- Corrected the child schema test to resolve valid local Schemars `$ref` nodes before checking required selector fields and milestone enums.
+
+## Initial Main GREEN evidence
+
+- `cargo test wait_for_capture --all-features`: 23 passed.
+- Focused runtime control, private protocol, MCP broker, and broker-child suites pass: 35 + 26 + 30 + 2 tests.
+- `cargo test --all-targets --all-features`: 608 passed.
+- Strict Clippy has no Task 9 finding after removing the obsolete `ServiceExt` import; the command remains non-zero only for deliberately staged later-task and pre-existing warnings.
+
 ## Completion
 
-Status: `RED — implementation pending`
+Status: `GREEN — review pending`

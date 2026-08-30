@@ -10,15 +10,19 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{
         router::tool::ToolRouter,
         tool::schema_for_type,
         wrapper::{Json, Parameters},
     },
     model::{ErrorCode, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
-    service::RequestContext,
+    service::{
+        RequestContext, RunningService, RxJsonRpcMessage, ServerInitializeError, ServiceRole,
+        TxJsonRpcMessage,
+    },
     tool, tool_handler, tool_router,
+    transport::{IntoTransport, Transport},
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -28,6 +32,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    control::normalize_wait_timeout_ms,
     control_rpc::{
         client::ControlRpcClient,
         protocol::{
@@ -35,13 +40,15 @@ use crate::{
             RPC_VERSION,
         },
     },
+    instance::RunId,
     instance_registry::{DiscoveryDiagnostic, InstanceDescriptor, RegistryScan, RegistryScanner},
 };
 
 use super::{
     capture::{
         SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
-        SetRecordingEnabledResult, recording_result, search_result,
+        SetRecordingEnabledResult, WaitForCaptureInput, WaitForCaptureResult, recording_result,
+        search_result, wait_result,
     },
     schema::{
         BrokerLimits, BrokerStatusResult, BrokerVersions, DiscoverySummary, GetStatusInput,
@@ -270,6 +277,67 @@ where
     }
 }
 
+async fn validate_public_wait_input(
+    input: WaitForCaptureInput,
+    permit: PublicCallPermit,
+    deadline: Instant,
+    cancelled: CancellationToken,
+) -> Result<(WaitForCaptureInput, PublicCallPermit), ControlError> {
+    let worker = tokio::task::spawn_blocking(move || (permit, input.normalize()));
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            Err(ControlError::cancelled("capture wait validation cancelled"))
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            Err(ControlError::deadline_exceeded(
+                "capture wait validation deadline elapsed",
+            ))
+        }
+        result = worker => {
+            let (permit, input) = result
+                .map_err(|_| ControlError::internal("capture wait validation worker failed"))?;
+            input.map(|input| (input, permit))
+        }
+    }
+}
+
+struct DisconnectCancellingTransport<T> {
+    inner: T,
+    cancelled: CancellationToken,
+}
+
+impl<R, T> Transport<R> for DisconnectCancellingTransport<T>
+where
+    R: ServiceRole,
+    T: Transport<R>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<R>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<R>>> + Send {
+        let cancelled = self.cancelled.clone();
+        let receive = self.inner.receive();
+        async move {
+            let message = receive.await;
+            if message.is_none() {
+                cancelled.cancel();
+            }
+            message
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Broker {
     tool_router: ToolRouter<Self>,
@@ -280,6 +348,24 @@ pub(crate) struct Broker {
     probe_admission: Arc<Semaphore>,
     scan_admission: Arc<Semaphore>,
     telemetry: Arc<BrokerTelemetry>,
+}
+
+impl Broker {
+    pub(crate) async fn serve<T, E, A>(
+        self,
+        transport: T,
+    ) -> Result<RunningService<RoleServer, Self>, ServerInitializeError>
+    where
+        T: IntoTransport<RoleServer, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let cancelled = CancellationToken::new();
+        let transport = DisconnectCancellingTransport {
+            inner: transport.into_transport(),
+            cancelled: cancelled.clone(),
+        };
+        ServiceExt::serve_with_ct(self, transport, cancelled).await
+    }
 }
 
 impl std::fmt::Debug for Broker {
@@ -835,6 +921,101 @@ impl Broker {
         search_result(result)
     }
 
+    pub(crate) async fn wait_for_capture_impl(
+        &self,
+        input: WaitForCaptureInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<WaitForCaptureResult, McpDomainError> {
+        let endpoint = input.instance.proxy_endpoint;
+        let requested_run_id = input.instance.run_id.clone();
+        let resolved = self
+            .resolve_with_client(
+                input.selector(),
+                SelectorRequirement::Wait,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let dispatch = self.probe.call(
+            &resolved.descriptor,
+            input.operation(),
+            client,
+            deadline,
+            cancelled.clone(),
+        );
+        tokio::pin!(dispatch);
+        let result = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                return Err(ControlError::cancelled("capture wait dispatch cancelled"));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(ControlError::deadline_exceeded(
+                    "capture wait dispatch deadline elapsed",
+                ));
+            }
+            result = &mut dispatch => result,
+        };
+        match result {
+            Ok(result) => wait_result(result),
+            Err(error)
+                if !cancelled.is_cancelled()
+                    && matches!(
+                        error.code,
+                        ControlErrorCode::InstanceUnavailable
+                            | ControlErrorCode::InstanceNotFound
+                            | ControlErrorCode::ServiceUnavailable
+                            | ControlErrorCode::Cancelled
+                    ) =>
+            {
+                if let Some(conflict) = self
+                    .replacement_generation_conflict(
+                        endpoint,
+                        &requested_run_id,
+                        deadline,
+                        cancelled,
+                    )
+                    .await
+                {
+                    Err(conflict)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn replacement_generation_conflict(
+        &self,
+        endpoint: SocketAddr,
+        requested_run_id: &RunId,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Option<ControlError> {
+        if cancelled.is_cancelled() {
+            return None;
+        }
+        let scan = self.scan(Some(endpoint), deadline, cancelled).await.ok()?;
+        let current = scan
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.run_id() != requested_run_id)?;
+        Some(ControlError::new(
+            ControlErrorCode::InstanceGenerationConflict,
+            "selected endpoint was replaced during capture wait",
+            false,
+            json!({
+                "proxy_endpoint": endpoint,
+                "requested_run_id": requested_run_id,
+                "current_run_id": current.run_id(),
+            }),
+        ))
+    }
+
     async fn get_broker_status_impl(
         &self,
         client: DeclaredClient,
@@ -1001,6 +1182,36 @@ impl Broker {
             .map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
         self.search_captures_impl(input, client, deadline, cancelled)
+            .await
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "wait_for_capture",
+        description = "Wait on one exact run for request_seen, response_started, or exchange_terminal capture metadata for at most five minutes; a normal timeout returns an unmatched result",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn wait_for_capture(
+        &self,
+        Parameters(input): Parameters<WaitForCaptureInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<WaitForCaptureResult>, ErrorData> {
+        let started = Instant::now();
+        let timeout_ms = normalize_wait_timeout_ms(input.timeout_ms).map_err(to_mcp_error)?;
+        let deadline = started + Duration::from_millis(timeout_ms) + ORDINARY_DEADLINE;
+        let call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let cancelled = context.ct.clone();
+        let (input, _call) = validate_public_wait_input(input, call, deadline, cancelled.clone())
+            .await
+            .map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.wait_for_capture_impl(input, client, deadline, cancelled)
             .await
             .map(Json)
             .map_err(to_mcp_error)

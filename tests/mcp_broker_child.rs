@@ -122,13 +122,21 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
         .expect("wait required fields");
     assert!(required.contains(&json!("instance")));
     assert!(required.contains(&json!("milestone")));
-    let instance_required = wait.input_schema["properties"]["instance"]["required"]
+    let instance_schema = resolve_local_schema(
+        wait.input_schema.as_ref(),
+        &wait.input_schema["properties"]["instance"],
+    );
+    let instance_required = instance_schema["required"]
         .as_array()
         .expect("wait instance required fields");
     assert!(instance_required.contains(&json!("proxy_endpoint")));
     assert!(instance_required.contains(&json!("run_id")));
+    let milestone_schema = resolve_local_schema(
+        wait.input_schema.as_ref(),
+        &wait.input_schema["properties"]["milestone"],
+    );
     assert_eq!(
-        wait.input_schema["properties"]["milestone"]["enum"],
+        milestone_schema["enum"],
         json!(["request_seen", "response_started", "exchange_terminal"])
     );
     assert_eq!(
@@ -217,6 +225,24 @@ fn tool_json(result: &rmcp::model::CallToolResult) -> Result<Value> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("tool result did not contain structured JSON or JSON text"))?;
     serde_json::from_str(text).context("tool result text was not JSON")
+}
+
+fn resolve_local_schema<'a>(
+    root: &'a serde_json::Map<String, Value>,
+    schema: &'a Value,
+) -> &'a Value {
+    let mut resolved = schema;
+    while let Some(reference) = resolved.get("$ref").and_then(Value::as_str) {
+        let definition = reference
+            .strip_prefix("#/$defs/")
+            .expect("schema reference must be local");
+        resolved = root
+            .get("$defs")
+            .and_then(Value::as_object)
+            .and_then(|definitions| definitions.get(definition))
+            .expect("referenced local schema definition");
+    }
+    resolved
 }
 
 #[tokio::test]

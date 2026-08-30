@@ -31,6 +31,7 @@ impl ControlRpcClient {
         let request_id = next_request_id();
         let remaining = deadline.saturating_duration_since(Instant::now());
         let deadline_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
+        let expected_kind = operation.kind();
         let request = RequestEnvelope::new(
             request_id.clone(),
             descriptor.run_id().clone(),
@@ -65,7 +66,7 @@ impl ControlRpcClient {
             })?;
             let response =
                 read_json_frame::<ResponseEnvelope, _>(&mut stream, RESPONSE_MAX_BYTES).await?;
-            response.validate(&request_id, &expected_scope)
+            response.validate(&request_id, &expected_scope, expected_kind)
         };
 
         tokio::select! {

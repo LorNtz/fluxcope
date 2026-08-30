@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fmt,
     future::Future,
     io,
@@ -17,13 +18,19 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    capture::{
+        CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind, CaptureSequence,
+        CaptureSnapshot,
+    },
     control::{
-        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
+        CaptureMilestone, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
+        WaitForCaptureRequest, WaitForCaptureResult,
         capture_query::{
             CAPTURE_SEARCH_BATCH_SIZE, CAPTURE_SEARCH_PAGE_JSON_BUDGET, CaptureDetail,
             CaptureQuery, CaptureSearchCursor, CaptureSearchPage, CompactCapture,
             CompiledCaptureQuery, match_capture_page_with_budget, normalize_capture_page_limit,
         },
+        normalize_wait_timeout_ms,
     },
     control_rpc::{
         client::ControlRpcClient,
@@ -178,6 +185,16 @@ impl CaptureSearchAdmission {
             query: Arc::new(compiled?),
         })
     }
+    async fn admit_compiled(
+        &self,
+        query: Arc<CompiledCaptureQuery>,
+        cancelled: &CancellationToken,
+    ) -> Result<ActiveCaptureSearch, ControlError> {
+        Ok(ActiveCaptureSearch {
+            permit: Some(self.acquire(cancelled).await?),
+            query,
+        })
+    }
 
     #[cfg(test)]
     pub(super) fn available_permits_for_test(&self) -> usize {
@@ -186,6 +203,9 @@ impl CaptureSearchAdmission {
 }
 
 impl ActiveCaptureSearch {
+    fn compiled_query(&self) -> Arc<CompiledCaptureQuery> {
+        Arc::clone(&self.query)
+    }
     pub(super) async fn run_blocking<T, F>(
         &mut self,
         cancelled: CancellationToken,
@@ -268,17 +288,155 @@ impl DetailMaterializationAdmission {
     }
 }
 
+struct WaitBatchInspection {
+    capture: Option<CompactCapture>,
+    pending: Vec<CaptureSequence>,
+}
+
+enum WaitSnapshotInspection {
+    Matched(CompactCapture),
+    Pending,
+    Ignore,
+}
+
+fn inspect_wait_snapshot(
+    snapshot: &CaptureSnapshot,
+    query: &CompiledCaptureQuery,
+    milestone: CaptureMilestone,
+    cancelled: &CancellationToken,
+) -> Result<WaitSnapshotInspection, ControlError> {
+    if !query.matches(snapshot, cancelled)? {
+        return Ok(WaitSnapshotInspection::Ignore);
+    }
+    if milestone.is_satisfied_by(snapshot) {
+        return Ok(WaitSnapshotInspection::Matched(
+            CompactCapture::from_snapshot(snapshot),
+        ));
+    }
+    if CaptureMilestone::ExchangeTerminal.is_satisfied_by(snapshot) {
+        return Ok(WaitSnapshotInspection::Ignore);
+    }
+    Ok(WaitSnapshotInspection::Pending)
+}
+
+fn inspect_wait_batch(
+    snapshots: &[CaptureSnapshot],
+    query: &CompiledCaptureQuery,
+    milestone: CaptureMilestone,
+    cancelled: &CancellationToken,
+) -> Result<WaitBatchInspection, ControlError> {
+    let mut pending = Vec::new();
+    for snapshot in snapshots {
+        match inspect_wait_snapshot(snapshot, query, milestone, cancelled)? {
+            WaitSnapshotInspection::Matched(capture) => {
+                return Ok(WaitBatchInspection {
+                    capture: Some(capture),
+                    pending,
+                });
+            }
+            WaitSnapshotInspection::Pending => pending.push(snapshot.sequence),
+            WaitSnapshotInspection::Ignore => {}
+        }
+    }
+    Ok(WaitBatchInspection {
+        capture: None,
+        pending,
+    })
+}
+
+async fn wait_step<T>(
+    future: impl Future<Output = Result<T, ControlError>>,
+    deadline: tokio::time::Instant,
+    cancelled: &CancellationToken,
+) -> Result<Option<T>, ControlError> {
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            Err(ControlError::cancelled("capture wait cancelled"))
+        }
+        _ = time::sleep_until(deadline) => Ok(None),
+        result = future => result.map(Some),
+    }
+}
+
+fn unmatched_wait(instance: InstanceScope) -> ControlResult {
+    ControlResult::WaitForCapture {
+        instance,
+        result: WaitForCaptureResult {
+            matched: false,
+            capture: None,
+        },
+    }
+}
+
+fn matched_wait(instance: InstanceScope, capture: CompactCapture) -> ControlResult {
+    ControlResult::WaitForCapture {
+        instance,
+        result: WaitForCaptureResult {
+            matched: true,
+            capture: Some(capture),
+        },
+    }
+}
+
+fn capture_change_lost(change: CaptureChange, message: &'static str) -> ControlError {
+    ControlError::new(
+        ControlErrorCode::CaptureNotFound,
+        message,
+        true,
+        serde_json::json!({
+            "capture_id": change.sequence,
+            "capture_revision": change.revision,
+        }),
+    )
+}
+
+fn feed_gap(error: CaptureChangeError) -> ControlError {
+    let CaptureChangeError::Gap {
+        expected_epoch,
+        oldest_available_epoch,
+    } = error;
+    ControlError::new(
+        ControlErrorCode::ServiceUnavailable,
+        "capture change feed history was exceeded",
+        true,
+        serde_json::json!({
+            "expected_epoch": expected_epoch,
+            "oldest_available_epoch": oldest_available_epoch,
+        }),
+    )
+}
+
+#[derive(Clone)]
+pub(super) struct ControlServiceContext {
+    pub(super) runtime: RuntimeControlClient,
+    pub(super) capture_changes: CaptureChangeFeed,
+}
+
+#[cfg(test)]
+impl From<RuntimeControlClient> for ControlServiceContext {
+    fn from(runtime: RuntimeControlClient) -> Self {
+        Self {
+            runtime,
+            capture_changes: CaptureChangeFeed::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RuntimeControlHandler {
     runtime: RuntimeControlClient,
+    capture_changes: CaptureChangeFeed,
     capture_searches: Arc<CaptureSearchAdmission>,
     capture_details: Arc<DetailMaterializationAdmission>,
 }
 
 impl RuntimeControlHandler {
-    pub(super) fn new(runtime: RuntimeControlClient) -> Self {
+    pub(super) fn new(context: impl Into<ControlServiceContext>) -> Self {
+        let context = context.into();
         Self {
-            runtime,
+            runtime: context.runtime,
+            capture_changes: context.capture_changes,
             capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
             capture_details: Arc::new(DetailMaterializationAdmission::new(4)),
         }
@@ -380,6 +538,169 @@ impl RuntimeControlHandler {
             cursor = Some(next_cursor);
         }
     }
+
+    async fn wait_for_capture(
+        runtime: RuntimeControlClient,
+        capture_changes: CaptureChangeFeed,
+        admission: Arc<CaptureSearchAdmission>,
+        request: WaitForCaptureRequest,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        let WaitForCaptureRequest {
+            query,
+            milestone,
+            timeout_ms,
+        } = request;
+        let timeout_ms = normalize_wait_timeout_ms(timeout_ms)?;
+        let mut changes = capture_changes.subscribe();
+        let active = admission.admit(query, cancelled.clone()).await?;
+        let query = active.compiled_query();
+        drop(active);
+        let instance = Self::instance_snapshot(&runtime, &cancelled)
+            .await?
+            .instance;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut pending = HashSet::new();
+        let mut cursor = None;
+
+        loop {
+            let batch_request = runtime.request(
+                RuntimeRequest::GetCaptureSearchBatch {
+                    cursor,
+                    max_rows: CAPTURE_SEARCH_BATCH_SIZE,
+                },
+                cancelled.clone(),
+            );
+            let Some(batch) = wait_step(batch_request, deadline, &cancelled).await? else {
+                return Ok(unmatched_wait(instance));
+            };
+            let batch = match batch {
+                RuntimeReply::CaptureSearchBatch(batch) => batch,
+                _ => {
+                    return Err(ControlError::internal(
+                        "runtime returned an unexpected capture batch reply",
+                    ));
+                }
+            };
+            if batch.snapshots.is_empty() {
+                break;
+            }
+            let next_cursor = batch.next_cursor;
+            let admitted = admission.admit_compiled(Arc::clone(&query), &cancelled);
+            let Some(mut active) = wait_step(admitted, deadline, &cancelled).await? else {
+                return Ok(unmatched_wait(instance));
+            };
+            let worker_cancelled = cancelled.clone();
+            let inspection = active.run_blocking(cancelled.clone(), move |query| {
+                inspect_wait_batch(&batch.snapshots, &query, milestone, &worker_cancelled)
+            });
+            let Some(inspection) = wait_step(inspection, deadline, &cancelled).await? else {
+                return Ok(unmatched_wait(instance));
+            };
+            drop(active);
+            pending.extend(inspection.pending);
+            if let Some(capture) = inspection.capture {
+                return Ok(matched_wait(instance, capture));
+            }
+            let Some(next_cursor) = next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+
+        loop {
+            let change = tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => {
+                    return Err(ControlError::cancelled("capture wait cancelled"));
+                }
+                _ = time::sleep_until(deadline) => {
+                    return Ok(unmatched_wait(instance));
+                }
+                change = changes.recv() => change.map_err(feed_gap)?,
+            };
+
+            match change.kind {
+                CaptureChangeKind::RetentionEviction
+                | CaptureChangeKind::ExplicitDelete
+                | CaptureChangeKind::Clear => {
+                    if pending.remove(&change.sequence) {
+                        return Err(capture_change_lost(
+                            change,
+                            "matching capture was removed while waiting",
+                        ));
+                    }
+                }
+                CaptureChangeKind::Admitted | CaptureChangeKind::RecordUpdated => {
+                    let materialized = runtime.request(
+                        RuntimeRequest::GetCapture {
+                            capture_id: change.sequence,
+                            expected_revision: None,
+                        },
+                        cancelled.clone(),
+                    );
+                    let reply = match wait_step(materialized, deadline, &cancelled).await {
+                        Ok(Some(reply)) => reply,
+                        Ok(None) => return Ok(unmatched_wait(instance)),
+                        Err(error) if error.code == ControlErrorCode::CaptureNotFound => {
+                            return Err(capture_change_lost(
+                                change,
+                                "changed capture could not be materialized",
+                            ));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let crate::control::CaptureSnapshotReply {
+                        instance: materialized_instance,
+                        snapshot,
+                    } = match reply {
+                        RuntimeReply::CaptureSnapshot(snapshot) => *snapshot,
+                        _ => {
+                            return Err(ControlError::internal(
+                                "runtime returned an unexpected capture snapshot reply",
+                            ));
+                        }
+                    };
+                    if materialized_instance != instance {
+                        return Err(ControlError::new(
+                            ControlErrorCode::InstanceGenerationConflict,
+                            "capture wait materialized another instance generation",
+                            false,
+                            serde_json::json!({
+                                "expected_identity": instance,
+                                "received_identity": materialized_instance,
+                            }),
+                        ));
+                    }
+
+                    let admitted = admission.admit_compiled(Arc::clone(&query), &cancelled);
+                    let Some(mut active) = wait_step(admitted, deadline, &cancelled).await? else {
+                        return Ok(unmatched_wait(instance));
+                    };
+                    let worker_cancelled = cancelled.clone();
+                    let inspection = active.run_blocking(cancelled.clone(), move |query| {
+                        inspect_wait_snapshot(&snapshot, &query, milestone, &worker_cancelled)
+                    });
+                    let Some(inspection) = wait_step(inspection, deadline, &cancelled).await?
+                    else {
+                        return Ok(unmatched_wait(instance));
+                    };
+                    drop(active);
+                    match inspection {
+                        WaitSnapshotInspection::Matched(capture) => {
+                            return Ok(matched_wait(instance, capture));
+                        }
+                        WaitSnapshotInspection::Pending => {
+                            pending.insert(change.sequence);
+                        }
+                        WaitSnapshotInspection::Ignore => {
+                            pending.remove(&change.sequence);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ControlRpcHandler for RuntimeControlHandler {
@@ -392,6 +713,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
         let runtime = self.runtime.clone();
         let capture_searches = Arc::clone(&self.capture_searches);
         let capture_details = Arc::clone(&self.capture_details);
+        let capture_changes = self.capture_changes.clone();
         async move {
             match operation {
                 ControlOperation::DescribeInstance => {
@@ -496,6 +818,16 @@ impl ControlRpcHandler for RuntimeControlHandler {
                         instance,
                         capture: Box::new(capture),
                     })
+                }
+                ControlOperation::WaitForCapture(request) => {
+                    Self::wait_for_capture(
+                        runtime,
+                        capture_changes,
+                        capture_searches,
+                        *request,
+                        cancelled,
+                    )
+                    .await
                 }
             }
         }

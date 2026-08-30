@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
-pub(crate) use change::{CaptureChangeError, CaptureChangeFeed, CaptureChangeKind};
+pub(crate) use change::{CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind};
 pub(crate) use decode::{
     DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
     DecodeResult, start_decode_service,

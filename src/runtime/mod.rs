@@ -49,7 +49,8 @@ use crate::{
 };
 #[cfg(unix)]
 use control::{
-    ControlRpcDescriptorProbe, PrivateControlStartup, RuntimeControlHandler, RuntimeGateway,
+    ControlRpcDescriptorProbe, ControlServiceContext, PrivateControlStartup, RuntimeControlHandler,
+    RuntimeGateway,
 };
 use event_loop::{AppRuntime, Tui};
 use policy::RuntimePolicy;
@@ -129,6 +130,8 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let capture_publisher = CapturePublisher::new(capture_tx, policy.capture.clone());
     let capture_metrics = capture_publisher.metrics();
     let capture_dirty = capture_publisher.dirty_signal();
+    #[cfg(unix)]
+    let capture_changes = capture_publisher.change_feed();
     let body_tasks = BodyTaskTracker::new(shutdown.child_token());
     let decode = start_decode_service(policy.decode.clone(), shutdown.child_token());
     let request_search = start_request_search_service(shutdown.child_token());
@@ -186,7 +189,13 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     #[cfg(unix)]
     let (control_rx, mut running_control) = if let Some(prepared) = prepared_control {
         let (client, receiver) = RuntimeGateway::new(64);
-        match prepared.start(RuntimeControlHandler::new(client), shutdown.child_token()) {
+        match prepared.start(
+            RuntimeControlHandler::new(ControlServiceContext {
+                runtime: client,
+                capture_changes,
+            }),
+            shutdown.child_token(),
+        ) {
             Ok(running) => (Some(receiver), Some(running)),
             Err(error) => {
                 shutdown.cancel();

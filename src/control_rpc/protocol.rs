@@ -1,6 +1,9 @@
 use crate::{
     capture::CaptureSequence,
-    control::capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
+    control::{
+        WaitForCaptureRequest, WaitForCaptureResult,
+        capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
+    },
     instance::RunId,
     settings::{ConfigMode, PersistenceMode},
 };
@@ -14,6 +17,7 @@ use std::{
 pub(crate) const RPC_VERSION: u16 = 1;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const ORDINARY_MAX_DEADLINE: Duration = Duration::from_secs(30);
+const WAIT_MAX_DEADLINE: Duration = Duration::from_secs(330);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +34,7 @@ pub(crate) enum ControlOperationKind {
     SetRecordingEnabled,
     SearchCaptures,
     GetCapture,
+    WaitForCapture,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -69,6 +74,20 @@ pub(crate) enum ControlOperation {
         capture_id: CaptureSequence,
         expected_revision: Option<u64>,
     },
+    WaitForCapture(Box<WaitForCaptureRequest>),
+}
+
+impl ControlOperation {
+    pub(crate) fn kind(&self) -> ControlOperationKind {
+        match self {
+            Self::DescribeInstance => ControlOperationKind::DescribeInstance,
+            Self::GetStatus => ControlOperationKind::GetStatus,
+            Self::SetRecordingEnabled { .. } => ControlOperationKind::SetRecordingEnabled,
+            Self::SearchCaptures { .. } => ControlOperationKind::SearchCaptures,
+            Self::GetCapture { .. } => ControlOperationKind::GetCapture,
+            Self::WaitForCapture(_) => ControlOperationKind::WaitForCapture,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -143,6 +162,11 @@ pub(crate) enum ControlResult {
         instance: InstanceScope,
         capture: Box<CaptureDetail>,
     },
+    WaitForCapture {
+        instance: InstanceScope,
+        #[serde(flatten)]
+        result: WaitForCaptureResult,
+    },
 }
 
 impl ControlResult {
@@ -152,7 +176,19 @@ impl ControlResult {
             | Self::GetStatus { instance, .. }
             | Self::SetRecordingEnabled { instance, .. }
             | Self::SearchCaptures { instance, .. }
-            | Self::GetCapture { instance, .. } => instance,
+            | Self::GetCapture { instance, .. }
+            | Self::WaitForCapture { instance, .. } => instance,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> ControlOperationKind {
+        match self {
+            Self::DescribeInstance { .. } => ControlOperationKind::DescribeInstance,
+            Self::GetStatus { .. } => ControlOperationKind::GetStatus,
+            Self::SetRecordingEnabled { .. } => ControlOperationKind::SetRecordingEnabled,
+            Self::SearchCaptures { .. } => ControlOperationKind::SearchCaptures,
+            Self::GetCapture { .. } => ControlOperationKind::GetCapture,
+            Self::WaitForCapture { .. } => ControlOperationKind::WaitForCapture,
         }
     }
 }
@@ -393,6 +429,10 @@ impl RequestEnvelope {
                     expected_revision,
                 })?,
             ),
+            ControlOperation::WaitForCapture(request) => (
+                ControlOperationKind::WaitForCapture,
+                serialize_arguments(&*request)?,
+            ),
         };
         Ok(Self {
             protocol_version: RPC_VERSION,
@@ -407,6 +447,7 @@ impl RequestEnvelope {
 
     pub(crate) fn clamped_deadline(&self, received_at: Instant) -> Instant {
         let maximum = match self.operation {
+            ControlOperationKind::WaitForCapture => WAIT_MAX_DEADLINE,
             ControlOperationKind::DescribeInstance
             | ControlOperationKind::GetStatus
             | ControlOperationKind::SetRecordingEnabled
@@ -465,6 +506,9 @@ impl RequestEnvelope {
                     expected_revision: arguments.expected_revision,
                 }
             }
+            ControlOperationKind::WaitForCapture => ControlOperation::WaitForCapture(Box::new(
+                parse_arguments::<WaitForCaptureRequest>(&self.arguments)?,
+            )),
         };
         let deadline = self.clamped_deadline(received_at);
         Ok(ControlRequest {
@@ -500,6 +544,7 @@ impl ResponseEnvelope {
         self,
         expected_request_id: &str,
         expected_scope: &InstanceScope,
+        expected_kind: ControlOperationKind,
     ) -> Result<ControlResult, ControlError> {
         if self.protocol_version != RPC_VERSION {
             return Err(ControlError::new(
@@ -520,6 +565,18 @@ impl ResponseEnvelope {
         }
         match (self.result, self.error) {
             (Some(result), None) => {
+                if result.kind() != expected_kind {
+                    return Err(ControlError::invalid_argument(
+                        "private RPC response operation does not match the request",
+                    ));
+                }
+                if let ControlResult::WaitForCapture { result, .. } = &result
+                    && result.matched != result.capture.is_some()
+                {
+                    return Err(ControlError::invalid_argument(
+                        "wait result matched and capture fields must agree",
+                    ));
+                }
                 if result.instance_scope() != expected_scope {
                     return Err(ControlError::new(
                         ControlErrorCode::InstanceGenerationConflict,
@@ -552,8 +609,13 @@ pub(crate) fn decode_response_payload(
     payload: &[u8],
     expected_request_id: &str,
     expected_scope: &InstanceScope,
+    expected_kind: ControlOperationKind,
 ) -> Result<ControlResult, ControlError> {
-    strict_from_slice::<ResponseEnvelope>(payload)?.validate(expected_request_id, expected_scope)
+    strict_from_slice::<ResponseEnvelope>(payload)?.validate(
+        expected_request_id,
+        expected_scope,
+        expected_kind,
+    )
 }
 
 pub(crate) fn strict_from_slice<T>(payload: &[u8]) -> Result<T, ControlError>

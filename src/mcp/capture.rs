@@ -2,8 +2,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    control::capture_query::{
-        CaptureQuery, CaptureSearchCursor, CompactCapture, normalize_capture_page_limit,
+    control::{
+        CaptureMilestone, WaitForCaptureRequest,
+        WaitForCaptureResult as DomainWaitForCaptureResult,
+        capture_query::{
+            CaptureQuery, CaptureSearchCursor, CompactCapture, normalize_capture_page_limit,
+        },
+        normalize_wait_timeout_ms,
     },
     control_rpc::{
         framing::REQUEST_MAX_BYTES,
@@ -91,6 +96,47 @@ pub(crate) struct SearchCapturesResult {
     pub(crate) captures: Vec<CompactCapture>,
     pub(crate) next_cursor: Option<CaptureSearchCursor>,
 }
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitForCaptureInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    #[serde(default)]
+    #[schemars(default)]
+    pub(crate) query: CaptureQuery,
+    pub(crate) milestone: CaptureMilestone,
+    #[schemars(range(min = 1, max = 300_000))]
+    pub(crate) timeout_ms: Option<u64>,
+}
+
+impl WaitForCaptureInput {
+    pub(crate) fn normalize(mut self) -> Result<Self, ControlError> {
+        validate_public_input_size(&self)?;
+        self.query.validate()?;
+        self.timeout_ms = Some(normalize_wait_timeout_ms(self.timeout_ms)?);
+        Ok(self)
+    }
+
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        self.instance.selector()
+    }
+
+    pub(crate) fn operation(&self) -> ControlOperation {
+        ControlOperation::WaitForCapture(Box::new(WaitForCaptureRequest {
+            query: self.query.clone(),
+            milestone: self.milestone,
+            timeout_ms: self.timeout_ms,
+        }))
+    }
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitForCaptureResult {
+    pub(crate) instance: InstanceSelector,
+    pub(crate) matched: bool,
+    #[schemars(required)]
+    pub(crate) capture: Option<CompactCapture>,
+}
 
 fn validate_public_input_size(input: &impl Serialize) -> Result<(), ControlError> {
     #[derive(Default)]
@@ -162,6 +208,28 @@ pub(crate) fn search_result(result: ControlResult) -> Result<SearchCapturesResul
         }),
         _ => Err(ControlError::internal(
             "private RPC returned an unexpected capture search result",
+        )),
+    }
+}
+
+pub(crate) fn wait_result(result: ControlResult) -> Result<WaitForCaptureResult, ControlError> {
+    match result {
+        ControlResult::WaitForCapture {
+            instance,
+            result: DomainWaitForCaptureResult { matched, capture },
+        } if matched == capture.is_some() => Ok(WaitForCaptureResult {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            matched,
+            capture,
+        }),
+        ControlResult::WaitForCapture { .. } => Err(ControlError::internal(
+            "private RPC returned an inconsistent capture wait result",
+        )),
+        _ => Err(ControlError::internal(
+            "private RPC returned an unexpected capture wait result",
         )),
     }
 }

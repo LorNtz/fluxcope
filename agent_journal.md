@@ -38,3 +38,8 @@ Date: 2026/09/17 10:40
 Date: 2026/09/17 10:40
 
 - Merged capture snapshot/timing support without downgrading the modern HTTP/TLS stack. Kept Hyper 1 streaming channel exports together with MCP capture-change feed exports; added the bytes dependency required by capture snapshots.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:40
+
+- Combined capture milestone notification exports with master Hyper 1 body-channel exports while replaying wait_for_capture.

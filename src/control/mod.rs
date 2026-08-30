@@ -1,12 +1,15 @@
 pub(crate) mod capture_query;
 
 use crate::{
-    capture::{CaptureSequence, CaptureSnapshot},
-    control::capture_query::{CaptureSearchBatch, CaptureSearchCursor},
-    control_rpc::protocol::InstanceScope,
+    capture::{BodyStreamState, CaptureSequence, CaptureSnapshot},
+    control::capture_query::{
+        CaptureQuery, CaptureSearchBatch, CaptureSearchCursor, CompactCapture,
+    },
+    control_rpc::protocol::{ControlError, InstanceScope},
     settings::{ConfigMode, PersistenceMode},
 };
-use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AppControlSummary {
@@ -36,6 +39,73 @@ pub(crate) struct RecordingUpdate {
 pub(crate) struct CaptureSnapshotReply {
     pub(crate) instance: InstanceScope,
     pub(crate) snapshot: CaptureSnapshot,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureMilestone {
+    RequestSeen,
+    ResponseStarted,
+    ExchangeTerminal,
+}
+
+impl CaptureMilestone {
+    pub(crate) fn is_satisfied_by(self, snapshot: &CaptureSnapshot) -> bool {
+        match self {
+            Self::RequestSeen => true,
+            Self::ResponseStarted => snapshot.timing.time_to_response.is_some(),
+            Self::ExchangeTerminal => {
+                matches!(
+                    snapshot.request_body.status.stream,
+                    BodyStreamState::Complete
+                        | BodyStreamState::Failed
+                        | BodyStreamState::Cancelled
+                ) && matches!(
+                    snapshot.response_body.status.stream,
+                    BodyStreamState::Complete
+                        | BodyStreamState::Failed
+                        | BodyStreamState::Cancelled
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitForCaptureRequest {
+    pub(crate) query: CaptureQuery,
+    pub(crate) milestone: CaptureMilestone,
+    #[serde(default)]
+    pub(crate) timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitForCaptureResult {
+    pub(crate) matched: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    #[schemars(required)]
+    pub(crate) capture: Option<CompactCapture>,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const MAX_WAIT_TIMEOUT_MS: u64 = 300_000;
+
+pub(crate) fn normalize_wait_timeout_ms(timeout_ms: Option<u64>) -> Result<u64, ControlError> {
+    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    if timeout_ms == 0 {
+        return Err(ControlError::invalid_argument(
+            "wait_for_capture timeout_ms must be greater than zero",
+        ));
+    }
+    Ok(timeout_ms.min(MAX_WAIT_TIMEOUT_MS))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
