@@ -84,6 +84,7 @@ cargo test --test mcp_broker_child --all-features
 - Kept the per-sequence map inside the blocking matcher instead of allocating a second per-batch state vector.
 - Added normal-timeout cancellation ownership so an in-flight or queued runtime command is cancelled when the wait returns unmatched.
 - Boxed the compact matched capture inside private wait state/result types; JSON wire shapes are unchanged and Task 9 no longer adds large-enum Clippy findings.
+- Review-fix Design and Performance re-reviews: PASS with no Critical or Important finding. The design reviewer’s optional test-only suggestion was adopted by replacing yield-based negative assertions with ordered cross-sequence feed events.
 
 ## Review-fix Main evidence
 
@@ -92,7 +93,8 @@ cargo test --test mcp_broker_child --all-features
 - `cargo test --all-targets --all-features`: 612 passed.
 - `cargo fmt --all -- --check`: passed.
 - Strict Clippy reports no Task 9 finding; it remains non-zero only for deliberately staged later-task and pre-existing unrelated warnings.
+- Final review-fix Design and Performance re-reviews both passed.
 
 ## Completion
 
-Status: `GREEN - review-fix re-review pending`
+Status: `GREEN - review clean`

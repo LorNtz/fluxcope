@@ -553,13 +553,26 @@ async fn wait_for_capture_initial_snapshot_watermark_skips_queued_older_revision
             other => panic!("unexpected initial command: {other:?}"),
         }
     }
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        receiver.try_recv().is_err(),
-        "queued revisions covered by the initial snapshot must not rematerialize"
+    feed.publish(CaptureSequence::new(53), 1, CaptureChangeKind::Admitted);
+    let next = receiver.recv().await.expect("next changed sequence");
+    assert_eq!(
+        next.request,
+        RuntimeRequest::GetCapture {
+            capture_id: CaptureSequence::new(53),
+            expected_revision: None,
+        },
+        "queued revisions covered by the initial snapshot must be skipped"
     );
+    let mut next_pending = pending_snapshot(53);
+    next_pending.revision = 1;
+    next.reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: instance.clone(),
+                snapshot: next_pending,
+            },
+        ))))
+        .expect("next capture reply receiver");
 
     feed.publish(
         CaptureSequence::new(52),
@@ -634,13 +647,26 @@ async fn wait_for_capture_latest_materialization_collapses_queued_revisions() {
             },
         ))))
         .expect("capture reply receiver");
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        receiver.try_recv().is_err(),
-        "materializing revision 3 must collapse queued revisions 2 and 3"
+    feed.publish(CaptureSequence::new(62), 1, CaptureChangeKind::Admitted);
+    let next = receiver.recv().await.expect("next changed sequence");
+    assert_eq!(
+        next.request,
+        RuntimeRequest::GetCapture {
+            capture_id: CaptureSequence::new(62),
+            expected_revision: None,
+        },
+        "materializing revision 3 must skip queued revisions 2 and 3"
     );
+    let mut next_pending = pending_snapshot(62);
+    next_pending.revision = 1;
+    next.reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: instance.clone(),
+                snapshot: next_pending,
+            },
+        ))))
+        .expect("next capture reply receiver");
 
     feed.publish(
         CaptureSequence::new(61),
