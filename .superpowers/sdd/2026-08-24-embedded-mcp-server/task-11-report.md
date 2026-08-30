@@ -107,3 +107,51 @@ Main confirmed strict Clippy passes. The full suite then reached 694 tests befor
 ## Review
 
 Design/maintainability and performance/memory task review is pending. The remaining scheduler-structure concern is intentionally submitted to review: Task 11 uses the same bounded primitives and active lease but has a sibling structured-inspection orchestration method.
+
+## Design/performance review fix pass
+
+Six review findings were addressed in `src/control/json_walk.rs` without changing the Task 10 scheduler or MCP contracts:
+
+- Scalar `scalar_encoded_bytes` now comes from the parser's exact consumed source offsets and raw token boundaries, so original string escapes and number spellings are counted rather than reconstructed from decoded values.
+- Pattern matching now advances one incremental prefix state per observed value. It no longer reparses the complete pointer or rescans the complete pattern at each event, and exact non-matching branches prune observer work.
+- Matched-object summaries are tied to the current object depth and record direct children only; nested descendants cannot leak into an ancestor summary.
+- Every retained path/hint/key is charged using its JSON-escaped wire length plus conservative structural overhead. A final exact serialized-size enforcement pass evicts bounded collections while incrementing the corresponding omitted counter, guaranteeing the 64 KiB result ceiling.
+- Traversal pointer state is capped at 32 KiB, below the result ceiling, and returns a stable `resource_limit` error before an adversarial key can grow retained path state beyond that limit.
+- Added focused tests for exact escaped-string/number/boolean/null token spans, maximum-depth pruned probing, direct-child summaries, JSON-escaped output budgeting, miss-hint churn, and traversal path limits.
+
+No command was run in this delegated fix pass, per the task constraint.
+
+### Remaining concern from this review pass
+
+`json-event-parser` 0.2.3's low-level slice API exposes an event only after scanning a complete token and does not preserve a partial token across independently discarded fixed-size slices. The walker checks cancellation before every parser event and during its own source/path scans, but one parser call can still scan one complete scalar token (bounded by the 16 MiB decoded-input ceiling) before the next cancellation check. A fixed-quantum cancellation guarantee inside a single very large scalar therefore remains incomplete; fixing it cleanly requires either a cancellation-aware buffered `Read` adapter plus independent exact raw-token position tracking, or an upstream parser API that exposes resumable token scanning and consumed offsets together.
+
+## Round-1 compile repair
+
+Main's first compile attempt after the six-finding review remediation stopped on the non-ASCII `é` inside a raw byte string test literal. The exact-token-span fixture now uses a UTF-8 raw string followed by `.as_bytes()`, preserving the original JSON source bytes and the asserted encoded token sizes: 6 bytes for `"é\n"`, 8 for `-1.20e+3`, 5 for `false`, and 4 for `null`.
+
+The surrounding six new tests and their corresponding walker, incremental pattern-state, direct-child summary, wire-budget, path-limit, and final-size-enforcement edits were inspected for analogous obvious syntax/type mistakes; none were found by source inspection. No command was run, per the delegated constraint. The fixed-quantum cancellation concern above remains unchanged.
+
+## Round-1 ownership and temporary-lifetime compile repair
+
+The nine diagnostics from Main's next compile were repaired at their shared sources without running commands:
+
+- `WalkPath<'a>` now derives `Clone` and `Copy`. Its three fields are immutable borrowed/scalar views (`&str`, `Option<&str>`, and `usize`), so copies are zero-cost bitwise view copies with no owned pointer allocation. This structurally resolves all eight move-after-use diagnostics across observer start/scalar/container and pattern-probe paths.
+- `append_pointer_segment` now binds its four-byte UTF-8 scratch array before selecting the encoded segment text. The borrowed `encode_utf8` result therefore cannot outlive its backing array, resolving the temporary-lifetime diagnostic while preserving cancellation and pointer-size checks.
+- The file's other `WalkPath` consumers and UTF-8 encoding sites were inspected. They share the same immutable view semantics, and there is no second temporary scratch-array site or path clone to change.
+
+All six review-finding fixes and their tests remain intact. No bounds, cancellation behavior, or event hot-path ownership model was weakened, and no command or commit was run per the delegated constraint.
+
+## Round-1 strict Clippy cleanup
+
+Main's strict Clippy rerun reported exactly two diagnostics in `src/control/json_walk.rs`. `WalkPath::to_owned(&self)` is now `WalkPath::into_owned(self)`, and all four call sites use the value-taking conversion. Since `WalkPath` is `Copy` and contains only borrowed/scalar views, consuming it is a zero-cost view copy; construction of the owned `JsonPointer` remains unchanged.
+
+The source-token whitespace scan now uses `scanned.is_multiple_of(32 * 1_024)` instead of a manual modulus comparison, preserving the same cancellation check cadence at exact 32 KiB multiples. No lint was suppressed, and no behavior, bound, or allocation policy changed. No command or commit was run per the delegated constraint.
+
+## Round-1 main verification
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo test control::json_walk --all-features`: 14 passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --all-targets --all-features`: 703 passed.
+
+Scoped design and performance re-review is pending. The disclosed one-token parser-call cancellation bound will be included explicitly in that re-review.

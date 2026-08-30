@@ -22,3 +22,4 @@ Task 9: fix round 1/5 (2 performance findings addressed, 0 open — search admis
 Task 9: complete (commits 8d3910a..e8cb5c0, design PASS, performance PASS, review clean)
 Task 10: complete (commits e8cb5c0..0713563; bounded raw/decoded paging, shared TUI/MCP body admission, revision-safe cache, canonical resources; focused body/decode/body-work/MCP/runtime/RPC/child 4+25+8+9+63+32+2, full 684; design PASS, performance PASS, review clean)
 Task 11: initial GREEN (streaming JSON field discovery/pattern probing; focused walker/MCP/broker/RPC/runtime/child 8+13+1+32+63+2, full 697; review pending)
+Task 11: fix round 1/5 implemented (six review findings addressed — borrowed paths, incremental pattern state, exact 64-KiB wire bound, observer-demanded raw token sizes, safe parser errors, exact escaped scalar sizes; focused walker 14, full 703; scoped re-review pending)

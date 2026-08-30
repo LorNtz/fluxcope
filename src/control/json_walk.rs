@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use json_event_parser::{JsonEvent, SliceJsonParser};
+use json_event_parser::{JsonEvent, LowLevelJsonParser};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use unicode_casefold::UnicodeCaseFold;
@@ -19,12 +19,11 @@ pub(crate) const MAX_JSON_INPUT_BYTES: usize = MAX_DECODED_CONTENT_BYTES;
 pub(crate) const MAX_JSON_DEPTH: usize = 512;
 pub(crate) const MAX_JSON_EXAMPLES: usize = 20;
 pub(crate) const MAX_JSON_HINTS: usize = 20;
-#[cfg(test)]
 pub(crate) const MAX_JSON_RESULT_BYTES: usize = 64 * 1_024;
-const MAX_JSON_POINTER_BYTES: usize = 64 * 1_024;
+const MAX_JSON_POINTER_BYTES: usize = 32 * 1_024;
 const MAX_JSON_PATTERN_BYTES: usize = 4 * 1_024;
 const MAX_JSON_FIELD_NAME_BYTES: usize = 4 * 1_024;
-const RETAINED_RESULT_TEXT_BUDGET: usize = 32 * 1_024;
+const RETAINED_RESULT_WIRE_BUDGET: usize = 48 * 1_024;
 
 #[derive(Clone, Debug, Eq, Hash, JsonSchema, PartialEq)]
 #[schemars(transparent)]
@@ -134,30 +133,14 @@ impl JsonPointerPattern {
         &self.raw
     }
 
-    fn matches(&self, pointer: &JsonPointer) -> bool {
-        let mut actual = pointer_raw_segments(pointer.as_str());
-        for expected in &self.segments {
-            let Some(segment) = actual.next() else {
-                return false;
-            };
-            if !pattern_segment_matches(expected, segment) {
-                return false;
-            }
-        }
-        actual.next().is_none()
+    fn len(&self) -> usize {
+        self.segments.len()
     }
 
-    fn matching_prefix_len(&self, pointer: &JsonPointer) -> usize {
+    fn segment_matches(&self, index: usize, actual: &str) -> bool {
         self.segments
-            .iter()
-            .zip(pointer_raw_segments(pointer.as_str()))
-            .take_while(|(expected, actual)| pattern_segment_matches(expected, actual))
-            .count()
-    }
-
-    fn can_descend_from(&self, pointer: &JsonPointer) -> bool {
-        let depth = pointer_raw_segments(pointer.as_str()).count();
-        depth < self.segments.len() && self.matching_prefix_len(pointer) == depth
+            .get(index)
+            .is_some_and(|expected| pattern_segment_matches(expected, actual))
     }
 }
 
@@ -371,20 +354,45 @@ pub(crate) struct ProbeJsonPointerPatternResult {
     pub(crate) truncated: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct WalkPath<'a> {
+    raw: &'a str,
+    segment: Option<&'a str>,
+    depth: usize,
+}
+
+impl WalkPath<'_> {
+    fn into_owned(self) -> JsonPointer {
+        JsonPointer(self.raw.to_owned())
+    }
+}
+
 pub(crate) trait JsonWalkObserver {
-    fn scalar(&mut self, path: &JsonPointer, kind: JsonType, encoded_bytes: usize);
-    fn object_start(&mut self, path: &JsonPointer);
-    fn object_end(&mut self, path: &JsonPointer, child_count: usize);
-    fn array_start(&mut self, path: &JsonPointer);
-    fn array_end(&mut self, path: &JsonPointer, length: usize);
-    fn object_key(&mut self, _path: &JsonPointer, _key: &str) {}
-    fn should_descend(&self, path: &JsonPointer) -> bool;
+    fn value_start(&mut self, _path: WalkPath<'_>) {}
+    fn value_end(&mut self) {}
+    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, encoded_bytes: Option<usize>);
+    fn object_start(&mut self, path: WalkPath<'_>);
+    fn object_end(&mut self, path: WalkPath<'_>, child_count: usize);
+    fn array_start(&mut self, path: WalkPath<'_>);
+    fn array_end(&mut self, path: WalkPath<'_>, length: usize);
+    fn object_key(&mut self, _path: WalkPath<'_>, _key: &str) {}
+    fn wants_scalar_encoded_bytes(&self) -> bool {
+        false
+    }
+    fn should_descend(&self) -> bool;
+}
+
+#[derive(Clone, Copy)]
+struct ValuePathState {
+    restore_path_len: usize,
+    segment_start: Option<usize>,
+    depth: usize,
 }
 
 enum ContainerKind {
     Object {
         child_count: usize,
-        pending_restore: Option<usize>,
+        pending_value: Option<ValuePathState>,
     },
     Array {
         length: usize,
@@ -393,7 +401,7 @@ enum ContainerKind {
 
 struct ContainerFrame {
     kind: ContainerKind,
-    restore_path_len: usize,
+    value: ValuePathState,
     observed: bool,
     descend: bool,
 }
@@ -404,20 +412,29 @@ fn walk_json(
     cancelled: &AtomicBool,
 ) -> Result<(), ControlError> {
     validate_json_input(input, cancelled)?;
-    let mut parser = SliceJsonParser::new(input);
+    // SliceJsonParser does not expose consumed offsets. LowLevelJsonParser is the
+    // same event parser with the consumed-byte count required for exact token spans.
+    let mut parser = LowLevelJsonParser::new();
+    let mut input_offset = 0usize;
     let mut path = String::new();
     let mut frames = Vec::<ContainerFrame>::new();
     let mut root_seen = false;
     loop {
         check_json_cancellation(cancelled)?;
-        let event = parser.parse_next().map_err(|error| {
-            ControlError::new(
-                ControlErrorCode::MalformedJson,
-                "capture body contains malformed JSON",
-                false,
-                serde_json::json!({"parser_error": error.to_string()}),
-            )
-        })?;
+        let event_call_start = input_offset;
+        let parsed = parser.parse_next(&input[input_offset..], true);
+        input_offset = input_offset
+            .checked_add(parsed.consumed_bytes)
+            .ok_or_else(|| ControlError::internal("JSON parser offset overflow"))?;
+        let Some(event) = parsed.event else {
+            if parsed.consumed_bytes == 0 {
+                return Err(ControlError::internal(
+                    "JSON parser made no progress without an event",
+                ));
+            }
+            continue;
+        };
+        let event = event.map_err(safe_json_syntax_error)?;
         match event {
             JsonEvent::ObjectKey(key) => {
                 let Some(frame) = frames.last_mut() else {
@@ -425,53 +442,69 @@ fn walk_json(
                 };
                 let ContainerKind::Object {
                     child_count,
-                    pending_restore,
+                    pending_value,
                 } = &mut frame.kind
                 else {
                     return Err(malformed_json("JSON object key appears inside an array"));
                 };
-                if pending_restore.is_some() {
+                if pending_value.is_some() {
                     return Err(malformed_json("JSON object key has no preceding value"));
                 }
-                let restore = path.len();
-                append_pointer_segment(&mut path, &key)?;
-                *pending_restore = Some(restore);
+                let restore_path_len = path.len();
+                let segment_start = append_pointer_segment(&mut path, &key, cancelled)?;
+                *pending_value = Some(ValuePathState {
+                    restore_path_len,
+                    segment_start: Some(segment_start),
+                    depth: frame.value.depth + 1,
+                });
                 *child_count += 1;
                 if frame.descend {
-                    observer.object_key(&JsonPointer(path.clone()), &key);
+                    observer.object_key(
+                        walk_path(
+                            &path,
+                            ValuePathState {
+                                restore_path_len,
+                                segment_start: Some(segment_start),
+                                depth: frame.value.depth + 1,
+                            },
+                        ),
+                        &key,
+                    );
                 }
             }
             JsonEvent::StartObject => {
-                let restore = prepare_value_path(&mut path, &mut frames, &mut root_seen)?;
+                let value = prepare_value_path(&mut path, &mut frames, &mut root_seen, cancelled)?;
                 check_depth(frames.len() + 1)?;
-                let pointer = JsonPointer(path.clone());
                 let parent_descends = frames.last().is_none_or(|frame| frame.descend);
                 if parent_descends {
-                    observer.object_start(&pointer);
+                    let view = walk_path(&path, value);
+                    observer.value_start(view);
+                    observer.object_start(view);
                 }
-                let descend = parent_descends && observer.should_descend(&pointer);
+                let descend = parent_descends && observer.should_descend();
                 frames.push(ContainerFrame {
                     kind: ContainerKind::Object {
                         child_count: 0,
-                        pending_restore: None,
+                        pending_value: None,
                     },
-                    restore_path_len: restore,
+                    value,
                     descend,
                     observed: parent_descends,
                 });
             }
             JsonEvent::StartArray => {
-                let restore = prepare_value_path(&mut path, &mut frames, &mut root_seen)?;
+                let value = prepare_value_path(&mut path, &mut frames, &mut root_seen, cancelled)?;
                 check_depth(frames.len() + 1)?;
-                let pointer = JsonPointer(path.clone());
                 let parent_descends = frames.last().is_none_or(|frame| frame.descend);
                 if parent_descends {
-                    observer.array_start(&pointer);
+                    let view = walk_path(&path, value);
+                    observer.value_start(view);
+                    observer.array_start(view);
                 }
-                let descend = parent_descends && observer.should_descend(&pointer);
+                let descend = parent_descends && observer.should_descend();
                 frames.push(ContainerFrame {
                     kind: ContainerKind::Array { length: 0 },
-                    restore_path_len: restore,
+                    value,
                     observed: parent_descends,
                     descend,
                 });
@@ -482,18 +515,19 @@ fn walk_json(
                 };
                 let ContainerKind::Object {
                     child_count,
-                    pending_restore,
+                    pending_value,
                 } = frame.kind
                 else {
                     return Err(malformed_json("JSON object end closes an array"));
                 };
-                if pending_restore.is_some() {
+                if pending_value.is_some() {
                     return Err(malformed_json("JSON object key has no value"));
                 }
                 if frame.observed {
-                    observer.object_end(&JsonPointer(path.clone()), child_count);
+                    observer.object_end(walk_path(&path, frame.value), child_count);
+                    observer.value_end();
                 }
-                path.truncate(frame.restore_path_len);
+                path.truncate(frame.value.restore_path_len);
             }
             JsonEvent::EndArray => {
                 let Some(frame) = frames.pop() else {
@@ -503,41 +537,54 @@ fn walk_json(
                     return Err(malformed_json("JSON array end closes an object"));
                 };
                 if frame.observed {
-                    observer.array_end(&JsonPointer(path.clone()), length);
+                    observer.array_end(walk_path(&path, frame.value), length);
+                    observer.value_end();
                 }
-                path.truncate(frame.restore_path_len);
+                path.truncate(frame.value.restore_path_len);
             }
-            JsonEvent::String(value) => scalar_event(
+            JsonEvent::String(_) => scalar_event(
+                input,
+                event_call_start,
+                input_offset,
                 &mut path,
                 &mut frames,
                 &mut root_seen,
                 observer,
                 JsonType::String,
-                encoded_string_bytes(&value),
+                cancelled,
             )?,
-            JsonEvent::Number(value) => scalar_event(
+            JsonEvent::Number(_) => scalar_event(
+                input,
+                event_call_start,
+                input_offset,
                 &mut path,
                 &mut frames,
                 &mut root_seen,
                 observer,
                 JsonType::Number,
-                value.len(),
+                cancelled,
             )?,
-            JsonEvent::Boolean(value) => scalar_event(
+            JsonEvent::Boolean(_) => scalar_event(
+                input,
+                event_call_start,
+                input_offset,
                 &mut path,
                 &mut frames,
                 &mut root_seen,
                 observer,
                 JsonType::Boolean,
-                if value { 4 } else { 5 },
+                cancelled,
             )?,
             JsonEvent::Null => scalar_event(
+                input,
+                event_call_start,
+                input_offset,
                 &mut path,
                 &mut frames,
                 &mut root_seen,
                 observer,
                 JsonType::Null,
-                4,
+                cancelled,
             )?,
             JsonEvent::Eof => {
                 if !frames.is_empty() || !root_seen {
@@ -549,19 +596,31 @@ fn walk_json(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scalar_event(
+    input: &[u8],
+    event_call_start: usize,
+    event_end: usize,
     path: &mut String,
     frames: &mut [ContainerFrame],
     root_seen: &mut bool,
     observer: &mut impl JsonWalkObserver,
     kind: JsonType,
-    encoded_bytes: usize,
+    cancelled: &AtomicBool,
 ) -> Result<(), ControlError> {
-    let restore = prepare_value_path(path, frames, root_seen)?;
+    let value = prepare_value_path(path, frames, root_seen, cancelled)?;
     if frames.last().is_none_or(|frame| frame.descend) {
-        observer.scalar(&JsonPointer(path.clone()), kind, encoded_bytes);
+        let view = walk_path(path, value);
+        observer.value_start(view);
+        let encoded_bytes = if observer.wants_scalar_encoded_bytes() {
+            Some(event_end - source_token_start(input, event_call_start, event_end, cancelled)?)
+        } else {
+            None
+        };
+        observer.scalar(view, kind, encoded_bytes);
+        observer.value_end();
     }
-    path.truncate(restore);
+    path.truncate(value.restore_path_len);
     Ok(())
 }
 
@@ -569,7 +628,8 @@ fn prepare_value_path(
     path: &mut String,
     frames: &mut [ContainerFrame],
     root_seen: &mut bool,
-) -> Result<usize, ControlError> {
+    cancelled: &AtomicBool,
+) -> Result<ValuePathState, ControlError> {
     let Some(parent) = frames.last_mut() else {
         if *root_seen {
             return Err(malformed_json(
@@ -577,21 +637,75 @@ fn prepare_value_path(
             ));
         }
         *root_seen = true;
-        return Ok(path.len());
+        return Ok(ValuePathState {
+            restore_path_len: path.len(),
+            segment_start: None,
+            depth: 0,
+        });
     };
     match &mut parent.kind {
-        ContainerKind::Object {
-            pending_restore, ..
-        } => pending_restore
+        ContainerKind::Object { pending_value, .. } => pending_value
             .take()
             .ok_or_else(|| malformed_json("JSON object value has no key")),
         ContainerKind::Array { length } => {
-            let restore = path.len();
-            append_pointer_segment(path, &length.to_string())?;
+            let restore_path_len = path.len();
+            let index = length.to_string();
+            let segment_start = append_pointer_segment(path, &index, cancelled)?;
             *length += 1;
-            Ok(restore)
+            Ok(ValuePathState {
+                restore_path_len,
+                segment_start: Some(segment_start),
+                depth: parent.value.depth + 1,
+            })
         }
     }
+}
+
+fn walk_path(path: &str, value: ValuePathState) -> WalkPath<'_> {
+    WalkPath {
+        raw: path,
+        segment: value.segment_start.map(|start| &path[start..]),
+        depth: value.depth,
+    }
+}
+
+fn safe_json_syntax_error(error: json_event_parser::JsonSyntaxError) -> ControlError {
+    let location = error.location();
+    ControlError::new(
+        ControlErrorCode::MalformedJson,
+        "capture body contains malformed JSON",
+        false,
+        serde_json::json!({
+            "start": {
+                "line": location.start.line,
+                "column": location.start.column,
+                "offset": location.start.offset,
+            },
+            "end": {
+                "line": location.end.line,
+                "column": location.end.column,
+                "offset": location.end.offset,
+            },
+        }),
+    )
+}
+
+fn source_token_start(
+    input: &[u8],
+    mut offset: usize,
+    end: usize,
+    cancelled: &AtomicBool,
+) -> Result<usize, ControlError> {
+    let mut scanned = 0usize;
+    while offset < end && matches!(input[offset], b' ' | b'\n' | b'\r' | b'\t' | b':' | b',') {
+        offset += 1;
+        scanned += 1;
+        if scanned.is_multiple_of(32 * 1_024) {
+            check_json_cancellation(cancelled)?;
+        }
+    }
+    check_json_cancellation(cancelled)?;
+    Ok(offset)
 }
 
 fn validate_json_input(input: &[u8], cancelled: &AtomicBool) -> Result<(), ControlError> {
@@ -638,39 +752,67 @@ fn check_depth(depth: usize) -> Result<(), ControlError> {
     ))
 }
 
-fn append_pointer_segment(path: &mut String, segment: &str) -> Result<(), ControlError> {
-    let escaped_bytes = segment.bytes().fold(0usize, |size, byte| {
-        size.saturating_add(if matches!(byte, b'~' | b'/') { 2 } else { 1 })
-    });
-    let next_len = path.len().saturating_add(1).saturating_add(escaped_bytes);
-    if next_len > MAX_JSON_POINTER_BYTES {
-        return Err(ControlError::new(
-            ControlErrorCode::ResourceLimit,
-            "capture JSON pointer exceeds the traversal path limit",
-            false,
-            serde_json::json!({"maximum_pointer_bytes": MAX_JSON_POINTER_BYTES}),
-        ));
+fn append_pointer_segment(
+    path: &mut String,
+    segment: &str,
+    cancelled: &AtomicBool,
+) -> Result<usize, ControlError> {
+    let restore = path.len();
+    if restore == MAX_JSON_POINTER_BYTES {
+        return Err(pointer_path_limit());
     }
     path.push('/');
-    for character in segment.chars() {
-        match character {
-            '~' => path.push_str("~0"),
-            '/' => path.push_str("~1"),
-            _ => path.push(character),
+    let segment_start = path.len();
+    for (offset, character) in segment.char_indices() {
+        if offset % (32 * 1_024) == 0 {
+            check_json_cancellation(cancelled)?;
         }
+        let mut utf8 = [0; 4];
+        let encoded = match character {
+            '~' => "~0",
+            '/' => "~1",
+            _ => character.encode_utf8(&mut utf8),
+        };
+        if path.len().saturating_add(encoded.len()) > MAX_JSON_POINTER_BYTES {
+            path.truncate(restore);
+            return Err(pointer_path_limit());
+        }
+        path.push_str(encoded);
     }
-    Ok(())
+    Ok(segment_start)
 }
 
-fn encoded_string_bytes(value: &str) -> usize {
-    2 + value
-        .chars()
-        .map(|character| match character {
-            '"' | '\\' | '\u{0008}' | '\u{000c}' | '\n' | '\r' | '\t' => 2,
-            '\u{0000}'..='\u{001f}' => 6,
-            _ => character.len_utf8(),
-        })
-        .sum::<usize>()
+fn pointer_path_limit() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::ResourceLimit,
+        "capture JSON pointer exceeds the traversal path limit",
+        false,
+        serde_json::json!({"maximum_pointer_bytes": MAX_JSON_POINTER_BYTES}),
+    )
+}
+
+const FIELD_MATCH_WIRE_OVERHEAD: usize = 256;
+const POINTER_EXAMPLE_WIRE_OVERHEAD: usize = 64;
+const NEXT_HINT_WIRE_OVERHEAD: usize = 128;
+const OBJECT_SUMMARY_WIRE_OVERHEAD: usize = 256;
+
+#[derive(Default)]
+struct WireBudget {
+    used: usize,
+}
+
+impl WireBudget {
+    fn reserve_string(&mut self, value: &str, structural_bytes: usize) -> bool {
+        let bytes = json_string_wire_bytes(value).saturating_add(structural_bytes);
+        let Some(next) = self.used.checked_add(bytes) else {
+            return false;
+        };
+        if next > RETAINED_RESULT_WIRE_BUDGET {
+            return false;
+        }
+        self.used = next;
+        true
+    }
 }
 
 struct FieldFinder<'a> {
@@ -681,7 +823,7 @@ struct FieldFinder<'a> {
     matched_containers: Vec<bool>,
     matches: Vec<JsonFieldMatch>,
     total_matches: usize,
-    retained_text_bytes: usize,
+    budget: WireBudget,
     output_omitted: bool,
 }
 
@@ -699,7 +841,7 @@ impl FieldFinder<'_> {
 
     fn record(
         &mut self,
-        path: &JsonPointer,
+        path: WalkPath<'_>,
         value_type: JsonType,
         object_child_count: Option<usize>,
         array_length: Option<usize>,
@@ -707,13 +849,15 @@ impl FieldFinder<'_> {
     ) {
         self.total_matches += 1;
         if self.matches.len() >= self.limit
-            || !reserve_text(&mut self.retained_text_bytes, path.as_str().len())
+            || !self
+                .budget
+                .reserve_string(path.raw, FIELD_MATCH_WIRE_OVERHEAD)
         {
             self.output_omitted = true;
             return;
         }
         self.matches.push(JsonFieldMatch {
-            pointer: path.clone(),
+            pointer: path.into_owned(),
             value_type,
             object_child_count,
             array_length,
@@ -723,39 +867,49 @@ impl FieldFinder<'_> {
 }
 
 impl JsonWalkObserver for FieldFinder<'_> {
-    fn scalar(&mut self, path: &JsonPointer, kind: JsonType, encoded_bytes: usize) {
+    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, encoded_bytes: Option<usize>) {
         if self.consume_pending_match() {
-            self.record(path, kind, None, None, Some(encoded_bytes));
+            self.record(
+                path,
+                kind,
+                None,
+                None,
+                Some(encoded_bytes.expect("matched scalar requests its source span")),
+            );
         }
     }
 
-    fn object_start(&mut self, _path: &JsonPointer) {
+    fn object_start(&mut self, _path: WalkPath<'_>) {
         let matched = self.consume_pending_match();
         self.matched_containers.push(matched);
     }
 
-    fn object_end(&mut self, path: &JsonPointer, child_count: usize) {
+    fn object_end(&mut self, path: WalkPath<'_>, child_count: usize) {
         if self.matched_containers.pop().unwrap_or(false) {
             self.record(path, JsonType::Object, Some(child_count), None, None);
         }
     }
 
-    fn array_start(&mut self, _path: &JsonPointer) {
+    fn array_start(&mut self, _path: WalkPath<'_>) {
         let matched = self.consume_pending_match();
         self.matched_containers.push(matched);
     }
 
-    fn array_end(&mut self, path: &JsonPointer, length: usize) {
+    fn array_end(&mut self, path: WalkPath<'_>, length: usize) {
         if self.matched_containers.pop().unwrap_or(false) {
             self.record(path, JsonType::Array, None, Some(length), None);
         }
     }
 
-    fn object_key(&mut self, _path: &JsonPointer, key: &str) {
+    fn object_key(&mut self, _path: WalkPath<'_>, key: &str) {
         self.next_value_matches = self.key_matches(key);
     }
 
-    fn should_descend(&self, _path: &JsonPointer) -> bool {
+    fn wants_scalar_encoded_bytes(&self) -> bool {
+        self.next_value_matches
+    }
+
+    fn should_descend(&self) -> bool {
         true
     }
 }
@@ -782,12 +936,12 @@ pub(crate) fn find_json_pointers(
         matched_containers: Vec::new(),
         matches: Vec::with_capacity(limit),
         total_matches: 0,
-        retained_text_bytes: 0,
+        budget: WireBudget::default(),
         output_omitted: false,
     };
     walk_json(input, &mut observer, cancelled)?;
     let omitted_matches = observer.total_matches - observer.matches.len();
-    Ok(FindJsonPointersResult {
+    let mut result = FindJsonPointersResult {
         status: if observer.total_matches == 0 {
             JsonInspectionStatus::NoMatch
         } else {
@@ -800,66 +954,84 @@ pub(crate) fn find_json_pointers(
         inspected_bytes: input.len(),
         source_truncated: false,
         truncated: observer.output_omitted || omitted_matches != 0,
-    })
+    };
+    enforce_find_result_size(&mut result)?;
+    Ok(result)
+}
+
+#[derive(Clone, Copy)]
+struct ObjectSummaryState {
+    depth: usize,
+    result_index: Option<usize>,
 }
 
 struct PatternProbe<'a> {
     pattern: &'a JsonPointerPattern,
     result: ProbeJsonPointerPatternResult,
-    retained_text_bytes: usize,
+    budget: WireBudget,
+    prefix_stack: Vec<usize>,
+    depth_stack: Vec<usize>,
     longest_prefix_segments: usize,
-    object_summary_stack: Vec<Option<usize>>,
+    longest_prefix_wire_bytes: usize,
+    object_summary_stack: Vec<ObjectSummaryState>,
 }
 
 impl PatternProbe<'_> {
-    fn terminal(&mut self, path: &JsonPointer, kind: JsonType) {
+    fn current_prefix(&self) -> usize {
+        self.prefix_stack.last().copied().unwrap_or(0)
+    }
+
+    fn is_match(&self, path: WalkPath<'_>) -> bool {
+        path.depth == self.pattern.len() && self.current_prefix() == self.pattern.len()
+    }
+
+    fn terminal(&mut self, path: WalkPath<'_>, kind: JsonType) {
         self.record_child_shape(path, kind);
         self.consider_miss(path, kind);
-        if !self.pattern.matches(path) {
+        if !self.is_match(path) {
             return;
         }
         self.result.match_count += 1;
         self.result.type_counts.increment(kind);
         if self.result.examples.len() < MAX_JSON_EXAMPLES
-            && reserve_text(&mut self.retained_text_bytes, path.as_str().len())
+            && self
+                .budget
+                .reserve_string(path.raw, POINTER_EXAMPLE_WIRE_OVERHEAD)
         {
-            self.result.examples.push(path.clone());
+            self.result.examples.push(path.into_owned());
         } else {
             self.result.omitted_examples += 1;
             self.result.truncated = true;
         }
     }
 
-    fn consider_miss(&mut self, path: &JsonPointer, kind: JsonType) {
-        let matching = self.pattern.matching_prefix_len(path);
+    fn consider_miss(&mut self, path: WalkPath<'_>, kind: JsonType) {
+        let matching = self.current_prefix();
         if matching > self.longest_prefix_segments {
             self.longest_prefix_segments = matching;
+            self.longest_prefix_wire_bytes = json_string_wire_bytes(path.raw);
             self.result.miss_hint = Some(JsonPointerMissHint {
-                longest_matched_prefix: JsonPointer(
-                    pointer_prefix(path.as_str(), matching).to_owned(),
-                ),
+                longest_matched_prefix: path.into_owned(),
                 next_segments: Vec::new(),
                 omitted_next_segments: 0,
             });
         }
-        let depth = pointer_raw_segments(path.as_str()).count();
-        if matching != self.longest_prefix_segments || depth != matching + 1 {
+        if matching != self.longest_prefix_segments || path.depth != matching + 1 {
             return;
         }
-        let prefix = pointer_prefix(path.as_str(), matching);
-        let hint = self
-            .result
-            .miss_hint
-            .get_or_insert_with(|| JsonPointerMissHint {
-                longest_matched_prefix: JsonPointer(prefix.to_owned()),
-                next_segments: Vec::new(),
-                omitted_next_segments: 0,
-            });
-        let Some(raw_segment) = pointer_raw_segments(path.as_str()).nth(matching) else {
+        let Some(raw_segment) = path.segment else {
             return;
         };
         let segment = decode_segment(raw_segment, false)
             .expect("walker paths always contain valid pointer escapes");
+        let hint = self
+            .result
+            .miss_hint
+            .get_or_insert_with(|| JsonPointerMissHint {
+                longest_matched_prefix: JsonPointer(String::new()),
+                next_segments: Vec::new(),
+                omitted_next_segments: 0,
+            });
         if hint
             .next_segments
             .iter()
@@ -868,7 +1040,9 @@ impl PatternProbe<'_> {
             return;
         }
         if hint.next_segments.len() < MAX_JSON_HINTS
-            && reserve_text(&mut self.retained_text_bytes, segment.len())
+            && self
+                .budget
+                .reserve_string(&segment, NEXT_HINT_WIRE_OVERHEAD)
         {
             hint.next_segments.push(JsonNextSegmentHint {
                 segment,
@@ -880,23 +1054,26 @@ impl PatternProbe<'_> {
         }
     }
 
-    fn record_child_shape(&mut self, path: &JsonPointer, kind: JsonType) {
-        let parent = pointer_parent(path.as_str());
-        let Some(summary) = self
-            .result
-            .object_key_summaries
-            .iter_mut()
-            .find(|summary| summary.pointer.as_str() == parent)
-        else {
+    fn record_child_shape(&mut self, path: WalkPath<'_>, kind: JsonType) {
+        let Some(parent) = self.object_summary_stack.last().copied() else {
             return;
         };
-        let Some(raw_segment) = pointer_raw_segments(path.as_str()).next_back() else {
+        if parent.depth + 1 != path.depth {
+            return;
+        }
+        let Some(index) = parent.result_index else {
+            return;
+        };
+        let Some(raw_segment) = path.segment else {
             return;
         };
         let segment = decode_segment(raw_segment, false)
             .expect("walker paths always contain valid pointer escapes");
+        let summary = &mut self.result.object_key_summaries[index];
         if summary.keys.len() < MAX_JSON_HINTS
-            && reserve_text(&mut self.retained_text_bytes, segment.len())
+            && self
+                .budget
+                .reserve_string(&segment, NEXT_HINT_WIRE_OVERHEAD)
         {
             summary.keys.push(JsonNextSegmentHint {
                 segment,
@@ -908,52 +1085,89 @@ impl PatternProbe<'_> {
         }
     }
 
-    fn start_object_summary(&mut self, path: &JsonPointer) {
-        if !self.pattern.matches(path) {
-            self.object_summary_stack.push(None);
+    fn start_object_summary(&mut self, path: WalkPath<'_>) {
+        if !self.is_match(path) {
+            self.object_summary_stack.push(ObjectSummaryState {
+                depth: path.depth,
+                result_index: None,
+            });
             return;
         }
         if self.result.object_key_summaries.len() >= MAX_JSON_EXAMPLES
-            || !reserve_text(&mut self.retained_text_bytes, path.as_str().len())
+            || !self
+                .budget
+                .reserve_string(path.raw, OBJECT_SUMMARY_WIRE_OVERHEAD)
         {
             self.result.omitted_object_summaries += 1;
             self.result.truncated = true;
-            self.object_summary_stack.push(None);
+            self.object_summary_stack.push(ObjectSummaryState {
+                depth: path.depth,
+                result_index: None,
+            });
             return;
         }
         let index = self.result.object_key_summaries.len();
         self.result.object_key_summaries.push(JsonObjectKeySummary {
-            pointer: path.clone(),
+            pointer: path.into_owned(),
             child_count: 0,
             keys: Vec::new(),
             omitted_keys: 0,
         });
-        self.object_summary_stack.push(Some(index));
+        self.object_summary_stack.push(ObjectSummaryState {
+            depth: path.depth,
+            result_index: Some(index),
+        });
     }
 }
 
 impl JsonWalkObserver for PatternProbe<'_> {
-    fn scalar(&mut self, path: &JsonPointer, kind: JsonType, _encoded_bytes: usize) {
+    fn value_start(&mut self, path: WalkPath<'_>) {
+        let parent_prefix = self.current_prefix();
+        let prefix = if path.depth == 0 {
+            0
+        } else if parent_prefix == path.depth - 1
+            && path
+                .segment
+                .is_some_and(|segment| self.pattern.segment_matches(parent_prefix, segment))
+        {
+            parent_prefix + 1
+        } else {
+            parent_prefix
+        };
+        self.prefix_stack.push(prefix);
+        self.depth_stack.push(path.depth);
+    }
+
+    fn value_end(&mut self) {
+        self.prefix_stack.pop();
+        self.depth_stack.pop();
+    }
+
+    fn scalar(&mut self, path: WalkPath<'_>, kind: JsonType, _encoded_bytes: Option<usize>) {
         self.terminal(path, kind);
     }
 
-    fn object_start(&mut self, path: &JsonPointer) {
+    fn object_start(&mut self, path: WalkPath<'_>) {
         self.terminal(path, JsonType::Object);
         self.start_object_summary(path);
     }
 
-    fn object_end(&mut self, _path: &JsonPointer, child_count: usize) {
-        if let Some(index) = self.object_summary_stack.pop().flatten() {
+    fn object_end(&mut self, _path: WalkPath<'_>, child_count: usize) {
+        if let Some(index) = self
+            .object_summary_stack
+            .pop()
+            .and_then(|state| state.result_index)
+        {
             self.result.object_key_summaries[index].child_count = child_count;
         }
     }
 
-    fn array_start(&mut self, path: &JsonPointer) {
+    fn array_start(&mut self, path: WalkPath<'_>) {
         self.terminal(path, JsonType::Array);
     }
 
-    fn array_end(&mut self, path: &JsonPointer, length: usize) {
-        if !self.pattern.matches(path) {
+    fn array_end(&mut self, path: WalkPath<'_>, length: usize) {
+        if !self.is_match(path) {
             return;
         }
         self.result.array_length_range = Some(self.result.array_length_range.map_or(
@@ -968,13 +1182,13 @@ impl JsonWalkObserver for PatternProbe<'_> {
         ));
     }
 
-    fn should_descend(&self, path: &JsonPointer) -> bool {
-        self.pattern.can_descend_from(path)
+    fn should_descend(&self) -> bool {
+        let depth = self.depth_stack.last().copied().unwrap_or(0);
+        (self.current_prefix() == depth && depth < self.pattern.len())
             || self
-                .result
-                .object_key_summaries
-                .iter()
-                .any(|summary| summary.pointer == *path)
+                .object_summary_stack
+                .last()
+                .is_some_and(|state| state.depth == depth && state.result_index.is_some())
     }
 }
 
@@ -1004,8 +1218,11 @@ pub(crate) fn probe_json(
             source_truncated: false,
             truncated: false,
         },
-        retained_text_bytes: 0,
+        budget: WireBudget::default(),
+        prefix_stack: Vec::with_capacity(MAX_JSON_DEPTH + 1),
+        depth_stack: Vec::with_capacity(MAX_JSON_DEPTH + 1),
         longest_prefix_segments: 0,
+        longest_prefix_wire_bytes: json_string_wire_bytes(""),
         object_summary_stack: Vec::new(),
     };
     walk_json(input, &mut observer, cancelled)?;
@@ -1013,7 +1230,16 @@ pub(crate) fn probe_json(
     if observer.result.match_count != 0 {
         observer.result.status = JsonInspectionStatus::Matched;
         observer.result.miss_hint = None;
+        observer.longest_prefix_wire_bytes = 0;
     }
+    let charged_wire_bytes = observer
+        .budget
+        .used
+        .saturating_add(observer.longest_prefix_wire_bytes);
+    if charged_wire_bytes > MAX_JSON_RESULT_BYTES {
+        observer.result.truncated = true;
+    }
+    enforce_probe_result_size(&mut observer.result)?;
     Ok(observer.result)
 }
 
@@ -1093,26 +1319,6 @@ fn pointer_raw_segments(pointer: &str) -> impl DoubleEndedIterator<Item = &str> 
         .flat_map(|remainder| remainder.split('/'))
 }
 
-fn pointer_parent(pointer: &str) -> &str {
-    pointer.rsplit_once('/').map_or("", |(parent, _)| parent)
-}
-
-fn pointer_prefix(pointer: &str, segments: usize) -> &str {
-    if segments == 0 {
-        return "";
-    }
-    let mut slashes = 0;
-    for (index, byte) in pointer.bytes().enumerate() {
-        if byte == b'/' {
-            slashes += 1;
-            if slashes == segments + 1 {
-                return &pointer[..index];
-            }
-        }
-    }
-    pointer
-}
-
 fn pattern_segment_matches(expected: &PatternSegment, actual: &str) -> bool {
     match expected {
         PatternSegment::Wildcard => true,
@@ -1120,15 +1326,60 @@ fn pattern_segment_matches(expected: &PatternSegment, actual: &str) -> bool {
     }
 }
 
-fn reserve_text(retained: &mut usize, bytes: usize) -> bool {
-    let Some(next) = retained.checked_add(bytes) else {
-        return false;
-    };
-    if next > RETAINED_RESULT_TEXT_BUDGET {
-        return false;
+fn json_string_wire_bytes(value: &str) -> usize {
+    2 + value
+        .chars()
+        .map(|character| match character {
+            '"' | '\\' | '\u{0008}' | '\u{000c}' | '\n' | '\r' | '\t' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            _ => character.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+fn serialized_result_bytes(result: &impl Serialize) -> Result<usize, ControlError> {
+    serde_json::to_vec(result)
+        .map(|encoded| encoded.len())
+        .map_err(|_| ControlError::internal("JSON probe result serialization failed"))
+}
+
+fn enforce_find_result_size(result: &mut FindJsonPointersResult) -> Result<(), ControlError> {
+    while serialized_result_bytes(result)? > MAX_JSON_RESULT_BYTES {
+        if result.matches.pop().is_none() {
+            return Err(ControlError::internal(
+                "bounded JSON field result metadata exceeds its wire limit",
+            ));
+        }
+        result.omitted_matches += 1;
+        result.truncated = true;
     }
-    *retained = next;
-    true
+    Ok(())
+}
+
+fn enforce_probe_result_size(
+    result: &mut ProbeJsonPointerPatternResult,
+) -> Result<(), ControlError> {
+    while serialized_result_bytes(result)? > MAX_JSON_RESULT_BYTES {
+        if result.examples.pop().is_some() {
+            result.omitted_examples += 1;
+        } else if let Some(summary) = result.object_key_summaries.last_mut()
+            && summary.keys.pop().is_some()
+        {
+            summary.omitted_keys += 1;
+        } else if result.object_key_summaries.pop().is_some() {
+            result.omitted_object_summaries += 1;
+        } else if let Some(hint) = &mut result.miss_hint
+            && hint.next_segments.pop().is_some()
+        {
+            hint.omitted_next_segments += 1;
+        } else if result.miss_hint.take().is_none() {
+            return Err(ControlError::internal(
+                "bounded JSON pattern result metadata exceeds its wire limit",
+            ));
+        }
+        result.truncated = true;
+    }
+    Ok(())
 }
 
 fn malformed_json(message: &'static str) -> ControlError {
@@ -1398,5 +1649,115 @@ mod tests {
         let output = serde_json::to_string(&json!({"find": find, "probe": probe})).expect("json");
         assert!(!output.contains(secret));
         assert!(!output.contains("923847"));
+    }
+    #[test]
+    fn scalar_encoded_bytes_are_exact_source_token_spans() {
+        let json = r#"{"s":"é\n","n":-1.20e+3,"b":false,"z":null}"#.as_bytes();
+        for (field, expected) in [("s", 6), ("n", 8), ("b", 5), ("z", 4)] {
+            let result =
+                find_json_pointers(json, field, FieldMatchMode::Exact, 1, &not_cancelled())
+                    .expect("find");
+            assert_eq!(
+                result.matches[0].scalar_encoded_bytes,
+                Some(expected),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_non_matching_pattern_handles_maximum_depth_without_observer_growth() {
+        let mut json = vec![b'[', b'0', b']'];
+        for _ in 1..MAX_JSON_DEPTH {
+            let mut parent = Vec::with_capacity(json.len() + 2);
+            parent.push(b'[');
+            parent.extend_from_slice(&json);
+            parent.push(b']');
+            json = parent;
+        }
+        let result = probe_json(
+            &json,
+            &JsonPointerPattern::parse("/not-an-index").expect("pattern"),
+            &not_cancelled(),
+        )
+        .expect("probe");
+        assert_eq!(result.status, JsonInspectionStatus::NoMatch);
+        assert!(result.examples.is_empty());
+        assert!(result.object_key_summaries.is_empty());
+    }
+
+    #[test]
+    fn object_summaries_include_only_direct_children() {
+        let result = probe_json(
+            br#"{"target":{"scalar":1,"nested":{"secret":2},"array":[3]}}"#,
+            &JsonPointerPattern::parse("/target").expect("pattern"),
+            &not_cancelled(),
+        )
+        .expect("probe");
+        let summary = &result.object_key_summaries[0];
+        assert_eq!(summary.child_count, 3);
+        assert_eq!(
+            summary
+                .keys
+                .iter()
+                .map(|hint| hint.segment.as_str())
+                .collect::<Vec<_>>(),
+            ["scalar", "nested", "array"]
+        );
+        assert!(!summary.keys.iter().any(|hint| hint.segment == "secret"));
+    }
+
+    #[test]
+    fn escaped_output_strings_are_charged_to_the_wire_budget() {
+        let key = "\"".repeat(31 * 1_024);
+        let mut object = serde_json::Map::new();
+        object.insert(key, json!(1));
+        let json = serde_json::to_vec(&object).expect("json");
+        let result = probe_json(
+            &json,
+            &JsonPointerPattern::parse("/*").expect("pattern"),
+            &not_cancelled(),
+        )
+        .expect("probe");
+        assert_eq!(result.match_count, 1);
+        assert_eq!(result.examples.len(), 0);
+        assert_eq!(result.omitted_examples, 1);
+        assert!(result.truncated);
+        assert!(serde_json::to_vec(&result).expect("result").len() <= MAX_JSON_RESULT_BYTES);
+    }
+
+    #[test]
+    fn miss_hint_churn_remains_bounded_after_json_escaping() {
+        let mut object = serde_json::Map::new();
+        for index in 0..MAX_JSON_HINTS {
+            object.insert(format!("{}-{index}", "\"".repeat(2_000)), json!(index));
+        }
+        let json = serde_json::to_vec(&json!({"matched": object})).expect("json");
+        let result = probe_json(
+            &json,
+            &JsonPointerPattern::parse("/matched/missing").expect("pattern"),
+            &not_cancelled(),
+        )
+        .expect("probe");
+        let hint = result.miss_hint.expect("hint");
+        assert_eq!(hint.longest_matched_prefix.as_str(), "/matched");
+        assert!(hint.next_segments.len() < MAX_JSON_HINTS);
+        assert!(hint.omitted_next_segments > 0);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn traversal_rejects_an_encoded_pointer_beyond_its_retained_limit() {
+        let key = "a".repeat(MAX_JSON_POINTER_BYTES);
+        let mut object = serde_json::Map::new();
+        object.insert(key, serde_json::Value::Null);
+        let json = serde_json::to_vec(&object).expect("json");
+        let error = probe_json(
+            &json,
+            &JsonPointerPattern::parse("/*").expect("pattern"),
+            &not_cancelled(),
+        )
+        .expect_err("path limit");
+        assert_eq!(error.code, ControlErrorCode::ResourceLimit);
     }
 }
