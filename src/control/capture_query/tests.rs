@@ -677,3 +677,23 @@ fn a_single_compact_row_larger_than_the_page_budget_is_typed() {
 
     assert_eq!(error.code, ControlErrorCode::ResourceLimit);
 }
+
+#[test]
+fn capture_search_patterns_are_bounded_before_matcher_allocation() {
+    let mut at_limit = query();
+    at_limit.text = Some("x".repeat(super::MAX_CAPTURE_PATTERN_BYTES));
+    CompiledCaptureQuery::compile(at_limit).expect("pattern at byte limit");
+
+    let mut oversized = query();
+    oversized.text = Some("x".repeat(super::MAX_CAPTURE_PATTERN_BYTES + 1));
+    let error = CompiledCaptureQuery::compile(oversized).expect_err("oversized pattern");
+    assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+    assert_eq!(
+        error.details,
+        json!({
+            "field": "query.text",
+            "max_bytes": super::MAX_CAPTURE_PATTERN_BYTES,
+            "received_bytes": super::MAX_CAPTURE_PATTERN_BYTES + 1,
+        })
+    );
+}

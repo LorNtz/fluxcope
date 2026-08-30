@@ -230,6 +230,38 @@ impl std::fmt::Debug for PublicCallPermit {
             .finish_non_exhaustive()
     }
 }
+async fn validate_public_search_input(
+    input: SearchCapturesInput,
+    permit: PublicCallPermit,
+    cancelled: CancellationToken,
+) -> Result<(SearchCapturesInput, PublicCallPermit), ControlError> {
+    run_public_search_validation(permit, cancelled, move || {
+        input.validate()?;
+        Ok(input)
+    })
+    .await
+}
+
+async fn run_public_search_validation<F>(
+    permit: PublicCallPermit,
+    cancelled: CancellationToken,
+    validate: F,
+) -> Result<(SearchCapturesInput, PublicCallPermit), ControlError>
+where
+    F: FnOnce() -> Result<SearchCapturesInput, ControlError> + Send + 'static,
+{
+    let worker = tokio::task::spawn_blocking(move || (permit, validate()));
+    tokio::select! {
+        result = worker => {
+            let (permit, input) = result
+                .map_err(|_| ControlError::internal("capture search validation worker failed"))?;
+            input.map(|input| (input, permit))
+        }
+        _ = cancelled.cancelled() => {
+            Err(ControlError::cancelled("capture search validation cancelled"))
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Broker {
@@ -774,7 +806,6 @@ impl Broker {
         deadline: Instant,
         cancelled: CancellationToken,
     ) -> Result<SearchCapturesResult, McpDomainError> {
-        input.validate()?;
         let resolved = self
             .resolve_with_client(
                 input.instance.clone(),
@@ -955,7 +986,11 @@ impl Broker {
         Parameters(input): Parameters<SearchCapturesInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<Json<SearchCapturesResult>, ErrorData> {
-        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let cancelled = context.ct.clone();
+        let (input, _call) = validate_public_search_input(input, call, cancelled.clone())
+            .await
+            .map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
         self.search_captures_impl(
             input,
@@ -1136,7 +1171,10 @@ mod tests {
     };
     use tokio_util::sync::CancellationToken;
 
-    use super::{Broker, InstanceProbe, McpDomainError, RegistryAccess, SelectorRequirement};
+    use super::{
+        Broker, InstanceProbe, McpDomainError, RegistryAccess, SelectorRequirement,
+        run_public_search_validation,
+    };
     use crate::{
         control_rpc::{
             client::connect_failure,
@@ -1146,7 +1184,7 @@ mod tests {
         },
         instance::RunId,
         instance_registry::{DiscoveryDiagnostic, InstanceDescriptor, RegistryScan},
-        mcp::schema::InstanceSelector,
+        mcp::{capture::SearchCapturesInput, schema::InstanceSelector},
         settings::{ConfigMode, PersistenceMode},
     };
 
@@ -1799,6 +1837,48 @@ mod tests {
         for task in tasks {
             task.await.expect("admission task");
         }
+    }
+
+    #[tokio::test]
+    async fn public_search_validation_runs_off_thread_and_retains_call_permit_until_worker_exit() {
+        let broker = broker(FakeRegistry::new(Vec::new()), FakeProbe::live(&[]));
+        let permit = broker.try_admit_public_call().expect("public call permit");
+        assert_eq!(broker.call_admission.available_permits(), 31);
+        let gate = Arc::new(BlockingGate::default());
+        let worker_gate = Arc::clone(&gate);
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let cancelled = CancellationToken::new();
+        let task_cancelled = cancelled.clone();
+        let task = tokio::spawn(async move {
+            run_public_search_validation(permit, task_cancelled, move || {
+                started_tx.send(()).expect("validation started");
+                worker_gate.wait();
+                Ok(SearchCapturesInput::default())
+            })
+            .await
+        });
+
+        started_rx.recv().await.expect("blocking worker started");
+        cancelled.cancel();
+        let error = task
+            .await
+            .expect("validation task")
+            .expect_err("validation cancellation");
+        assert_eq!(error.code(), ControlErrorCode::Cancelled);
+        assert_eq!(
+            broker.call_admission.available_permits(),
+            31,
+            "detached blocking validation must continue to own the public call permit"
+        );
+
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while broker.call_admission.available_permits() != 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("validation worker released permit");
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ pub(crate) const CAPTURE_SEARCH_BATCH_SIZE: usize = 32;
 pub(crate) const DEFAULT_CAPTURE_PAGE_LIMIT: usize = 20;
 pub(crate) const MAX_CAPTURE_PAGE_LIMIT: usize = 100;
 pub(crate) const CAPTURE_SEARCH_PAGE_JSON_BUDGET: usize = 7 * 1024 * 1024;
+pub(crate) const MAX_CAPTURE_PATTERN_BYTES: usize = 64 * 1024;
 const SCAN_QUANTUM: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -347,6 +348,18 @@ pub(crate) struct CompiledCaptureQuery {
 }
 impl CompiledCaptureQuery {
     pub(crate) fn compile(q: CaptureQuery) -> Result<Self, ControlError> {
+        validate_optional_pattern("query.method", q.method.as_deref())?;
+        if let Some(filter) = q.original_url.as_ref() {
+            validate_pattern("query.original_url.value", text_filter_value(filter))?;
+        }
+        if let Some(filter) = q.effective_url.as_ref() {
+            validate_pattern("query.effective_url.value", text_filter_value(filter))?;
+        }
+        if let Some(header) = q.header.as_ref() {
+            validate_pattern("query.header.name", &header.name)?;
+            validate_optional_pattern("query.header.value", header.value.as_deref())?;
+        }
+        validate_optional_pattern("query.text", q.text.as_deref())?;
         validate_status(q.status)?;
         let started_at_min = parse_time("started_at_min", q.started_at_min.as_deref())?;
         let started_at_max = parse_time("started_at_max", q.started_at_max.as_deref())?;
@@ -508,6 +521,7 @@ pub(crate) fn match_capture_page(
         cursor,
         limit,
         CAPTURE_SEARCH_PAGE_JSON_BUDGET,
+        CAPTURE_SEARCH_PAGE_JSON_BUDGET,
         cancelled,
     )
 }
@@ -517,7 +531,8 @@ pub(crate) fn match_capture_page_with_budget(
     query: &CompiledCaptureQuery,
     cursor: Option<CaptureSearchCursor>,
     limit: usize,
-    max_serialized_bytes: usize,
+    max_single_row_bytes: usize,
+    remaining_page_bytes: usize,
     cancelled: &CancellationToken,
 ) -> Result<CaptureSearchPage, ControlError> {
     let limit = normalize_capture_page_limit(Some(limit))?;
@@ -542,14 +557,13 @@ pub(crate) fn match_capture_page_with_budget(
         if query.matches(snapshot, cancelled)? {
             let compact = CompactCapture::from_snapshot(snapshot);
             let row_bytes = serialized_len(&compact)?;
-            if row_bytes > max_serialized_bytes {
+            if row_bytes > max_single_row_bytes {
                 return Err(resource_limit(
                     "one capture search result exceeds the response byte budget",
-                    max_serialized_bytes,
+                    max_single_row_bytes,
                 ));
             }
-            if serialized_bytes.saturating_add(row_bytes) > max_serialized_bytes {
-                older = true;
+            if serialized_bytes.saturating_add(row_bytes) > remaining_page_bytes {
                 byte_resume_cursor = Some(CaptureSearchCursor::new(snapshot.sequence));
                 break;
             }
@@ -794,6 +808,31 @@ fn serialized_len(value: &impl Serialize) -> Result<usize, ControlError> {
     serde_json::to_writer(&mut counter, value)
         .map_err(|_| ControlError::internal("failed to size capture search result"))?;
     Ok(counter.0)
+}
+fn text_filter_value(filter: &CaptureTextFilter) -> &str {
+    match filter {
+        CaptureTextFilter::Substring(value) | CaptureTextFilter::Glob(value) => value,
+    }
+}
+
+fn validate_optional_pattern(field: &str, value: Option<&str>) -> Result<(), ControlError> {
+    value.map_or(Ok(()), |value| validate_pattern(field, value))
+}
+
+fn validate_pattern(field: &str, value: &str) -> Result<(), ControlError> {
+    if value.len() <= MAX_CAPTURE_PATTERN_BYTES {
+        return Ok(());
+    }
+    Err(ControlError::new(
+        ControlErrorCode::InvalidArgument,
+        format!("{field} exceeds the capture search pattern limit"),
+        false,
+        serde_json::json!({
+            "field": field,
+            "max_bytes": MAX_CAPTURE_PATTERN_BYTES,
+            "received_bytes": value.len(),
+        }),
+    ))
 }
 
 fn invalid(message: impl Into<String>) -> ControlError {

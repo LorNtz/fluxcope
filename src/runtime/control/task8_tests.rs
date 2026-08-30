@@ -48,6 +48,21 @@ fn completed_capture(sequence: u64) -> Arc<CaptureRecord> {
     })
 }
 
+fn completed_capture_with_method(sequence: u64, method: Method) -> Arc<CaptureRecord> {
+    CaptureRecord::from_completed(CapturedExchange {
+        sequence: CaptureSequence::new(sequence),
+        method,
+        uri: format!("https://example.test/{sequence}"),
+        mapped_uri: None,
+        local_path: None,
+        status: Some(200),
+        req_headers: vec![],
+        res_headers: vec![],
+        req_body: None,
+        res_body: None,
+    })
+}
+
 fn runtime_fixture(max_records: usize) -> (InstanceIdentity, App, SettingsSession) {
     let mut launch = AppSettings::default();
     launch.recording.start_record_on_launch = false;
@@ -147,6 +162,127 @@ fn runtime_capture_batch_respects_an_inclusive_older_cursor() {
         batch.next_cursor,
         Some(CaptureSearchCursor::new(CaptureSequence::new(20)))
     );
+}
+
+#[tokio::test]
+async fn accumulated_multi_batch_page_omits_a_row_only_against_remaining_capacity_and_resumes_it() {
+    let (identity, mut app, settings) = runtime_fixture(100);
+    let omitted_method =
+        Method::from_bytes(&vec![b'Z'; 2 * 1024 * 1024]).expect("large extension method");
+    app.add_capture(completed_capture_with_method(1, omitted_method));
+    for sequence in 2..=33 {
+        let method = Method::from_bytes(&vec![b'M'; 180 * 1024]).expect("medium extension method");
+        app.add_capture(completed_capture_with_method(sequence, method));
+    }
+
+    let scope = InstanceScope {
+        proxy_endpoint: identity.proxy_endpoint(),
+        run_id: identity.run_id().clone(),
+    };
+    let (client, mut receiver) = RuntimeGateway::new(4);
+    let handler = RuntimeControlHandler::new(client);
+    let first_handler = handler.clone();
+    let first = tokio::spawn(async move {
+        first_handler
+            .handle(
+                control_context("multi-batch-first"),
+                ControlOperation::SearchCaptures {
+                    query: Box::new(CaptureQuery::default()),
+                    cursor: None,
+                    limit: Some(100),
+                },
+                CancellationToken::new(),
+            )
+            .await
+    });
+    for expected in [
+        RuntimeRequest::GetStatus,
+        RuntimeRequest::GetCaptureSearchBatch {
+            cursor: None,
+            max_rows: 32,
+        },
+        RuntimeRequest::GetCaptureSearchBatch {
+            cursor: Some(CaptureSearchCursor::new(CaptureSequence::new(1))),
+            max_rows: 32,
+        },
+    ] {
+        let command = receiver.recv().await.expect("first search runtime command");
+        assert_eq!(command.request, expected);
+        let reply =
+            execute_control_request_for_test(&identity, &mut app, &settings, command.request);
+        command
+            .reply
+            .send(reply)
+            .expect("first search reply receiver");
+    }
+    let ControlResult::SearchCaptures {
+        instance,
+        captures,
+        next_cursor,
+    } = first.await.expect("first search task").expect("first page")
+    else {
+        panic!("expected first capture search page")
+    };
+    assert_eq!(instance, scope);
+    assert_eq!(
+        captures
+            .iter()
+            .map(|capture| capture.capture_sequence.value())
+            .collect::<Vec<_>>(),
+        (2..=33).rev().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        next_cursor,
+        Some(CaptureSearchCursor::new(CaptureSequence::new(1)))
+    );
+
+    let second = tokio::spawn(async move {
+        handler
+            .handle(
+                control_context("multi-batch-second"),
+                ControlOperation::SearchCaptures {
+                    query: Box::new(CaptureQuery::default()),
+                    cursor: Some(CaptureSearchCursor::new(CaptureSequence::new(1))),
+                    limit: Some(100),
+                },
+                CancellationToken::new(),
+            )
+            .await
+    });
+    for expected in [
+        RuntimeRequest::GetStatus,
+        RuntimeRequest::GetCaptureSearchBatch {
+            cursor: Some(CaptureSearchCursor::new(CaptureSequence::new(1))),
+            max_rows: 32,
+        },
+    ] {
+        let command = receiver
+            .recv()
+            .await
+            .expect("second search runtime command");
+        assert_eq!(command.request, expected);
+        let reply =
+            execute_control_request_for_test(&identity, &mut app, &settings, command.request);
+        command
+            .reply
+            .send(reply)
+            .expect("second search reply receiver");
+    }
+    let ControlResult::SearchCaptures {
+        instance,
+        captures,
+        next_cursor,
+    } = second
+        .await
+        .expect("second search task")
+        .expect("second page")
+    else {
+        panic!("expected second capture search page")
+    };
+    assert_eq!(instance, scope);
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].capture_sequence, CaptureSequence::new(1));
+    assert_eq!(next_cursor, None);
 }
 
 #[test]

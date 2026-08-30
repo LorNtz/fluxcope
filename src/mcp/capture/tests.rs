@@ -257,6 +257,25 @@ fn public_query_input_bytes_are_bounded_before_dispatch() {
     );
 }
 
+#[test]
+fn public_query_patterns_use_the_private_compiler_byte_bound() {
+    let input = SearchCapturesInput {
+        query: CaptureQuery {
+            text: Some("x".repeat(crate::control::capture_query::MAX_CAPTURE_PATTERN_BYTES + 1)),
+            ..CaptureQuery::default()
+        },
+        ..SearchCapturesInput::default()
+    };
+
+    let error = input.validate().expect_err("oversized capture pattern");
+    assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+    assert_eq!(error.details["field"], "query.text");
+    assert_eq!(
+        error.details["max_bytes"],
+        crate::control::capture_query::MAX_CAPTURE_PATTERN_BYTES
+    );
+}
+
 #[tokio::test]
 async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() {
     let home = tempfile::tempdir().expect("temporary home");

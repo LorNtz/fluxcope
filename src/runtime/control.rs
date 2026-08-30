@@ -355,6 +355,7 @@ impl RuntimeControlHandler {
                         &query,
                         None,
                         remaining,
+                        CAPTURE_SEARCH_PAGE_JSON_BUDGET,
                         remaining_bytes,
                         &worker_cancelled,
                     )
