@@ -71,6 +71,15 @@ impl CaptureChangeFeed {
         self.inner.state.lock().epoch
     }
 
+    pub(crate) fn run_if_epoch(&self, expected_epoch: u64, action: impl FnOnce()) -> bool {
+        let state = self.inner.state.lock();
+        if state.epoch != expected_epoch {
+            return false;
+        }
+        action();
+        true
+    }
+
     pub fn subscribe(&self) -> CaptureChangeSubscription {
         let next_epoch = self
             .epoch()
@@ -128,6 +137,9 @@ impl CaptureChangeSubscription {
         }
     }
 
+    pub(crate) fn try_recv(&mut self) -> Result<Option<CaptureChange>, CaptureChangeError> {
+        self.try_read()
+    }
     fn try_read(&mut self) -> Result<Option<CaptureChange>, CaptureChangeError> {
         let state = self.feed.inner.state.lock();
         let Some(oldest) = state.retained.front().copied() else {

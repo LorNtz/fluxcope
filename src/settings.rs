@@ -475,10 +475,6 @@ pub(crate) struct SettingsLoadDiagnostic {
 }
 
 impl SettingsManager {
-    pub fn load() -> io::Result<Self> {
-        Self::load_from_path(default_config_path()?)
-    }
-
     pub fn load_from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -514,22 +510,22 @@ impl SettingsManager {
         Ok(manager)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
+    #[cfg(test)]
     pub fn server_port(&self) -> u16 {
         self.settings.server.port
     }
 
+    #[cfg(test)]
     pub fn certificate_store_dir(&self) -> io::Result<PathBuf> {
         expand_home_path(&self.settings.certificate.store_dir)
     }
 
+    #[cfg(test)]
     pub fn certificate_pem_filename(&self) -> &str {
         &self.settings.certificate.pem_filename
     }
 
+    #[cfg(test)]
     pub fn recording_settings(&self) -> &RecordingSettings {
         &self.settings.recording
     }
@@ -552,6 +548,7 @@ impl SettingsManager {
         self.settings.proxy.as_ref()
     }
 
+    #[cfg(test)]
     pub fn update<F>(&mut self, change: F) -> io::Result<()>
     where
         F: FnOnce(&mut AppSettings),

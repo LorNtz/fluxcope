@@ -26,16 +26,8 @@ pub(crate) fn run_id() -> RunId {
     RunId::from_str(RUN_ID).expect("canonical test run ID")
 }
 
-pub(crate) fn other_run_id() -> RunId {
-    RunId::from_str(OTHER_RUN_ID).expect("canonical alternate run ID")
-}
-
 pub(crate) fn endpoint() -> SocketAddr {
     ENDPOINT.parse().expect("test endpoint")
-}
-
-pub(crate) fn other_endpoint() -> SocketAddr {
-    OTHER_ENDPOINT.parse().expect("alternate test endpoint")
 }
 
 pub(crate) fn instance_scope() -> InstanceScope {

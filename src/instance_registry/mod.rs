@@ -82,6 +82,7 @@ impl InstanceDescriptor {
         self.started_at
     }
 
+    #[cfg(test)]
     pub(crate) fn pid(&self) -> u32 {
         self.pid
     }
@@ -90,10 +91,12 @@ impl InstanceDescriptor {
         &self.socket_path
     }
 
+    #[cfg(test)]
     pub(crate) fn config_mode(&self) -> ConfigMode {
         self.config_mode
     }
 
+    #[cfg(test)]
     pub(crate) fn persistence(&self) -> PersistenceMode {
         self.persistence
     }
@@ -153,6 +156,7 @@ impl RegistryMutationLock {
         Self::open(wirelens_home, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_acquire(wirelens_home: &Path) -> io::Result<Self> {
         Self::open(wirelens_home, false)
     }
@@ -568,6 +572,7 @@ impl RegistryPublisher {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_stale_for_replacement(
         &mut self,
         expected: &InstanceDescriptor,

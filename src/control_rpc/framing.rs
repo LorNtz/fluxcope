@@ -45,6 +45,7 @@ impl CallAdmission {
         Ok(Arc::new(CallLease { _permit: permit }))
     }
 
+    #[cfg(test)]
     pub(crate) fn try_acquire(&self) -> Result<Arc<CallLease>, ControlError> {
         let permit = Arc::clone(&self.permits)
             .try_acquire_owned()
@@ -83,6 +84,7 @@ pub(crate) struct EncodedFrame {
     bytes: Vec<u8>,
     _response_lease: OwnedSemaphorePermit,
     _call_lease: Arc<CallLease>,
+    #[cfg(test)]
     allocation_growth_count: usize,
 }
 
@@ -113,20 +115,7 @@ where
     R: AsyncRead + Unpin,
 {
     let payload = read_frame_payload(reader, max_bytes).await?;
-    parse_json_payload(payload, None).await
-}
-
-pub(crate) async fn read_json_frame_with_call_lease<T, R>(
-    reader: &mut R,
-    max_bytes: usize,
-    lease: Arc<CallLease>,
-) -> Result<T, ControlError>
-where
-    T: DeserializeOwned + Send + 'static,
-    R: AsyncRead + Unpin,
-{
-    let payload = read_frame_payload(reader, max_bytes).await?;
-    parse_json_payload(payload, Some(lease)).await
+    parse_json_payload(payload).await
 }
 
 async fn read_frame_payload<R>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, ControlError>
@@ -155,31 +144,13 @@ where
     Ok(payload)
 }
 
-async fn parse_json_payload<T>(
-    payload: Vec<u8>,
-    lease: Option<Arc<CallLease>>,
-) -> Result<T, ControlError>
+async fn parse_json_payload<T>(payload: Vec<u8>) -> Result<T, ControlError>
 where
     T: DeserializeOwned + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let _lease = lease;
-        strict_from_slice::<T>(&payload)
-    })
-    .await
-    .map_err(|_| ControlError::instance_unavailable("private RPC parser worker failed"))?
-}
-
-pub(crate) async fn read_request_frame<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> Result<ControlRequest, ControlError>
-where
-    R: AsyncRead + Unpin,
-{
-    read_validated_request_frame_inner(reader, max_bytes, None, Instant::now())
-        .await?
-        .request
+    tokio::task::spawn_blocking(move || strict_from_slice::<T>(&payload))
+        .await
+        .map_err(|_| ControlError::instance_unavailable("private RPC parser worker failed"))?
 }
 
 pub(crate) async fn read_validated_request_frame_with_call_lease<R>(
@@ -220,6 +191,7 @@ where
     .map_err(|_| ControlError::instance_unavailable("private RPC parser worker failed"))?
 }
 
+#[cfg(test)]
 pub(crate) async fn run_blocking_with_call_lease<F, T>(
     lease: Arc<CallLease>,
     work: F,
@@ -238,6 +210,7 @@ where
 
 type SerializationWorkerOutput = (Vec<u8>, OwnedSemaphorePermit, usize);
 
+#[cfg(test)]
 pub(crate) async fn serialize_json_frame<T>(
     value: T,
     max_bytes: usize,
@@ -331,7 +304,7 @@ fn finish_serialized_frame(
     output: SerializationWorkerOutput,
     call_lease: Arc<CallLease>,
 ) -> Result<EncodedFrame, ControlError> {
-    let (serialized, mut pessimistic_lease, allocation_growth_count) = output;
+    let (serialized, mut pessimistic_lease, _allocation_growth_count) = output;
     let payload_allocation = serialized.capacity().saturating_sub(4);
     let actual_lease = pessimistic_lease.split(payload_allocation).ok_or_else(|| {
         ControlError::instance_unavailable("private RPC response lease accounting failed")
@@ -341,7 +314,8 @@ fn finish_serialized_frame(
         bytes: serialized,
         _response_lease: actual_lease,
         _call_lease: call_lease,
-        allocation_growth_count,
+        #[cfg(test)]
+        allocation_growth_count: _allocation_growth_count,
     })
 }
 

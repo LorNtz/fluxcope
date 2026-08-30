@@ -20,3 +20,4 @@ Task 8: fix round 3/5 (1 addressed, 0 open — blocking public validation and do
 Task 9: initial GREEN (bounded exact-run MCP capture waits; focused 23+35+26+30+2, full 608; review pending)
 Task 9: fix round 1/5 (2 performance findings addressed, 0 open — search admission before 32-row batch fetch, retention-bounded revision/pending watermarks, timeout-owned cancellation, boxed compact private result; focused 27+39+26+30+2, full 612)
 Task 9: complete (commits 8d3910a..e8cb5c0, design PASS, performance PASS, review clean)
+Task 10: complete (bounded raw/decoded paging, shared TUI/MCP body admission, revision-safe cache, canonical resources; focused body/decode/body-work/MCP/runtime/RPC/child 4+25+8+9+63+32+2, full 684; design PASS, performance PASS, review clean)

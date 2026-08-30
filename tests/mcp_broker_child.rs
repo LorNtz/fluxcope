@@ -7,6 +7,7 @@ use rmcp::{
     ServiceError, ServiceExt,
     model::{
         CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
+        ReadResourceRequestParams,
     },
     transport::TokioChildProcess,
 };
@@ -36,8 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_contract() -> Result<()>
-{
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task10_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -57,7 +57,13 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
         .as_ref()
         .expect("tools capability");
     assert_eq!(tools_capability.list_changed, None);
-    assert!(server_info.capabilities.resources.is_none());
+    let resources_capability = server_info
+        .capabilities
+        .resources
+        .as_ref()
+        .expect("resources capability");
+    assert_eq!(resources_capability.subscribe, None);
+    assert_eq!(resources_capability.list_changed, None);
     assert!(server_info.capabilities.prompts.is_none());
     assert!(server_info.capabilities.logging.is_none());
     assert!(server_info.capabilities.completions.is_none());
@@ -73,6 +79,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
             .collect::<Vec<_>>(),
         vec![
             "get_broker_status",
+            "get_capture",
             "get_status",
             "list_instances",
             "search_captures",
@@ -161,7 +168,37 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
             "wait description must contain {required_phrase:?}"
         );
     }
-    assert!(tools.iter().all(|tool| tool.name != "get_capture"));
+    let get_capture = tools
+        .iter()
+        .find(|tool| tool.name == "get_capture")
+        .expect("get_capture schema");
+    let get_capture_annotations = get_capture.annotations.as_ref().expect("annotations");
+    assert_eq!(get_capture_annotations.read_only_hint, Some(true));
+    assert_eq!(get_capture_annotations.destructive_hint, Some(false));
+    assert_eq!(get_capture_annotations.idempotent_hint, Some(true));
+    assert_eq!(get_capture_annotations.open_world_hint, Some(false));
+    let get_capture_required = get_capture.input_schema["required"]
+        .as_array()
+        .expect("get_capture required fields");
+    assert!(get_capture_required.contains(&json!("instance")));
+    assert!(get_capture_required.contains(&json!("capture_id")));
+    assert!(!get_capture_required.contains(&json!("expected_revision")));
+    let get_capture_instance = resolve_local_schema(
+        get_capture.input_schema.as_ref(),
+        &get_capture.input_schema["properties"]["instance"],
+    );
+    let get_capture_instance_required = get_capture_instance["required"]
+        .as_array()
+        .expect("get_capture instance required fields");
+    assert_eq!(get_capture_instance_required.len(), 2);
+    assert!(get_capture_instance_required.contains(&json!("proxy_endpoint")));
+    assert!(get_capture_instance_required.contains(&json!("run_id")));
+    let capture_id_schema = resolve_local_schema(
+        get_capture.input_schema.as_ref(),
+        &get_capture.input_schema["properties"]["capture_id"],
+    );
+    assert_eq!(capture_id_schema["minimum"], json!(0));
+    assert!(get_capture.input_schema["properties"]["expected_revision"].is_object());
     for name in ["get_broker_status", "list_instances"] {
         let tool = tools
             .iter()
@@ -169,6 +206,17 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
             .expect("tool schema");
         assert_eq!(tool.input_schema["properties"], json!({}));
     }
+
+    let resources = client.list_resources(None).await?;
+    assert!(resources.resources.is_empty());
+    assert!(resources.next_cursor.is_none());
+    let templates = client.list_resource_templates(None).await?;
+    assert_eq!(templates.resource_templates.len(), 1);
+    assert_eq!(
+        templates.resource_templates[0].uri_template,
+        "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}"
+    );
+    assert!(templates.next_cursor.is_none());
 
     let result = client
         .call_tool(CallToolRequestParams::new("list_instances"))
@@ -209,6 +257,24 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_cont
     assert_eq!(
         zero_timeout.data.expect("typed MCP error data")["code"],
         json!("invalid_argument")
+    );
+
+    let invalid_resource = client
+        .read_resource(ReadResourceRequestParams::new(
+            "http://127.0.0.1:8989/not-a-wirelens-resource",
+        ))
+        .await
+        .expect_err("strict resource URI");
+    let ServiceError::McpError(invalid_resource) = invalid_resource else {
+        panic!("expected typed resource MCP error");
+    };
+    assert_eq!(
+        invalid_resource.data.expect("typed resource error data"),
+        json!({
+            "code": "invalid_argument",
+            "retryable": false,
+            "details": {}
+        })
     );
 
     client.cancel().await?;

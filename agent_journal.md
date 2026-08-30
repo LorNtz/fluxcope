@@ -43,3 +43,8 @@ Date: 2026/09/17 10:40
 Date: 2026/09/17 10:40
 
 - Combined capture milestone notification exports with master Hyper 1 body-channel exports while replaying wait_for_capture.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:41
+
+- Merged paged-body capture subscriptions with Hyper 1 body helpers. Kept master private_fs log admission on a bounded blocking task instead of restoring the weaker duplicated file-open implementation.

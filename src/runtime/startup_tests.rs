@@ -91,7 +91,7 @@ fn runtime_handler() -> (
     RuntimeControlHandler,
     super::control::RuntimeControlReceiver,
 ) {
-    let (client, receiver) = RuntimeGateway::new(64);
+    let (client, receiver) = RuntimeGateway::channel(64);
     (RuntimeControlHandler::new(client), receiver)
 }
 

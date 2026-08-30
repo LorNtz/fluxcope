@@ -277,7 +277,7 @@ fn public_query_patterns_use_the_private_compiler_byte_bound() {
 }
 
 #[tokio::test]
-async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() {
+async fn real_broker_transport_advertises_the_task10_public_capture_tools() {
     let home = tempfile::tempdir().expect("temporary home");
     let broker = Broker::new(home.path()).expect("real broker");
     let (client_transport, server_transport) = duplex(64 * 1024);
@@ -298,6 +298,7 @@ async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() 
 
     for (name, read_only) in [
         ("get_status", true),
+        ("get_capture", true),
         ("set_recording_enabled", false),
         ("search_captures", true),
     ] {
@@ -313,7 +314,6 @@ async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() 
         assert_eq!(tool.input_schema["type"], json!("object"));
         assert_eq!(tool.input_schema["additionalProperties"], false);
     }
-    assert!(tools.iter().all(|tool| tool.name != "get_capture"));
 
     let invalid_search = json!({"query": {"status": {}}})
         .as_object()

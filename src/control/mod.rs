@@ -1,3 +1,4 @@
+pub(crate) mod body;
 pub(crate) mod capture_query;
 
 use crate::{
@@ -123,6 +124,15 @@ pub(crate) enum RuntimeRequest {
         capture_id: CaptureSequence,
         expected_revision: Option<u64>,
     },
+    GetCaptureBodyMetadata {
+        capture_id: CaptureSequence,
+        side: crate::capture::BodySide,
+    },
+    GetCaptureBodySnapshot {
+        capture_id: CaptureSequence,
+        expected_revision: u64,
+        side: crate::capture::BodySide,
+    },
     #[cfg(test)]
     UnsupportedForTest,
 }
@@ -133,6 +143,8 @@ pub(crate) enum RuntimeReply {
     RecordingUpdated(RecordingUpdate),
     CaptureSearchBatch(CaptureSearchBatch),
     CaptureSnapshot(Box<CaptureSnapshotReply>),
+    CaptureBodyMetadata(Box<body::CaptureBodyMetadataReply>),
+    CaptureBodySnapshot(Box<body::CaptureBodySnapshotReply>),
 }
 
 #[cfg(test)]
@@ -140,7 +152,11 @@ impl RuntimeReply {
     pub(crate) fn instance(&self) -> &InstanceRuntimeSnapshot {
         match self {
             Self::Instance(instance) => instance,
-            Self::RecordingUpdated(_) | Self::CaptureSearchBatch(_) | Self::CaptureSnapshot(_) => {
+            Self::RecordingUpdated(_)
+            | Self::CaptureSearchBatch(_)
+            | Self::CaptureSnapshot(_)
+            | Self::CaptureBodyMetadata(_)
+            | Self::CaptureBodySnapshot(_) => {
                 panic!("runtime reply does not contain an instance snapshot")
             }
         }

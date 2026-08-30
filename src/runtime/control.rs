@@ -1,9 +1,14 @@
+use bytes::{Bytes, BytesMut};
+use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt,
     future::Future,
     io,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -17,14 +22,23 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::capture::{DecodePolicy, DecodeService, start_decode_service_with_admission};
 use crate::{
     capture::{
-        CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind, CaptureSequence,
-        CaptureSnapshot,
+        ActiveBodyWorkLease, BodySide, BodyStatus, BodyStreamState, BodyWorkAdmission,
+        CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind,
+        CaptureChangeSubscription, CaptureSequence, CaptureSnapshot, CapturedBodyPreview,
+        CapturedHeaders, ContentDecodePolicy, DecodedBytes, decode_content_bytes,
     },
     control::{
         CaptureMilestone, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
         WaitForCaptureRequest, WaitForCaptureResult,
+        body::{
+            BodyContentRequest, BodyPage, BodyPageSource, BodyRange, BodyRepresentation,
+            CaptureBodyMetadataReply, CaptureBodySnapshotReply, MAX_TERMINAL_DECODED_CACHE_BYTES,
+            media_type,
+        },
         capture_query::{
             CAPTURE_SEARCH_BATCH_SIZE, CAPTURE_SEARCH_PAGE_JSON_BUDGET, CaptureDetail,
             CaptureQuery, CaptureSearchCursor, CaptureSearchPage, CompactCapture,
@@ -63,7 +77,7 @@ pub(super) struct RuntimeControlReceiver {
 pub(super) struct RuntimeGateway;
 
 impl RuntimeGateway {
-    pub(super) fn new(capacity: usize) -> (RuntimeControlClient, RuntimeControlReceiver) {
+    pub(super) fn channel(capacity: usize) -> (RuntimeControlClient, RuntimeControlReceiver) {
         let (commands, receiver) = mpsc::channel(capacity);
         (
             RuntimeControlClient { commands },
@@ -121,7 +135,7 @@ impl RuntimeControlReceiver {
     pub(super) fn close(&mut self) {
         self.commands.close();
     }
-
+    #[cfg(test)]
     pub(super) fn is_closed(&self) -> bool {
         self.commands.is_closed()
     }
@@ -415,10 +429,708 @@ fn feed_gap(error: CaptureChangeError) -> ControlError {
     )
 }
 
+pub(super) fn page_raw_body(
+    preview: &CapturedBodyPreview,
+    request: &BodyContentRequest,
+    status: &BodyStatus,
+    headers: &CapturedHeaders,
+) -> Result<BodyPage, ControlError> {
+    request.validate()?;
+    let total_bytes = preview.len();
+    let start = request.offset.min(total_bytes);
+    let end = start.saturating_add(request.length).min(total_bytes);
+    let mut content = BytesMut::with_capacity(end.saturating_sub(start));
+    let mut chunk_start: usize = 0;
+    for chunk in preview.chunks() {
+        let chunk_end = chunk_start.saturating_add(chunk.len());
+        if chunk_end > start && chunk_start < end {
+            let local_start = start.saturating_sub(chunk_start);
+            let local_end = end.saturating_sub(chunk_start).min(chunk.len());
+            content.extend_from_slice(&chunk[local_start..local_end]);
+        }
+        if chunk_end >= end {
+            break;
+        }
+        chunk_start = chunk_end;
+    }
+    Ok(body_page(
+        content.freeze(),
+        request,
+        status,
+        headers,
+        start,
+        total_bytes,
+        Vec::new(),
+        false,
+    ))
+}
+
+pub(super) fn page_decoded_body(
+    decoded: &DecodedBytes,
+    request: &BodyContentRequest,
+    status: &BodyStatus,
+    headers: &CapturedHeaders,
+) -> Result<BodyPage, ControlError> {
+    request.validate()?;
+    let total_bytes = decoded.bytes.len();
+    let start = request.offset.min(total_bytes);
+    let requested_end = start.saturating_add(request.length).min(total_bytes);
+    let mut end = requested_end;
+    if decoded.is_utf8() {
+        if !is_utf8_boundary(&decoded.bytes, start) {
+            let nearest_start = (start.saturating_sub(3)..start)
+                .rev()
+                .find(|offset| is_utf8_boundary(&decoded.bytes, *offset))
+                .unwrap_or(0);
+            let nearest_end = (start.saturating_add(1)..=start.saturating_add(3).min(total_bytes))
+                .find(|offset| is_utf8_boundary(&decoded.bytes, *offset))
+                .unwrap_or(total_bytes);
+            return Err(ControlError::new(
+                ControlErrorCode::InvalidArgument,
+                "decoded text offset is not a UTF-8 character boundary",
+                false,
+                serde_json::json!({
+                    "offset": request.offset,
+                    "nearest_start": nearest_start,
+                    "nearest_end": nearest_end,
+                }),
+            ));
+        }
+        while end > start && !is_utf8_boundary(&decoded.bytes, end) {
+            end -= 1;
+        }
+    }
+    Ok(body_page(
+        Bytes::copy_from_slice(&decoded.bytes[start..end]),
+        request,
+        status,
+        headers,
+        start,
+        total_bytes,
+        decoded.encoding_chain.clone(),
+        decoded.output_limited,
+    ))
+}
+
+fn is_utf8_boundary(bytes: &[u8], index: usize) -> bool {
+    index == bytes.len()
+        || bytes
+            .get(index)
+            .is_some_and(|byte| byte & 0b1100_0000 != 0b1000_0000)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn body_page(
+    content: Bytes,
+    request: &BodyContentRequest,
+    status: &BodyStatus,
+    headers: &CapturedHeaders,
+    start: usize,
+    total_bytes: usize,
+    decoded_encoding_chain: Vec<String>,
+    decoded_output_limited: bool,
+) -> BodyPage {
+    let actual_length = content.len();
+    let end = start.saturating_add(actual_length);
+    BodyPage {
+        content,
+        media_type: media_type(headers),
+        requested_range: BodyRange {
+            offset: request.offset,
+            length: request.length,
+        },
+        actual_range: BodyRange {
+            offset: start,
+            length: actual_length,
+        },
+        total_bytes,
+        next_offset: (end < total_bytes).then_some(end),
+        source: BodyPageSource {
+            stream: status.stream,
+            observed_bytes: status.observed_bytes,
+            retained_bytes: status.retained_bytes,
+            truncated: status.preview_limit.is_some(),
+            truncation_reason: status.preview_limit,
+            decoded_encoding_chain,
+            decoded_output_limited,
+        },
+    }
+}
+
+pub(super) fn should_cache_decoded_body(status: &BodyStatus) -> bool {
+    matches!(
+        status.stream,
+        BodyStreamState::Complete | BodyStreamState::Failed | BodyStreamState::Cancelled
+    )
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct BodyCacheKey {
+    pub(super) instance: InstanceScope,
+    pub(super) capture_id: CaptureSequence,
+    pub(super) capture_revision: u64,
+    pub(super) side: BodySide,
+    pub(super) representation: BodyRepresentation,
+}
+
+struct DecodedCacheEntry {
+    decoded: DecodedBytes,
+    used_at: u64,
+}
+
+pub(super) struct DecodedBodyCache {
+    capacity_bytes: usize,
+    bytes: usize,
+    clock: u64,
+    entries: HashMap<BodyCacheKey, DecodedCacheEntry>,
+    lru: BTreeMap<u64, BodyCacheKey>,
+}
+
+impl DecodedBodyCache {
+    pub(super) fn new(capacity_bytes: usize) -> Self {
+        Self {
+            capacity_bytes,
+            bytes: 0,
+            clock: 0,
+            entries: HashMap::new(),
+            lru: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn get(&mut self, key: &BodyCacheKey) -> Option<Bytes> {
+        self.get_decoded(key).map(|decoded| decoded.bytes)
+    }
+
+    fn get_decoded(&mut self, key: &BodyCacheKey) -> Option<DecodedBytes> {
+        let entry = self.entries.get_mut(key)?;
+        self.lru.remove(&entry.used_at);
+        self.clock = self
+            .clock
+            .checked_add(1)
+            .expect("decoded cache clock exhausted");
+        entry.used_at = self.clock;
+        let decoded = entry.decoded.clone();
+        self.lru.insert(self.clock, key.clone());
+        Some(decoded)
+    }
+
+    #[cfg(test)]
+    pub(super) fn insert(&mut self, key: BodyCacheKey, bytes: Bytes) {
+        self.insert_decoded(key, DecodedBytes::new(bytes, Vec::new(), false));
+    }
+
+    fn insert_decoded(&mut self, key: BodyCacheKey, decoded: DecodedBytes) {
+        self.remove(&key);
+        if decoded.bytes.len() > self.capacity_bytes {
+            return;
+        }
+        self.clock = self
+            .clock
+            .checked_add(1)
+            .expect("decoded cache clock exhausted");
+        self.bytes = self.bytes.saturating_add(decoded.bytes.len());
+        self.lru.insert(self.clock, key.clone());
+        self.entries.insert(
+            key,
+            DecodedCacheEntry {
+                decoded,
+                used_at: self.clock,
+            },
+        );
+        while self.bytes > self.capacity_bytes {
+            let Some((_, oldest)) = self.lru.pop_first() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(evicted.decoded.bytes.len());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_change(&mut self, change: CaptureChange) {
+        self.apply_changes(std::iter::once(change));
+    }
+
+    fn apply_changes(&mut self, changes: impl IntoIterator<Item = CaptureChange>) {
+        let mut invalidated = HashMap::<CaptureSequence, Option<u64>>::new();
+        for change in changes {
+            match change.kind {
+                CaptureChangeKind::Clear => {
+                    self.clear();
+                    invalidated.clear();
+                }
+                CaptureChangeKind::RetentionEviction | CaptureChangeKind::ExplicitDelete => {
+                    invalidated.insert(change.sequence, None);
+                }
+                CaptureChangeKind::Admitted | CaptureChangeKind::RecordUpdated => {
+                    invalidated.insert(change.sequence, Some(change.revision));
+                }
+            }
+        }
+        if invalidated.is_empty() {
+            return;
+        }
+        self.retain(|key| {
+            invalidated
+                .get(&key.capture_id)
+                .is_none_or(|revision| revision.is_some_and(|value| key.capture_revision == value))
+        });
+    }
+
+    pub(super) fn apply_feed_error(&mut self, _error: CaptureChangeError) {
+        self.clear();
+    }
+
+    fn retain(&mut self, keep: impl Fn(&BodyCacheKey) -> bool) {
+        let mut removed_lru = Vec::new();
+        self.entries.retain(|key, entry| {
+            if keep(key) {
+                true
+            } else {
+                self.bytes = self.bytes.saturating_sub(entry.decoded.bytes.len());
+                removed_lru.push(entry.used_at);
+                false
+            }
+        });
+        for used_at in removed_lru {
+            self.lru.remove(&used_at);
+        }
+    }
+
+    fn remove(&mut self, key: &BodyCacheKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.bytes = self.bytes.saturating_sub(entry.decoded.bytes.len());
+            self.lru.remove(&entry.used_at);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        self.bytes = 0;
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_snapshot(&self) -> DecodedBodyCacheSnapshot {
+        DecodedBodyCacheSnapshot {
+            entries: self.entries.len(),
+            bytes: self.bytes,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) struct RuntimeBodyServices {
+    pub(super) admission: Arc<BodyWorkAdmission>,
+    pub(super) decode: DecodeService,
+}
+
+#[cfg(test)]
+impl RuntimeBodyServices {
+    pub(super) fn start(policy: DecodePolicy, shutdown: CancellationToken) -> Self {
+        let admission = Arc::new(BodyWorkAdmission::new());
+        let decode = start_decode_service_with_admission(policy, shutdown, Arc::clone(&admission));
+        Self { admission, decode }
+    }
+
+    pub(super) fn control_context(
+        &self,
+        runtime: RuntimeControlClient,
+        capture_changes: CaptureChangeFeed,
+    ) -> ControlServiceContext {
+        ControlServiceContext {
+            runtime,
+            capture_changes,
+            body_work: Arc::clone(&self.admission),
+        }
+    }
+}
+#[cfg(test)]
+pub(super) struct DecodedBodyCacheSnapshot {
+    pub(super) entries: usize,
+    pub(super) bytes: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct BodyJobScheduler {
+    runtime: RuntimeControlClient,
+    admission: Arc<BodyWorkAdmission>,
+    cache: Arc<Mutex<DecodedBodyCache>>,
+    change_feed: CaptureChangeFeed,
+    changes: Arc<Mutex<CaptureChangeSubscription>>,
+}
+
+struct BodyAdmissionPlan {
+    key: BodyCacheKey,
+    charge_bytes: usize,
+    cached: Option<DecodedBytes>,
+}
+
+impl BodyAdmissionPlan {
+    fn requires_readmission(&self, current: &Self) -> bool {
+        self.key != current.key
+            || self.charge_bytes != current.charge_bytes
+            || self.cached.is_some() != current.cached.is_some()
+    }
+}
+
+impl BodyJobScheduler {
+    #[cfg(test)]
+    pub(super) fn new(
+        _instance: InstanceScope,
+        runtime: RuntimeControlClient,
+        change_feed: CaptureChangeFeed,
+        admission: Arc<BodyWorkAdmission>,
+    ) -> Self {
+        Self::from_context(runtime, change_feed, admission)
+    }
+
+    fn from_context(
+        runtime: RuntimeControlClient,
+        change_feed: CaptureChangeFeed,
+        admission: Arc<BodyWorkAdmission>,
+    ) -> Self {
+        let changes = change_feed.subscribe();
+        Self {
+            runtime,
+            admission,
+            cache: Arc::new(Mutex::new(DecodedBodyCache::new(
+                MAX_TERMINAL_DECODED_CACHE_BYTES,
+            ))),
+            change_feed,
+            changes: Arc::new(Mutex::new(changes)),
+        }
+    }
+
+    async fn read(
+        &self,
+        request: BodyContentRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        self.apply_pending_changes();
+        let metadata = self.metadata(&request, cancelled.clone()).await?;
+        validate_body_metadata(&request, &metadata)?;
+        let mut plan = self.admission_plan(&request, &metadata);
+        let admission_deadline = tokio::time::Instant::from_std(deadline);
+        let mut queued = self.admission.try_admit_mcp_until(
+            plan.charge_bytes,
+            admission_deadline,
+            &cancelled,
+        )?;
+        loop {
+            let active = queued
+                .acquire_active(admission_deadline, cancelled.clone())
+                .await?;
+            self.apply_pending_changes();
+            let current = self.metadata(&request, cancelled.clone()).await?;
+            validate_body_metadata(&request, &current)?;
+            let current_plan = self.admission_plan(&request, &current);
+            if plan.requires_readmission(&current_plan) {
+                let charge_bytes = current_plan.charge_bytes;
+                plan = current_plan;
+                queued = active.retry_mcp_after_revalidation(
+                    charge_bytes,
+                    admission_deadline,
+                    &cancelled,
+                )?;
+                continue;
+            }
+
+            if let Some(decoded) = current_plan.cached {
+                drop(active);
+                let page =
+                    page_decoded_body(&decoded, &request, &current.status, &current.headers)?;
+                return Ok(ControlResult::ReadCaptureBody {
+                    instance: current.instance,
+                    page: Box::new(page),
+                });
+            }
+
+            let snapshot_epoch = self.change_feed.epoch();
+            let snapshot = self.snapshot(&request, cancelled.clone()).await?;
+            validate_body_snapshot(&request, &snapshot)?;
+            let cache_epoch =
+                (self.change_feed.epoch() == snapshot_epoch).then_some(snapshot_epoch);
+            let instance = snapshot.instance.clone();
+            let page = match request.representation {
+                BodyRepresentation::Raw => page_raw_body(
+                    &snapshot.preview,
+                    &request,
+                    &snapshot.status,
+                    &snapshot.headers,
+                )?,
+                BodyRepresentation::Decoded => {
+                    let decoded = decode_body_off_thread(
+                        snapshot.preview.clone(),
+                        snapshot.headers.clone(),
+                        active,
+                        deadline,
+                        cancelled,
+                    )
+                    .await?;
+                    if should_cache_decoded_body(&snapshot.status)
+                        && let Some(cache_epoch) = cache_epoch
+                    {
+                        self.apply_pending_changes();
+                        self.change_feed.run_if_epoch(cache_epoch, || {
+                            self.cache
+                                .lock()
+                                .insert_decoded(current_plan.key, decoded.clone());
+                        });
+                    }
+                    return Ok(ControlResult::ReadCaptureBody {
+                        instance,
+                        page: Box::new(page_decoded_body(
+                            &decoded,
+                            &request,
+                            &snapshot.status,
+                            &snapshot.headers,
+                        )?),
+                    });
+                }
+            };
+            drop(active);
+            return Ok(ControlResult::ReadCaptureBody {
+                instance,
+                page: Box::new(page),
+            });
+        }
+    }
+
+    fn admission_plan(
+        &self,
+        request: &BodyContentRequest,
+        metadata: &CaptureBodyMetadataReply,
+    ) -> BodyAdmissionPlan {
+        let key = BodyCacheKey {
+            instance: metadata.instance.clone(),
+            capture_id: request.capture_id,
+            capture_revision: request.capture_revision,
+            side: request.side,
+            representation: request.representation,
+        };
+        let cached = (request.representation == BodyRepresentation::Decoded
+            && should_cache_decoded_body(&metadata.status))
+        .then(|| self.cache.lock().get_decoded(&key))
+        .flatten();
+        let charge_bytes = cached
+            .as_ref()
+            .map_or(metadata.retained_bytes, |decoded| decoded.bytes.len());
+        BodyAdmissionPlan {
+            key,
+            charge_bytes,
+            cached,
+        }
+    }
+
+    async fn metadata(
+        &self,
+        request: &BodyContentRequest,
+        cancelled: CancellationToken,
+    ) -> Result<CaptureBodyMetadataReply, ControlError> {
+        match self
+            .runtime
+            .request(
+                RuntimeRequest::GetCaptureBodyMetadata {
+                    capture_id: request.capture_id,
+                    side: request.side,
+                },
+                cancelled,
+            )
+            .await?
+        {
+            RuntimeReply::CaptureBodyMetadata(reply) => Ok(*reply),
+            _ => Err(ControlError::internal(
+                "runtime returned an unexpected capture body metadata reply",
+            )),
+        }
+    }
+
+    async fn snapshot(
+        &self,
+        request: &BodyContentRequest,
+        cancelled: CancellationToken,
+    ) -> Result<CaptureBodySnapshotReply, ControlError> {
+        match self
+            .runtime
+            .request(
+                RuntimeRequest::GetCaptureBodySnapshot {
+                    capture_id: request.capture_id,
+                    expected_revision: request.capture_revision,
+                    side: request.side,
+                },
+                cancelled,
+            )
+            .await?
+        {
+            RuntimeReply::CaptureBodySnapshot(reply) => Ok(*reply),
+            _ => Err(ControlError::internal(
+                "runtime returned an unexpected capture body snapshot reply",
+            )),
+        }
+    }
+
+    fn apply_pending_changes(&self) {
+        let mut subscription = self.changes.lock();
+        let mut changes = Vec::new();
+        let mut feed_error = None;
+        loop {
+            match subscription.try_recv() {
+                Ok(Some(change)) => changes.push(change),
+                Ok(None) => break,
+                Err(error) => {
+                    feed_error = Some(error);
+                    *subscription = self.change_feed.subscribe();
+                    break;
+                }
+            }
+        }
+        drop(subscription);
+        if let Some(error) = feed_error {
+            self.cache.lock().apply_feed_error(error);
+        } else if !changes.is_empty() {
+            self.cache.lock().apply_changes(changes);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_admission(&self) -> &Arc<BodyWorkAdmission> {
+        &self.admission
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_cache_capacity_bytes(&self) -> usize {
+        self.cache.lock().capacity_bytes
+    }
+}
+
+fn validate_body_metadata(
+    request: &BodyContentRequest,
+    reply: &CaptureBodyMetadataReply,
+) -> Result<(), ControlError> {
+    if reply.capture_id != request.capture_id || reply.side != request.side {
+        return Err(ControlError::internal(
+            "runtime returned mismatched capture body metadata",
+        ));
+    }
+    validate_body_revision(request, reply.capture_revision)
+}
+
+fn validate_body_snapshot(
+    request: &BodyContentRequest,
+    reply: &CaptureBodySnapshotReply,
+) -> Result<(), ControlError> {
+    if reply.capture_id != request.capture_id || reply.side != request.side {
+        return Err(ControlError::internal(
+            "runtime returned mismatched capture body snapshot",
+        ));
+    }
+    if reply.retained_bytes != reply.preview.len() {
+        return Err(ControlError::internal(
+            "runtime returned inconsistent capture body snapshot bytes",
+        ));
+    }
+    validate_body_revision(request, reply.capture_revision)
+}
+
+fn validate_body_revision(
+    request: &BodyContentRequest,
+    current_revision: u64,
+) -> Result<(), ControlError> {
+    if current_revision == request.capture_revision {
+        return Ok(());
+    }
+    Err(ControlError::new(
+        ControlErrorCode::CaptureRevisionConflict,
+        "capture revision changed",
+        false,
+        serde_json::json!({
+            "capture_id": request.capture_id,
+            "expected_revision": request.capture_revision,
+            "current_revision": current_revision,
+        }),
+    ))
+}
+
+struct DecodeWorkerCancellation {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl DecodeWorkerCancellation {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self { flag, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DecodeWorkerCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(true, Ordering::Release);
+        }
+    }
+}
+
+async fn decode_body_off_thread(
+    preview: CapturedBodyPreview,
+    headers: CapturedHeaders,
+    active: ActiveBodyWorkLease,
+    deadline: Instant,
+    cancelled: CancellationToken,
+) -> Result<DecodedBytes, ControlError> {
+    let cancellation_flag = Arc::new(AtomicBool::new(false));
+    let mut cancel_worker_on_drop = DecodeWorkerCancellation::new(Arc::clone(&cancellation_flag));
+    let worker_flag = Arc::clone(&cancellation_flag);
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let _active = active;
+        decode_content_bytes(
+            &preview,
+            &headers,
+            &ContentDecodePolicy::default(),
+            &worker_flag,
+        )
+    });
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::cancelled("capture body decode cancelled"))
+        }
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::deadline_exceeded("capture body decode deadline elapsed"))
+        }
+        result = &mut worker => {
+            cancel_worker_on_drop.disarm();
+            result
+                .map_err(|_| ControlError::internal("capture body decode worker failed"))?
+                .map_err(|error| {
+                    ControlError::new(
+                        error.code(),
+                        "capture body decoding failed",
+                        false,
+                        error.details(),
+                    )
+                })
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ControlServiceContext {
     pub(super) runtime: RuntimeControlClient,
     pub(super) capture_changes: CaptureChangeFeed,
+    pub(super) body_work: Arc<BodyWorkAdmission>,
 }
 
 #[cfg(test)]
@@ -427,6 +1139,7 @@ impl From<RuntimeControlClient> for ControlServiceContext {
         Self {
             runtime,
             capture_changes: CaptureChangeFeed::new(),
+            body_work: Arc::new(BodyWorkAdmission::default()),
         }
     }
 }
@@ -437,16 +1150,23 @@ pub(super) struct RuntimeControlHandler {
     capture_changes: CaptureChangeFeed,
     capture_searches: Arc<CaptureSearchAdmission>,
     capture_details: Arc<DetailMaterializationAdmission>,
+    body_jobs: BodyJobScheduler,
 }
 
 impl RuntimeControlHandler {
     pub(super) fn new(context: impl Into<ControlServiceContext>) -> Self {
         let context = context.into();
+        let body_jobs = BodyJobScheduler::from_context(
+            context.runtime.clone(),
+            context.capture_changes.clone(),
+            context.body_work,
+        );
         Self {
             runtime: context.runtime,
             capture_changes: context.capture_changes,
             capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
             capture_details: Arc::new(DetailMaterializationAdmission::new(4)),
+            body_jobs,
         }
     }
 
@@ -747,6 +1467,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
         let capture_searches = Arc::clone(&self.capture_searches);
         let capture_details = Arc::clone(&self.capture_details);
         let capture_changes = self.capture_changes.clone();
+        let body_jobs = self.body_jobs.clone();
         async move {
             match operation {
                 ControlOperation::DescribeInstance => {
@@ -851,6 +1572,9 @@ impl ControlRpcHandler for RuntimeControlHandler {
                         instance,
                         capture: Box::new(capture),
                     })
+                }
+                ControlOperation::ReadCaptureBody(request) => {
+                    body_jobs.read(*request, _context.deadline, cancelled).await
                 }
                 ControlOperation::WaitForCapture(request) => {
                     Self::wait_for_capture(
@@ -972,10 +1696,12 @@ impl PrivateControlStartup {
             .map_err(PrivateControlStartupError::ControlBind)
     }
 
+    #[cfg(test)]
     pub(super) fn descriptor_path(&self) -> &std::path::Path {
         self.publisher.descriptor_path()
     }
 
+    #[cfg(test)]
     pub(super) fn socket_path(&self) -> &std::path::Path {
         self.publisher.socket_path()
     }
@@ -1337,11 +2063,11 @@ impl RunningPrivateControl {
         grace: Duration,
     ) -> std::result::Result<(), PrivateControlStartupError> {
         self.shutdown.cancel();
-        if let Some(mut task) = self.task.take() {
-            if time::timeout(grace, &mut task).await.is_err() {
-                task.abort();
-                let _ = task.await;
-            }
+        if let Some(mut task) = self.task.take()
+            && time::timeout(grace, &mut task).await.is_err()
+        {
+            task.abort();
+            let _ = task.await;
         }
         self.publisher.take();
         Ok(())
@@ -1369,6 +2095,9 @@ mod task8_tests;
 
 #[cfg(test)]
 mod task9_tests;
+
+#[cfg(test)]
+mod task10_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1415,7 +2144,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_rejects_after_shutdown() {
-        let (client, receiver) = RuntimeGateway::new(64);
+        let (client, receiver) = RuntimeGateway::channel(64);
         drop(receiver);
 
         let error = client
@@ -1431,7 +2160,7 @@ mod tests {
         let identity =
             InstanceIdentity::new("127.0.0.1:19006".parse().expect("endpoint")).expect("identity");
         let expected = snapshot(&identity);
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let cancelled = CancellationToken::new();
         let request_cancelled = cancelled.clone();
         let client_task = tokio::spawn(async move {
@@ -1460,7 +2189,7 @@ mod tests {
         let identity =
             InstanceIdentity::new("127.0.0.1:19007".parse().expect("endpoint")).expect("identity");
         let expected = snapshot(&identity);
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let first_client = client.clone();
         let first = tokio::spawn(async move {
             first_client
@@ -1510,7 +2239,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_interrupts_backpressure_before_capacity_is_available() {
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let admitted_client = client.clone();
         let admitted = tokio::spawn(async move {
             admitted_client
@@ -1557,7 +2286,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_interrupts_waiting_for_a_runtime_reply() {
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let cancelled = CancellationToken::new();
         let request_cancelled = cancelled.clone();
         let waiting = tokio::spawn(async move {
@@ -1591,7 +2320,7 @@ mod tests {
         let identity =
             InstanceIdentity::new("127.0.0.1:19009".parse().expect("endpoint")).expect("identity");
         let expected = snapshot(&identity);
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let admitted_client = client.clone();
         let admitted = tokio::spawn(async move {
             admitted_client
@@ -1622,7 +2351,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_runtime_reply_sender_is_reported_as_instance_unavailable() {
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let waiting = tokio::spawn(async move {
             client
                 .request(RuntimeRequest::DescribeInstance, CancellationToken::new())
@@ -1643,7 +2372,7 @@ mod tests {
         let identity =
             InstanceIdentity::new("127.0.0.1:19010".parse().expect("endpoint")).expect("identity");
         let expected = snapshot(&identity);
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let handler = RuntimeControlHandler::new(client);
         let handle_task = tokio::spawn(async move {
             handler
@@ -1681,7 +2410,7 @@ mod tests {
 
     #[tokio::test]
     async fn handler_disconnect_cancellation_reaches_the_admitted_runtime_command() {
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let handler = RuntimeControlHandler::new(client);
         let cancelled = CancellationToken::new();
         let request_cancelled = cancelled.clone();
@@ -1726,7 +2455,7 @@ mod tests {
         let identity =
             InstanceIdentity::new("127.0.0.1:19015".parse().expect("endpoint")).expect("identity");
         let expected = snapshot(&identity);
-        let (client, mut receiver) = RuntimeGateway::new(1);
+        let (client, mut receiver) = RuntimeGateway::channel(1);
         let server = ControlRpcServer::new(identity.clone(), RuntimeControlHandler::new(client));
         let (server_stream, mut client_stream) = UnixStream::pair().expect("Unix stream pair");
         let server_task = tokio::spawn(async move { server.serve_connection(server_stream).await });

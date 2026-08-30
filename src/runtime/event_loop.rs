@@ -37,10 +37,11 @@ use crate::{
 };
 #[cfg(unix)]
 use crate::{
-    capture::{CaptureSequence, CaptureSnapshotMode},
+    capture::{BodySide, CaptureSequence, CaptureSnapshotMode, CapturedHeaders},
     control::{
         AppControlSummary, CaptureSnapshotReply, InstanceRuntimeSnapshot, RecordingUpdate,
         RuntimeReply, RuntimeRequest,
+        body::{CaptureBodyMetadataReply, CaptureBodySnapshotReply},
         capture_query::{CAPTURE_SEARCH_BATCH_SIZE, CaptureSearchBatch, cursor_before},
     },
     control_rpc::protocol::{ControlError, ControlErrorCode, InstanceScope},
@@ -482,21 +483,6 @@ impl AppRuntime {
             )));
         }
     }
-
-    #[cfg(unix)]
-    fn control_ingress_is_closed(&self) -> bool {
-        self.control_rx
-            .as_ref()
-            .map_or(true, RuntimeControlReceiver::is_closed)
-    }
-
-    #[cfg(all(test, unix))]
-    async fn process_next_control_command(&mut self) -> Result<bool> {
-        match receive_control_event(&mut self.control_rx).await {
-            PlatformControlEvent::Command(command) => Ok(self.process_control_command(command)),
-            PlatformControlEvent::Closed => Err(anyhow!("runtime command gateway closed")),
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -620,10 +606,110 @@ fn execute_control_request(
                 },
             )))
         }
+        RuntimeRequest::GetCaptureBodyMetadata { capture_id, side } => {
+            let record = retained_capture(app, capture_id)?;
+            let snapshot = record.snapshot(CaptureSnapshotMode::MetadataOnly);
+            validate_capture_revision(capture_id, None, snapshot.revision)?;
+            let (body, headers) = body_snapshot_parts(&snapshot, side);
+            Ok(RuntimeReply::CaptureBodyMetadata(Box::new(
+                CaptureBodyMetadataReply {
+                    instance: InstanceScope {
+                        proxy_endpoint: identity.proxy_endpoint(),
+                        run_id: identity.run_id().clone(),
+                    },
+                    capture_id,
+                    capture_revision: snapshot.revision,
+                    side,
+                    status: body.status.clone(),
+                    headers,
+                    retained_bytes: body.status.retained_bytes,
+                },
+            )))
+        }
+        RuntimeRequest::GetCaptureBodySnapshot {
+            capture_id,
+            expected_revision,
+            side,
+        } => {
+            let record = retained_capture(app, capture_id)?;
+            let snapshot = record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
+            validate_capture_revision(capture_id, Some(expected_revision), snapshot.revision)?;
+            let (body, headers) = body_snapshot_parts(&snapshot, side);
+            Ok(RuntimeReply::CaptureBodySnapshot(Box::new(
+                CaptureBodySnapshotReply {
+                    instance: InstanceScope {
+                        proxy_endpoint: identity.proxy_endpoint(),
+                        run_id: identity.run_id().clone(),
+                    },
+                    capture_id,
+                    capture_revision: snapshot.revision,
+                    side,
+                    status: body.status.clone(),
+                    headers,
+                    retained_bytes: body.status.retained_bytes,
+                    preview: body.preview.clone(),
+                },
+            )))
+        }
         #[cfg(test)]
         RuntimeRequest::UnsupportedForTest => Err(ControlError::invalid_argument(
             "unsupported runtime control operation",
         )),
+    }
+}
+
+#[cfg(unix)]
+fn retained_capture(
+    app: &App,
+    capture_id: CaptureSequence,
+) -> std::result::Result<std::sync::Arc<CaptureRecord>, ControlError> {
+    app.capture_record(capture_id).ok_or_else(|| {
+        ControlError::new(
+            ControlErrorCode::CaptureNotFound,
+            "capture is not retained",
+            false,
+            serde_json::json!({"capture_id": capture_id}),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn validate_capture_revision(
+    capture_id: CaptureSequence,
+    expected_revision: Option<u64>,
+    current_revision: u64,
+) -> std::result::Result<(), ControlError> {
+    if let Some(expected_revision) = expected_revision
+        && expected_revision != current_revision
+    {
+        return Err(ControlError::new(
+            ControlErrorCode::CaptureRevisionConflict,
+            "capture revision changed",
+            false,
+            serde_json::json!({
+                "capture_id": capture_id,
+                "expected_revision": expected_revision,
+                "current_revision": current_revision,
+            }),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn body_snapshot_parts(
+    snapshot: &crate::capture::CaptureSnapshot,
+    side: BodySide,
+) -> (&crate::capture::BodySnapshot, CapturedHeaders) {
+    match side {
+        BodySide::Request => (&snapshot.request_body, snapshot.request.headers.clone()),
+        BodySide::Response => (
+            &snapshot.response_body,
+            snapshot.response.as_ref().map_or_else(
+                || CapturedHeaders::unbudgeted(std::sync::Arc::from([])),
+                |response| response.headers.clone(),
+            ),
+        ),
     }
 }
 
@@ -877,7 +963,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19011".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::new(true));
-        let (_client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let (_client, control_rx) = super::super::control::RuntimeGateway::channel(4);
         let mut runtime =
             AppRuntime::test_with_control(identity.clone(), app, settings, control_rx);
 
@@ -913,7 +999,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19012".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (_client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let (_client, control_rx) = super::super::control::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
 
         let error = runtime
@@ -941,7 +1027,7 @@ mod tests {
         let expected_run_id = identity.run_id().clone();
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let (client, control_rx) = super::super::control::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
         let request = tokio::spawn(async move {
             client
@@ -979,7 +1065,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19014".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (client, control_rx) = super::super::control::RuntimeGateway::new(4);
+        let (client, control_rx) = super::super::control::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
 
         runtime.close_control_ingress();

@@ -30,6 +30,7 @@ impl RunId {
         &self.0
     }
 
+    #[cfg(test)]
     pub(crate) fn decoded_len(&self) -> usize {
         RUN_ID_BYTES
     }

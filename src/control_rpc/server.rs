@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ControlCallContext {
+    #[allow(dead_code)]
     pub(crate) request_id: String,
+    #[allow(dead_code)]
     pub(crate) declared_client: DeclaredClient,
     pub(crate) deadline: Instant,
 }
@@ -84,6 +86,7 @@ where
         Self::with_response_budget(identity, handler, response_budget)
     }
 
+    #[cfg(test)]
     pub(crate) async fn serve_connection(&self, stream: UnixStream) -> Result<(), ControlError> {
         self.serve_connection_until(stream, CancellationToken::new())
             .await

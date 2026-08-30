@@ -16,7 +16,11 @@ use rmcp::{
         tool::schema_for_type,
         wrapper::{Json, Parameters},
     },
-    model::{ErrorCode, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{
+        ErrorCode, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+        ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+        ResourceTemplate, ServerCapabilities, ServerInfo,
+    },
     service::{
         RequestContext, RunningService, RxJsonRpcMessage, ServerInitializeError, ServiceRole,
         TxJsonRpcMessage,
@@ -32,7 +36,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    control::normalize_wait_timeout_ms,
+    capture::BodySide,
+    control::{
+        body::{BodyRepresentation, DEFAULT_BODY_PAGE_LENGTH},
+        normalize_wait_timeout_ms,
+    },
     control_rpc::{
         client::ControlRpcClient,
         protocol::{
@@ -45,7 +53,9 @@ use crate::{
 };
 
 use super::{
+    body::{BodyResourceUri, CONTENT_RESOURCE_TEMPLATE, body_page_resource_contents},
     capture::{
+        BodyRepresentationLinks, CaptureBodyResources, GetCaptureInput, GetCaptureResult,
         SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
         SetRecordingEnabledResult, WaitForCaptureInput, WaitForCaptureResult, recording_result,
         search_result, wait_result,
@@ -443,6 +453,7 @@ impl Broker {
         self.probe_scan(scan, client, deadline, cancelled).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn resolve(
         &self,
         selector: InstanceSelector,
@@ -921,6 +932,109 @@ impl Broker {
         search_result(result)
     }
 
+    pub(crate) async fn get_capture_impl(
+        &self,
+        input: GetCaptureInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<GetCaptureResult, McpDomainError> {
+        input.validate()?;
+        let resolved = self
+            .resolve_with_client(
+                input.instance.selector(),
+                SelectorRequirement::TargetedBody,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(
+                &resolved.descriptor,
+                input.operation(),
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        let ControlResult::GetCapture { instance, capture } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected capture detail result",
+            ));
+        };
+        let capture = *capture;
+        if instance.proxy_endpoint != resolved.descriptor.proxy_endpoint()
+            || instance.run_id != *resolved.descriptor.run_id()
+            || capture.capture_sequence != input.capture_id
+            || input
+                .expected_revision
+                .is_some_and(|revision| revision != capture.capture_revision)
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched capture detail identity",
+            ));
+        }
+        let resources = capture_body_resources(&instance, &capture);
+        Ok(GetCaptureResult {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            capture,
+            body_resources: resources,
+        })
+    }
+
+    async fn read_body_resource_impl(
+        &self,
+        requested: BodyResourceUri,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ReadResourceResult, McpDomainError> {
+        let selector = InstanceSelector {
+            proxy_endpoint: Some(requested.proxy_endpoint()),
+            run_id: Some(requested.run_id().clone()),
+        };
+        let resolved = self
+            .resolve_with_client(
+                selector,
+                SelectorRequirement::Resource,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(
+                &resolved.descriptor,
+                ControlOperation::ReadCaptureBody(Box::new(requested.request())),
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        let ControlResult::ReadCaptureBody { instance, page } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected capture body result",
+            ));
+        };
+        if instance.proxy_endpoint != requested.proxy_endpoint()
+            || &instance.run_id != requested.run_id()
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched capture body identity",
+            ));
+        }
+        let relayed_bytes = u64::try_from(page.content.len()).unwrap_or(u64::MAX);
+        let content = body_page_resource_contents(&requested, *page)?;
+        self.telemetry.record_bytes_relayed(relayed_bytes);
+        Ok(ReadResourceResult::new(vec![content]))
+    }
+
     pub(crate) async fn wait_for_capture_impl(
         &self,
         input: WaitForCaptureInput,
@@ -1188,6 +1302,34 @@ impl Broker {
     }
 
     #[tool(
+        name = "get_capture",
+        description = "Get one exact retained capture revision and readable request/response body resource links",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_capture(
+        &self,
+        Parameters(input): Parameters<GetCaptureInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<GetCaptureResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.get_capture_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
         name = "wait_for_capture",
         description = "Wait on one exact run for request_seen, response_started, or exchange_terminal capture metadata for at most five minutes; a normal timeout returns an unmatched result",
         annotations(
@@ -1221,15 +1363,58 @@ impl Broker {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Broker {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "wirelens",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_protocol_version(ProtocolVersion::LATEST)
-            .with_instructions(
-                "Use list_instances first and select an explicit instance when more than one is live.",
-            )
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_resources()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(Implementation::new("wirelens", env!("CARGO_PKG_VERSION")))
+        .with_protocol_version(ProtocolVersion::LATEST)
+        .with_instructions(
+            "Use list_instances first and select an explicit instance when more than one is live.",
+        )
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
+        std::future::ready(Ok(ListResourcesResult::with_all_items(Vec::new())))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
+        let template = ResourceTemplate::new(CONTENT_RESOURCE_TEMPLATE, "capture_body_content")
+            .with_description(
+                "A revision-pinned byte page from one retained request or response body",
+            );
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
+            template,
+        ])))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let requested = BodyResourceUri::parse(&request.uri).map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.read_body_resource_impl(
+            requested,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Into::into)
+        .map_err(to_mcp_error)
     }
 }
 
@@ -1264,6 +1449,34 @@ fn instance_summary(resolved: ResolvedInstance) -> Result<InstanceSummary, Contr
         retained_capture_count,
         settings_revision,
     })
+}
+fn capture_body_resources(
+    instance: &crate::control_rpc::protocol::InstanceScope,
+    capture: &crate::control::capture_query::CaptureDetail,
+) -> CaptureBodyResources {
+    let links = |side| {
+        let make = |representation| {
+            BodyResourceUri::content(
+                instance.proxy_endpoint,
+                instance.run_id.clone(),
+                capture.capture_sequence,
+                capture.capture_revision,
+                side,
+                representation,
+                0,
+                DEFAULT_BODY_PAGE_LENGTH,
+            )
+            .to_string()
+        };
+        BodyRepresentationLinks {
+            raw: make(BodyRepresentation::Raw),
+            decoded: make(BodyRepresentation::Decoded),
+        }
+    };
+    CaptureBodyResources {
+        request: links(BodySide::Request),
+        response: capture.status.map(|_| links(BodySide::Response)),
+    }
 }
 
 fn status_result(result: ControlResult) -> Result<GetStatusResult, ControlError> {
@@ -2856,5 +3069,6 @@ mod tests {
         }
     }
 
+    mod task10_tests;
     mod task9_tests;
 }

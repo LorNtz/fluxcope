@@ -3,9 +3,9 @@
 use super::{CaptureSearchAdmission, ControlServiceContext, RuntimeControlHandler, RuntimeGateway};
 use crate::{
     capture::{
-        BodyStreamState, CaptureChangeFeed, CaptureChangeKind, CapturePolicy, CapturePublisher,
-        CaptureRecord, CaptureSequence, CaptureSnapshot, CaptureSnapshotMode, CapturedExchange,
-        RequestCaptureInput,
+        BodyStreamState, BodyWorkAdmission, CaptureChangeFeed, CaptureChangeKind, CapturePolicy,
+        CapturePublisher, CaptureRecord, CaptureSequence, CaptureSnapshot, CaptureSnapshotMode,
+        CapturedExchange, RequestCaptureInput,
     },
     control::{
         CaptureMilestone, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
@@ -120,10 +120,11 @@ fn handler(
     super::RuntimeControlReceiver,
     Arc<CaptureSearchAdmission>,
 ) {
-    let (runtime, receiver) = RuntimeGateway::new(capacity);
+    let (runtime, receiver) = RuntimeGateway::channel(capacity);
     let handler = RuntimeControlHandler::new(ControlServiceContext {
         runtime,
         capture_changes: feed,
+        body_work: Arc::new(BodyWorkAdmission::default()),
     });
     let admission = Arc::clone(&handler.capture_searches);
     (handler, receiver, admission)

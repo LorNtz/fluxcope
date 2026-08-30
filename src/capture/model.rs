@@ -11,16 +11,19 @@ use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use hyper::Method;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use super::{CaptureChangeFeed, CaptureChangeKind, CaptureSequence, CapturedExchange};
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BodySide {
     Request,
     Response,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BodyStreamState {
     Pending,
     Streaming,
@@ -35,7 +38,8 @@ impl BodyStreamState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BodyPreviewLimit {
     PerBodyLimit,
     TotalMemoryLimit,
@@ -139,7 +143,6 @@ impl CapturedHeaders {
         Self::new(Arc::from([]), budget_lease)
     }
 
-    #[cfg(test)]
     pub(crate) fn unbudgeted(values: Arc<[(String, String)]>) -> Self {
         Self::new(values, CaptureBudgetLease::unbudgeted())
     }
@@ -171,6 +174,8 @@ pub struct CapturedBodyPreview {
     trailing: Bytes,
     len: usize,
     _budget_lease: Arc<CaptureBudgetLease>,
+    #[cfg(test)]
+    flatten_calls: Arc<AtomicUsize>,
 }
 
 impl CapturedBodyPreview {
@@ -186,6 +191,8 @@ impl CapturedBodyPreview {
             canonical_chunks,
             trailing,
             len,
+            #[cfg(test)]
+            flatten_calls: Arc::new(AtomicUsize::new(0)),
             _budget_lease: budget_lease,
         }
     }
@@ -217,6 +224,8 @@ impl CapturedBodyPreview {
     }
 
     pub(crate) fn flatten(&self) -> Vec<u8> {
+        #[cfg(test)]
+        self.flatten_calls.fetch_add(1, Ordering::Relaxed);
         let mut flattened = Vec::with_capacity(self.len);
         for chunk in self.chunks() {
             flattened.extend_from_slice(chunk);
@@ -228,6 +237,11 @@ impl CapturedBodyPreview {
     pub(crate) fn unbudgeted(bytes: Bytes) -> Self {
         let len = bytes.len();
         Self::new(None, bytes, len, CaptureBudgetLease::unbudgeted())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_flatten_calls(&self) -> usize {
+        self.flatten_calls.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -440,6 +454,7 @@ impl BodyCapture {
 }
 
 impl CaptureRecord {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         sequence: CaptureSequence,
         request: RequestMetadata,
@@ -732,7 +747,7 @@ impl CaptureRecord {
             self.retained_bytes.fetch_add(charged, Ordering::AcqRel);
         }
 
-        let limit = existing_limit.or_else(|| {
+        let limit = existing_limit.or({
             if retained < requested {
                 Some(BodyPreviewLimit::TotalMemoryLimit)
             } else if requested < bytes.len() {
@@ -870,7 +885,6 @@ impl CaptureBudgetLease {
         self.budget.release(released);
     }
 
-    #[cfg(test)]
     fn unbudgeted() -> Arc<Self> {
         Self::try_new(Arc::new(CaptureMemoryBudget::new(usize::MAX)), 0)
             .expect("zero-byte test lease should be admitted")

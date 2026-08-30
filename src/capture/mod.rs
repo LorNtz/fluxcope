@@ -1,4 +1,5 @@
 mod body;
+mod body_work;
 mod change;
 
 mod decode;
@@ -11,11 +12,19 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
-pub(crate) use change::{CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind};
-pub(crate) use decode::{
-    DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
-    DecodeResult, start_decode_service,
+pub(crate) use change::{
+    CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind,
+    CaptureChangeSubscription,
 };
+
+pub(crate) use body_work::{ActiveBodyWorkLease, BodyWorkAdmission};
+pub(crate) use decode::{
+    ContentDecodePolicy, DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics,
+    DecodeMetricsSnapshot, DecodePolicy, DecodeResult, DecodedBytes, decode_content_bytes,
+    start_decode_service_with_admission,
+};
+#[cfg(test)]
+pub(crate) use decode::{DecodeService, start_decode_service};
 pub use model::{
     BodyPreviewLimit, BodySide, BodySnapshot, BodyStatus, BodyStreamState, CaptureRecord,
     CaptureSnapshot, CaptureSnapshotMode, CaptureSummary, CaptureTiming, CapturedBodyChunks,

@@ -33,8 +33,8 @@ use crate::{
     app::App,
     ca,
     capture::{
-        BodyTaskTracker, CapturePublisher, CaptureRecord, CaptureRetentionPolicy,
-        start_decode_service,
+        BodyTaskTracker, BodyWorkAdmission, CapturePublisher, CaptureRecord,
+        CaptureRetentionPolicy, start_decode_service_with_admission,
     },
     cli::{ConfigSelection, McpOverride, ProxyStartup},
     instance::wirelens_home_dir,
@@ -133,7 +133,12 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     #[cfg(unix)]
     let capture_changes = capture_publisher.change_feed();
     let body_tasks = BodyTaskTracker::new(shutdown.child_token());
-    let decode = start_decode_service(policy.decode.clone(), shutdown.child_token());
+    let body_work = std::sync::Arc::new(BodyWorkAdmission::new());
+    let decode = start_decode_service_with_admission(
+        policy.decode.clone(),
+        shutdown.child_token(),
+        std::sync::Arc::clone(&body_work),
+    );
     let request_search = start_request_search_service(shutdown.child_token());
 
     log::info!(
@@ -188,11 +193,12 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
 
     #[cfg(unix)]
     let (control_rx, mut running_control) = if let Some(prepared) = prepared_control {
-        let (client, receiver) = RuntimeGateway::new(64);
+        let (client, receiver) = RuntimeGateway::channel(64);
         match prepared.start(
             RuntimeControlHandler::new(ControlServiceContext {
                 runtime: client,
                 capture_changes,
+                body_work: std::sync::Arc::clone(&body_work),
             }),
             shutdown.child_token(),
         ) {
@@ -246,22 +252,21 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     services.track_result(ServiceKind::Proxy, proxy_task);
 
     #[cfg(unix)]
-    if let Some(running) = running_control.as_mut() {
-        if let Err(error) = running
+    if let Some(running) = running_control.as_mut()
+        && let Err(error) = running
             .publish_after_probe(
                 &ControlRpcDescriptorProbe,
                 std::time::Instant::now() + std::time::Duration::from_secs(30),
                 shutdown.child_token(),
             )
             .await
-        {
-            shutdown.cancel();
-            services.shutdown(policy.render.shutdown_grace).await;
-            if let Some(running) = running_control.take() {
-                let _ = running.rollback(policy.render.shutdown_grace).await;
-            }
-            return Err(anyhow::Error::new(error));
+    {
+        shutdown.cancel();
+        services.shutdown(policy.render.shutdown_grace).await;
+        if let Some(running) = running_control.take() {
+            let _ = running.rollback(policy.render.shutdown_grace).await;
         }
+        return Err(anyhow::Error::new(error));
     }
 
     let tui = match Tui::enter().context("failed to initialize terminal UI") {
@@ -278,15 +283,15 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     };
 
     #[cfg(unix)]
-    if let Some(running) = running_control.as_mut() {
-        if let Err(error) = running.ensure_running().await {
-            shutdown.cancel();
-            services.shutdown(policy.render.shutdown_grace).await;
-            if let Some(running) = running_control.take() {
-                let _ = running.rollback(policy.render.shutdown_grace).await;
-            }
-            return Err(anyhow::Error::new(error));
+    if let Some(running) = running_control.as_mut()
+        && let Err(error) = running.ensure_running().await
+    {
+        shutdown.cancel();
+        services.shutdown(policy.render.shutdown_grace).await;
+        if let Some(running) = running_control.take() {
+            let _ = running.rollback(policy.render.shutdown_grace).await;
         }
+        return Err(anyhow::Error::new(error));
     }
 
     #[cfg(unix)]

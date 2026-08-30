@@ -2,6 +2,7 @@ use crate::{
     capture::CaptureSequence,
     control::{
         WaitForCaptureRequest, WaitForCaptureResult,
+        body::{BodyContentRequest, BodyPage},
         capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
     },
     instance::RunId,
@@ -35,6 +36,7 @@ pub(crate) enum ControlOperationKind {
     SearchCaptures,
     GetCapture,
     WaitForCapture,
+    ReadCaptureBody,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -75,6 +77,7 @@ pub(crate) enum ControlOperation {
         expected_revision: Option<u64>,
     },
     WaitForCapture(Box<WaitForCaptureRequest>),
+    ReadCaptureBody(Box<BodyContentRequest>),
 }
 
 impl ControlOperation {
@@ -86,6 +89,7 @@ impl ControlOperation {
             Self::SearchCaptures { .. } => ControlOperationKind::SearchCaptures,
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture(_) => ControlOperationKind::WaitForCapture,
+            Self::ReadCaptureBody(_) => ControlOperationKind::ReadCaptureBody,
         }
     }
 }
@@ -122,7 +126,7 @@ struct GetCaptureArguments {
     expected_revision: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InstanceScope {
     pub(crate) proxy_endpoint: SocketAddr,
@@ -167,6 +171,10 @@ pub(crate) enum ControlResult {
         #[serde(flatten)]
         result: WaitForCaptureResult,
     },
+    ReadCaptureBody {
+        instance: InstanceScope,
+        page: Box<BodyPage>,
+    },
 }
 
 impl ControlResult {
@@ -177,7 +185,8 @@ impl ControlResult {
             | Self::SetRecordingEnabled { instance, .. }
             | Self::SearchCaptures { instance, .. }
             | Self::GetCapture { instance, .. }
-            | Self::WaitForCapture { instance, .. } => instance,
+            | Self::WaitForCapture { instance, .. }
+            | Self::ReadCaptureBody { instance, .. } => instance,
         }
     }
 
@@ -189,6 +198,7 @@ impl ControlResult {
             Self::SearchCaptures { .. } => ControlOperationKind::SearchCaptures,
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture { .. } => ControlOperationKind::WaitForCapture,
+            Self::ReadCaptureBody { .. } => ControlOperationKind::ReadCaptureBody,
         }
     }
 }
@@ -208,6 +218,7 @@ pub(crate) enum ControlErrorCode {
     CaptureNotFound,
     CaptureRevisionConflict,
     ServiceUnavailable,
+    UnsupportedBodyEncoding,
     DeadlineExceeded,
     Cancelled,
     InternalError,
@@ -244,6 +255,7 @@ impl ControlErrorCode {
             Self::CaptureNotFound => "capture_not_found",
             Self::CaptureRevisionConflict => "capture_revision_conflict",
             Self::ServiceUnavailable => "service_unavailable",
+            Self::UnsupportedBodyEncoding => "unsupported_body_encoding",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
             Self::InternalError => "internal_error",
@@ -433,6 +445,10 @@ impl RequestEnvelope {
                 ControlOperationKind::WaitForCapture,
                 serialize_arguments(&*request)?,
             ),
+            ControlOperation::ReadCaptureBody(request) => (
+                ControlOperationKind::ReadCaptureBody,
+                serialize_arguments(&*request)?,
+            ),
         };
         Ok(Self {
             protocol_version: RPC_VERSION,
@@ -452,7 +468,8 @@ impl RequestEnvelope {
             | ControlOperationKind::GetStatus
             | ControlOperationKind::SetRecordingEnabled
             | ControlOperationKind::SearchCaptures
-            | ControlOperationKind::GetCapture => ORDINARY_MAX_DEADLINE,
+            | ControlOperationKind::GetCapture
+            | ControlOperationKind::ReadCaptureBody => ORDINARY_MAX_DEADLINE,
         };
         received_at + Duration::from_millis(self.deadline_ms).min(maximum)
     }
@@ -509,6 +526,11 @@ impl RequestEnvelope {
             ControlOperationKind::WaitForCapture => ControlOperation::WaitForCapture(Box::new(
                 parse_arguments::<WaitForCaptureRequest>(&self.arguments)?,
             )),
+            ControlOperationKind::ReadCaptureBody => {
+                let request = parse_arguments::<BodyContentRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::ReadCaptureBody(Box::new(request))
+            }
         };
         let deadline = self.clamped_deadline(received_at);
         Ok(ControlRequest {
@@ -598,6 +620,7 @@ impl ResponseEnvelope {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_request_payload(
     payload: &[u8],
     received_at: Instant,
@@ -605,6 +628,7 @@ pub(crate) fn decode_request_payload(
     strict_from_slice::<RequestEnvelope>(payload)?.validate(received_at)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_response_payload(
     payload: &[u8],
     expected_request_id: &str,
@@ -664,3 +688,6 @@ mod tests;
 
 #[cfg(test)]
 mod task9_tests;
+
+#[cfg(test)]
+mod task10_tests;

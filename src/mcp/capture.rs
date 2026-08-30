@@ -6,7 +6,8 @@ use crate::{
         CaptureMilestone, WaitForCaptureRequest,
         WaitForCaptureResult as DomainWaitForCaptureResult,
         capture_query::{
-            CaptureQuery, CaptureSearchCursor, CompactCapture, normalize_capture_page_limit,
+            CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture,
+            normalize_capture_page_limit,
         },
         normalize_wait_timeout_ms,
     },
@@ -136,6 +137,49 @@ pub(crate) struct WaitForCaptureResult {
     pub(crate) matched: bool,
     #[schemars(required)]
     pub(crate) capture: Option<CompactCapture>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetCaptureInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    pub(crate) capture_id: crate::capture::CaptureSequence,
+    pub(crate) expected_revision: Option<u64>,
+}
+
+impl GetCaptureInput {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        validate_public_input_size(self)
+    }
+
+    pub(crate) fn operation(&self) -> ControlOperation {
+        ControlOperation::GetCapture {
+            capture_id: self.capture_id,
+            expected_revision: self.expected_revision,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BodyRepresentationLinks {
+    pub(crate) raw: String,
+    pub(crate) decoded: String,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureBodyResources {
+    pub(crate) request: BodyRepresentationLinks,
+    #[schemars(required)]
+    pub(crate) response: Option<BodyRepresentationLinks>,
+}
+
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetCaptureResult {
+    pub(crate) instance: InstanceSelector,
+    pub(crate) capture: CaptureDetail,
+    pub(crate) body_resources: CaptureBodyResources,
 }
 
 fn validate_public_input_size(input: &impl Serialize) -> Result<(), ControlError> {

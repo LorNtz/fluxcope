@@ -179,7 +179,7 @@ async fn accumulated_multi_batch_page_omits_a_row_only_against_remaining_capacit
         proxy_endpoint: identity.proxy_endpoint(),
         run_id: identity.run_id().clone(),
     };
-    let (client, mut receiver) = RuntimeGateway::new(4);
+    let (client, mut receiver) = RuntimeGateway::channel(4);
     let handler = RuntimeControlHandler::new(client);
     let first_handler = handler.clone();
     let first = tokio::spawn(async move {
@@ -391,7 +391,7 @@ async fn recording_mutation_returns_same_turn_identity_without_a_follow_up_statu
         proxy_endpoint: identity.proxy_endpoint(),
         run_id: identity.run_id().clone(),
     };
-    let (client, mut receiver) = RuntimeGateway::new(4);
+    let (client, mut receiver) = RuntimeGateway::channel(4);
     let handler = RuntimeControlHandler::new(client);
     let call = tokio::spawn({
         let handler = handler.clone();
@@ -436,7 +436,7 @@ async fn recording_mutation_returns_same_turn_identity_without_a_follow_up_statu
 
 #[tokio::test]
 async fn private_handler_rejects_invalid_search_semantics_before_runtime_dispatch() {
-    let (client, mut receiver) = RuntimeGateway::new(1);
+    let (client, mut receiver) = RuntimeGateway::channel(1);
     let handler = RuntimeControlHandler::new(client);
     let cases = [
         (
@@ -501,7 +501,7 @@ async fn private_detail_uses_the_identity_returned_with_its_single_runtime_snaps
         run_id: identity.run_id().clone(),
     };
     let snapshot = completed_capture(7).snapshot(crate::capture::CaptureSnapshotMode::MetadataOnly);
-    let (client, mut receiver) = RuntimeGateway::new(2);
+    let (client, mut receiver) = RuntimeGateway::channel(2);
     let handler = RuntimeControlHandler::new(client);
     let call = tokio::spawn({
         let handler = handler.clone();
@@ -809,7 +809,7 @@ async fn a_blocked_real_header_matcher_does_not_block_an_unrelated_runtime_statu
         retained_capture_count: 0,
         settings_revision: 0,
     });
-    let (client, mut receiver) = RuntimeGateway::new(1);
+    let (client, mut receiver) = RuntimeGateway::channel(1);
     let status = tokio::spawn(async move {
         client
             .request(RuntimeRequest::GetStatus, CancellationToken::new())
@@ -851,7 +851,7 @@ async fn real_search_handler_admits_only_four_calls_and_cancels_the_fifth_before
         retained_capture_count: 0,
         settings_revision: 0,
     });
-    let (client, mut receiver) = RuntimeGateway::new(32);
+    let (client, mut receiver) = RuntimeGateway::channel(32);
     let handler = RuntimeControlHandler::new(client);
     let mut calls = Vec::new();
     for index in 0..5 {

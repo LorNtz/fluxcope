@@ -677,6 +677,7 @@ pub struct SettingsPopup {
 }
 
 impl SettingsPopup {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_context(SettingsUiContext::default())
     }
