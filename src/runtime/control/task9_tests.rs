@@ -393,6 +393,7 @@ async fn wait_for_capture_rechecks_only_changed_sequence_and_releases_capacity_w
     );
 
     reply_initial_search(&mut receiver, &instance, Vec::new()).await;
+    tokio::task::yield_now().await;
     assert_eq!(admission.available_permits_for_test(), 4);
 
     let status = tokio::spawn({
@@ -443,6 +444,232 @@ async fn wait_for_capture_rechecks_only_changed_sequence_and_releases_capacity_w
     assert_matched(task.await.expect("wait task"), &instance, 12);
     assert_eq!(admission.available_permits_for_test(), 4);
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn wait_for_capture_acquires_search_admission_before_requesting_each_initial_batch() {
+    let feed = CaptureChangeFeed::new();
+    let (handler, mut receiver, admission) = handler(feed, 2);
+    let instance = scope();
+    let cancelled = CancellationToken::new();
+    let task = spawn_wait(
+        handler,
+        "initial-batch-admission",
+        wait_request(
+            CaptureQuery::default(),
+            CaptureMilestone::RequestSeen,
+            Some(30_000),
+        ),
+        cancelled.clone(),
+    );
+
+    let status = receiver.recv().await.expect("initial status command");
+    assert_eq!(status.request, RuntimeRequest::GetStatus);
+    let blocker_cancelled = CancellationToken::new();
+    let mut blockers = Vec::with_capacity(4);
+    for _ in 0..4 {
+        blockers.push(
+            admission
+                .acquire(&blocker_cancelled)
+                .await
+                .expect("consume search permit"),
+        );
+    }
+    status
+        .reply
+        .send(Ok(status_reply(&instance, 0)))
+        .expect("status reply receiver");
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "runtime batches must wait for search admission"
+    );
+
+    drop(blockers);
+    let batch = receiver.recv().await.expect("admitted initial batch");
+    assert!(matches!(
+        batch.request,
+        RuntimeRequest::GetCaptureSearchBatch { .. }
+    ));
+    batch
+        .reply
+        .send(Ok(RuntimeReply::CaptureSearchBatch(CaptureSearchBatch {
+            snapshots: Vec::new(),
+            next_cursor: None,
+        })))
+        .expect("batch reply receiver");
+    cancelled.cancel();
+    let error = task.await.expect("wait task").expect_err("cancelled wait");
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+}
+
+#[tokio::test]
+async fn wait_for_capture_initial_snapshot_watermark_skips_queued_older_revisions() {
+    let feed = CaptureChangeFeed::new();
+    let (handler, mut receiver, _) = handler(feed.clone(), 2);
+    let instance = scope();
+    let task = spawn_wait(
+        handler,
+        "initial-revision-watermark",
+        wait_request(
+            CaptureQuery::default(),
+            CaptureMilestone::ExchangeTerminal,
+            Some(30_000),
+        ),
+        CancellationToken::new(),
+    );
+
+    let mut initial = pending_snapshot(52);
+    initial.revision = 5;
+    loop {
+        let command = receiver.recv().await.expect("initial wait command");
+        match command.request {
+            RuntimeRequest::GetStatus => command
+                .reply
+                .send(Ok(status_reply(&instance, 1)))
+                .expect("status reply receiver"),
+            RuntimeRequest::GetCaptureSearchBatch { .. } => {
+                feed.publish(
+                    CaptureSequence::new(52),
+                    1,
+                    CaptureChangeKind::RecordUpdated,
+                );
+                feed.publish(
+                    CaptureSequence::new(52),
+                    2,
+                    CaptureChangeKind::RecordUpdated,
+                );
+                command
+                    .reply
+                    .send(Ok(RuntimeReply::CaptureSearchBatch(CaptureSearchBatch {
+                        snapshots: vec![initial],
+                        next_cursor: None,
+                    })))
+                    .expect("batch reply receiver");
+                break;
+            }
+            other => panic!("unexpected initial command: {other:?}"),
+        }
+    }
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "queued revisions covered by the initial snapshot must not rematerialize"
+    );
+
+    feed.publish(
+        CaptureSequence::new(52),
+        6,
+        CaptureChangeKind::RecordUpdated,
+    );
+    let changed = receiver.recv().await.expect("newer revision recheck");
+    assert_eq!(
+        changed.request,
+        RuntimeRequest::GetCapture {
+            capture_id: CaptureSequence::new(52),
+            expected_revision: None,
+        }
+    );
+    let mut terminal = completed_snapshot(52);
+    terminal.revision = 6;
+    changed
+        .reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: instance.clone(),
+                snapshot: terminal,
+            },
+        ))))
+        .expect("capture reply receiver");
+    assert_matched(task.await.expect("wait task"), &instance, 52);
+}
+
+#[tokio::test]
+async fn wait_for_capture_latest_materialization_collapses_queued_revisions() {
+    let feed = CaptureChangeFeed::new();
+    let (handler, mut receiver, _) = handler(feed.clone(), 2);
+    let instance = scope();
+    let task = spawn_wait(
+        handler,
+        "materialized-revision-watermark",
+        wait_request(
+            CaptureQuery::default(),
+            CaptureMilestone::ExchangeTerminal,
+            Some(30_000),
+        ),
+        CancellationToken::new(),
+    );
+    reply_initial_search(&mut receiver, &instance, Vec::new()).await;
+    for revision in 1..=3 {
+        feed.publish(
+            CaptureSequence::new(61),
+            revision,
+            CaptureChangeKind::RecordUpdated,
+        );
+    }
+
+    let first = receiver
+        .recv()
+        .await
+        .expect("first changed-sequence recheck");
+    assert_eq!(
+        first.request,
+        RuntimeRequest::GetCapture {
+            capture_id: CaptureSequence::new(61),
+            expected_revision: None,
+        }
+    );
+    let mut newest_pending = pending_snapshot(61);
+    newest_pending.revision = 3;
+    first
+        .reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: instance.clone(),
+                snapshot: newest_pending,
+            },
+        ))))
+        .expect("capture reply receiver");
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "materializing revision 3 must collapse queued revisions 2 and 3"
+    );
+
+    feed.publish(
+        CaptureSequence::new(61),
+        4,
+        CaptureChangeKind::RecordUpdated,
+    );
+    let second = receiver
+        .recv()
+        .await
+        .expect("newer changed-sequence recheck");
+    assert_eq!(
+        second.request,
+        RuntimeRequest::GetCapture {
+            capture_id: CaptureSequence::new(61),
+            expected_revision: None,
+        }
+    );
+    let mut terminal = completed_snapshot(61);
+    terminal.revision = 4;
+    second
+        .reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: instance.clone(),
+                snapshot: terminal,
+            },
+        ))))
+        .expect("capture reply receiver");
+    assert_matched(task.await.expect("wait task"), &instance, 61);
 }
 
 #[tokio::test(start_paused = true)]
@@ -496,6 +723,55 @@ async fn wait_for_capture_default_timeout_clamp_and_zero_validation_are_exact() 
         .expect_err("zero timeout is invalid");
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_capture_timeout_cancels_an_in_flight_runtime_batch() {
+    let feed = CaptureChangeFeed::new();
+    let (handler, mut receiver, admission) = handler(feed, 2);
+    let instance = scope();
+    let task = spawn_wait(
+        handler,
+        "timeout-cancels-runtime-batch",
+        wait_request(
+            CaptureQuery::default(),
+            CaptureMilestone::RequestSeen,
+            Some(1_000),
+        ),
+        CancellationToken::new(),
+    );
+
+    let status = receiver.recv().await.expect("initial status command");
+    assert_eq!(status.request, RuntimeRequest::GetStatus);
+    status
+        .reply
+        .send(Ok(status_reply(&instance, 0)))
+        .expect("status reply receiver");
+    let batch = receiver.recv().await.expect("in-flight batch command");
+    assert!(matches!(
+        batch.request,
+        RuntimeRequest::GetCaptureSearchBatch { .. }
+    ));
+    assert!(!batch.cancelled.is_cancelled());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let ControlResult::WaitForCapture { result, .. } =
+        task.await.expect("wait task").expect("timeout success")
+    else {
+        panic!("expected wait result");
+    };
+    assert_eq!(
+        result,
+        WaitForCaptureResult {
+            matched: false,
+            capture: None,
+        }
+    );
+    assert!(
+        batch.cancelled.is_cancelled(),
+        "a normal wait timeout must cancel queued runtime work"
+    );
+    assert_eq!(admission.available_permits_for_test(), 4);
 }
 
 #[tokio::test]
@@ -569,6 +845,7 @@ async fn wait_for_capture_cancellation_interrupts_feed_sleep_without_leaking_sea
         cancelled.clone(),
     );
     reply_initial_search(&mut receiver, &instance, Vec::new()).await;
+    tokio::task::yield_now().await;
     assert_eq!(admission.available_permits_for_test(), 4);
 
     cancelled.cancel();

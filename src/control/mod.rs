@@ -85,7 +85,7 @@ pub(crate) struct WaitForCaptureResult {
     pub(crate) matched: bool,
     #[serde(deserialize_with = "deserialize_required_option")]
     #[schemars(required)]
-    pub(crate) capture: Option<CompactCapture>,
+    pub(crate) capture: Option<Box<CompactCapture>>,
 }
 
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fmt,
     future::Future,
     io,
@@ -288,13 +288,18 @@ impl DetailMaterializationAdmission {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WaitSequenceState {
+    revision: u64,
+    pending: bool,
+}
+
 struct WaitBatchInspection {
-    capture: Option<CompactCapture>,
-    pending: Vec<CaptureSequence>,
+    capture: Option<Box<CompactCapture>>,
 }
 
 enum WaitSnapshotInspection {
-    Matched(CompactCapture),
+    Matched(Box<CompactCapture>),
     Pending,
     Ignore,
 }
@@ -309,9 +314,9 @@ fn inspect_wait_snapshot(
         return Ok(WaitSnapshotInspection::Ignore);
     }
     if milestone.is_satisfied_by(snapshot) {
-        return Ok(WaitSnapshotInspection::Matched(
+        return Ok(WaitSnapshotInspection::Matched(Box::new(
             CompactCapture::from_snapshot(snapshot),
-        ));
+        )));
     }
     if CaptureMilestone::ExchangeTerminal.is_satisfied_by(snapshot) {
         return Ok(WaitSnapshotInspection::Ignore);
@@ -324,24 +329,27 @@ fn inspect_wait_batch(
     query: &CompiledCaptureQuery,
     milestone: CaptureMilestone,
     cancelled: &CancellationToken,
+    states: &mut HashMap<CaptureSequence, WaitSequenceState>,
 ) -> Result<WaitBatchInspection, ControlError> {
-    let mut pending = Vec::new();
     for snapshot in snapshots {
-        match inspect_wait_snapshot(snapshot, query, milestone, cancelled)? {
+        let pending = match inspect_wait_snapshot(snapshot, query, milestone, cancelled)? {
             WaitSnapshotInspection::Matched(capture) => {
                 return Ok(WaitBatchInspection {
                     capture: Some(capture),
-                    pending,
                 });
             }
-            WaitSnapshotInspection::Pending => pending.push(snapshot.sequence),
-            WaitSnapshotInspection::Ignore => {}
-        }
+            WaitSnapshotInspection::Pending => true,
+            WaitSnapshotInspection::Ignore => false,
+        };
+        states.insert(
+            snapshot.sequence,
+            WaitSequenceState {
+                revision: snapshot.revision,
+                pending,
+            },
+        );
     }
-    Ok(WaitBatchInspection {
-        capture: None,
-        pending,
-    })
+    Ok(WaitBatchInspection { capture: None })
 }
 
 async fn wait_step<T>(
@@ -369,7 +377,7 @@ fn unmatched_wait(instance: InstanceScope) -> ControlResult {
     }
 }
 
-fn matched_wait(instance: InstanceScope, capture: CompactCapture) -> ControlResult {
+fn matched_wait(instance: InstanceScope, capture: Box<CompactCapture>) -> ControlResult {
     ControlResult::WaitForCapture {
         instance,
         result: WaitForCaptureResult {
@@ -552,6 +560,8 @@ impl RuntimeControlHandler {
             timeout_ms,
         } = request;
         let timeout_ms = normalize_wait_timeout_ms(timeout_ms)?;
+        let cancelled = cancelled.child_token();
+        let _cancel_on_exit = cancelled.clone().drop_guard();
         let mut changes = capture_changes.subscribe();
         let active = admission.admit(query, cancelled.clone()).await?;
         let query = active.compiled_query();
@@ -560,10 +570,14 @@ impl RuntimeControlHandler {
             .await?
             .instance;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        let mut pending = HashSet::new();
+        let mut sequences = HashMap::new();
         let mut cursor = None;
 
         loop {
+            let admitted = admission.admit_compiled(Arc::clone(&query), &cancelled);
+            let Some(mut active) = wait_step(admitted, deadline, &cancelled).await? else {
+                return Ok(unmatched_wait(instance));
+            };
             let batch_request = runtime.request(
                 RuntimeRequest::GetCaptureSearchBatch {
                     cursor,
@@ -583,22 +597,28 @@ impl RuntimeControlHandler {
                 }
             };
             if batch.snapshots.is_empty() {
+                drop(active);
                 break;
             }
             let next_cursor = batch.next_cursor;
-            let admitted = admission.admit_compiled(Arc::clone(&query), &cancelled);
-            let Some(mut active) = wait_step(admitted, deadline, &cancelled).await? else {
-                return Ok(unmatched_wait(instance));
-            };
             let worker_cancelled = cancelled.clone();
             let inspection = active.run_blocking(cancelled.clone(), move |query| {
-                inspect_wait_batch(&batch.snapshots, &query, milestone, &worker_cancelled)
+                inspect_wait_batch(
+                    &batch.snapshots,
+                    &query,
+                    milestone,
+                    &worker_cancelled,
+                    &mut sequences,
+                )
+                .map(|inspection| (sequences, inspection))
             });
-            let Some(inspection) = wait_step(inspection, deadline, &cancelled).await? else {
+            let Some((returned_sequences, inspection)) =
+                wait_step(inspection, deadline, &cancelled).await?
+            else {
                 return Ok(unmatched_wait(instance));
             };
+            sequences = returned_sequences;
             drop(active);
-            pending.extend(inspection.pending);
             if let Some(capture) = inspection.capture {
                 return Ok(matched_wait(instance, capture));
             }
@@ -624,7 +644,10 @@ impl RuntimeControlHandler {
                 CaptureChangeKind::RetentionEviction
                 | CaptureChangeKind::ExplicitDelete
                 | CaptureChangeKind::Clear => {
-                    if pending.remove(&change.sequence) {
+                    if sequences
+                        .remove(&change.sequence)
+                        .is_some_and(|state| state.pending)
+                    {
                         return Err(capture_change_lost(
                             change,
                             "matching capture was removed while waiting",
@@ -632,6 +655,12 @@ impl RuntimeControlHandler {
                     }
                 }
                 CaptureChangeKind::Admitted | CaptureChangeKind::RecordUpdated => {
+                    if sequences
+                        .get(&change.sequence)
+                        .is_some_and(|state| change.revision <= state.revision)
+                    {
+                        continue;
+                    }
                     let materialized = runtime.request(
                         RuntimeRequest::GetCapture {
                             capture_id: change.sequence,
@@ -672,6 +701,7 @@ impl RuntimeControlHandler {
                             }),
                         ));
                     }
+                    let snapshot_revision = snapshot.revision;
 
                     let admitted = admission.admit_compiled(Arc::clone(&query), &cancelled);
                     let Some(mut active) = wait_step(admitted, deadline, &cancelled).await? else {
@@ -686,17 +716,20 @@ impl RuntimeControlHandler {
                         return Ok(unmatched_wait(instance));
                     };
                     drop(active);
-                    match inspection {
+                    let pending = match inspection {
                         WaitSnapshotInspection::Matched(capture) => {
                             return Ok(matched_wait(instance, capture));
                         }
-                        WaitSnapshotInspection::Pending => {
-                            pending.insert(change.sequence);
-                        }
-                        WaitSnapshotInspection::Ignore => {
-                            pending.remove(&change.sequence);
-                        }
-                    }
+                        WaitSnapshotInspection::Pending => true,
+                        WaitSnapshotInspection::Ignore => false,
+                    };
+                    sequences.insert(
+                        change.sequence,
+                        WaitSequenceState {
+                            revision: snapshot_revision,
+                            pending,
+                        },
+                    );
                 }
             }
         }

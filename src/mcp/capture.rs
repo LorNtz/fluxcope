@@ -223,7 +223,7 @@ pub(crate) fn wait_result(result: ControlResult) -> Result<WaitForCaptureResult,
                 run_id: Some(instance.run_id),
             },
             matched,
-            capture,
+            capture: capture.map(|capture| *capture),
         }),
         ControlResult::WaitForCapture { .. } => Err(ControlError::internal(
             "private RPC returned an inconsistent capture wait result",

@@ -141,7 +141,7 @@ fn wait_for_capture_result_round_trips_compact_metadata_and_repeats_identity() {
         instance: instance_scope(),
         result: WaitForCaptureResult {
             matched: true,
-            capture: Some(capture.clone()),
+            capture: Some(Box::new(capture.clone())),
         },
     };
     assert_eq!(result.instance_scope(), &instance_scope());

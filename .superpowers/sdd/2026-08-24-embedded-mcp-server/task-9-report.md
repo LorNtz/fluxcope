@@ -62,7 +62,7 @@ cargo test --test mcp_broker_child --all-features
 
 - Added strict wait milestones, timeout normalization, request/result consistency, and compact metadata result conversion.
 - Added the private `WaitForCapture` operation/result with strict wire decoding, operation identity checks, and an isolated 330-second deadline cap.
-- Injected the publisher-owned capture change feed into the runtime control service and implemented subscribe-before-query initial matching, bounded pending-sequence state, changed-sequence-only rechecks, successful unmatched timeout, typed cancellation/removal/materialization/feed-gap failures, and four-worker admission release before feed sleep.
+- Injected the publisher-owned capture change feed into the runtime control service and implemented subscribe-before-query initial matching, one bounded per-sequence revision/pending state map, changed-sequence-only rechecks, successful unmatched timeout, typed cancellation/removal/materialization/feed-gap failures, and four-worker admission release before feed sleep.
 - Added exact-run public MCP routing, closed schemas, fixed absolute call deadlines, generation-replacement conflict conversion without retargeting, and the annotated `wait_for_capture` tool while keeping `get_capture` private.
 - Wrapped the broker server transport so transport EOF cancels the same rmcp service token before shutdown draining; this propagates disconnect cancellation to in-flight request contexts without polling.
 - Corrected the child schema test to resolve valid local Schemars `$ref` nodes before checking required selector fields and milestone enums.
@@ -72,8 +72,27 @@ cargo test --test mcp_broker_child --all-features
 - `cargo test wait_for_capture --all-features`: 23 passed.
 - Focused runtime control, private protocol, MCP broker, and broker-child suites pass: 35 + 26 + 30 + 2 tests.
 - `cargo test --all-targets --all-features`: 608 passed.
-- Strict Clippy has no Task 9 finding after removing the obsolete `ServiceExt` import; the command remains non-zero only for deliberately staged later-task and pre-existing warnings.
+- Strict Clippy had no Task 9 finding at the initial green checkpoint; the command remained non-zero only for deliberately staged later-task and pre-existing warnings.
+
+## Review corrections
+
+- Initial Design Review: PASS with no Critical or Important finding.
+- Initial Performance Review: found two Important bounded-work issues: runtime batches were fetched before search admission, and queued feed revisions already covered by a newer snapshot were rematerialized.
+- Added deterministic regressions proving every initial 32-row runtime batch is requested only after a search permit is acquired and that all four exhausted permits prevent the runtime batch command from being queued.
+- Moved initial batch admission ahead of `GetCaptureSearchBatch` and retained that permit through off-thread inspection, bounding resident immutable batches to the four-worker admission limit while still releasing every permit before change-feed sleep.
+- Added initial-snapshot and latest-materialization revision-watermark regressions. Wait state now records the highest inspected revision and pending bit once per retained sequence, skips queued `Admitted`/`RecordUpdated` events already covered by that watermark, and removes the state on retention/delete/clear events.
+- Kept the per-sequence map inside the blocking matcher instead of allocating a second per-batch state vector.
+- Added normal-timeout cancellation ownership so an in-flight or queued runtime command is cancelled when the wait returns unmatched.
+- Boxed the compact matched capture inside private wait state/result types; JSON wire shapes are unchanged and Task 9 no longer adds large-enum Clippy findings.
+
+## Review-fix Main evidence
+
+- `cargo test wait_for_capture --all-features`: 27 passed.
+- Focused runtime control, private protocol, MCP broker, and broker-child suites pass: 39 + 26 + 30 + 2 tests.
+- `cargo test --all-targets --all-features`: 612 passed.
+- `cargo fmt --all -- --check`: passed.
+- Strict Clippy reports no Task 9 finding; it remains non-zero only for deliberately staged later-task and pre-existing unrelated warnings.
 
 ## Completion
 
-Status: `GREEN — review pending`
+Status: `GREEN - review-fix re-review pending`
