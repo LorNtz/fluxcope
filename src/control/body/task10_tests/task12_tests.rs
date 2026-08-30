@@ -1,19 +1,17 @@
-use std::{
-    str::FromStr,
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::{io::Write as _, str::FromStr, sync::atomic::AtomicBool};
 
 use serde_json::json;
 
 use super::super::{
-    ExtractSelector, SelectionResourceRequest, extract_capture_body, page_selected_representation,
-    parse_selection_resource_uri, search_capture_body,
+    CappedJsonArrayWriter, ExtractSelector, FoldedMatcher, FormComponentDecoder, OriginalBoundary,
+    SearchCaptureBodyRequest, SelectionResourceRequest, extract_capture_body,
+    find_form_delimiter_with, page_selected_representation, parse_selection_resource_uri,
+    search_capture_body,
 };
 use crate::{
     capture::{BodySide, CaptureSequence},
     control::json_walk::JsonPointer,
-    control_rpc::protocol::ControlErrorCode,
+    control_rpc::protocol::{ControlError, ControlErrorCode},
     instance::RunId,
 };
 
@@ -301,7 +299,7 @@ fn extraction_rejects_malformed_depth_and_size_limited_json() {
 }
 
 #[test]
-fn extraction_observes_json_and_large_form_field_cancellation() {
+fn extraction_observes_json_and_deterministic_form_scan_cancellation() {
     let cancelled = AtomicBool::new(true);
     let json_error = extract_capture_body(
         br#"{"value":"private"}"#,
@@ -320,25 +318,21 @@ fn extraction_observes_json_and_large_form_field_cancellation() {
             .contains("private")
     );
 
-    let form = format!("ignored={}&target=value", "x".repeat(15 * 1_024 * 1_024));
-    let cancelled = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(1));
-            cancelled.store(true, Ordering::Relaxed);
-        });
-        let error = extract_capture_body(
-            form.as_bytes(),
-            Some("application/x-www-form-urlencoded"),
-            &ExtractSelector::FormField {
-                key: "target".to_owned(),
-            },
-            "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/form-field?key=target",
-            &cancelled,
-        )
-        .expect_err("cancellation inside a large form field");
-        assert_eq!(error.code, ControlErrorCode::Cancelled);
-    });
+    let input = vec![b'x'; 96 * 1_024];
+    let mut checkpoints = 0usize;
+    let error = find_form_delimiter_with(&input, b'&', || {
+        checkpoints += 1;
+        if checkpoints == 2 {
+            Err(crate::control_rpc::protocol::ControlError::cancelled(
+                "deterministic scan cancellation",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+    .expect_err("cancelled within one giant field");
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+    assert_eq!(checkpoints, 2);
 }
 
 #[test]
@@ -366,4 +360,136 @@ fn form_extraction_rejects_wrong_media_type_and_oversized_input() {
     )
     .expect_err("form input size limit");
     assert_eq!(size.code, ControlErrorCode::JsonSizeLimit);
+}
+
+#[test]
+fn body_search_query_byte_limit_and_covering_resource_window_are_bounded() {
+    let query = "x".repeat(super::super::MAX_BODY_SEARCH_QUERY_BYTES);
+    let request = SearchCaptureBodyRequest {
+        capture_id: CaptureSequence::new(9),
+        capture_revision: 3,
+        side: BodySide::Response,
+        query: query.clone(),
+        limit: 50,
+        context_bytes: 1024,
+    };
+    request.validate().expect("8192-byte query");
+    let mut too_large = request;
+    too_large.query.push('x');
+    let error = too_large.validate().expect_err("8193-byte query");
+    assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+    assert_eq!(
+        error.details["maximum_bytes"],
+        json!(super::super::MAX_BODY_SEARCH_QUERY_BYTES)
+    );
+
+    let decoded = format!("prefix{query}suffix");
+    let result = search_capture_body(
+        decoded.as_bytes(),
+        &query,
+        50,
+        1024,
+        DECODED_URI,
+        RAW_URI,
+        &not_cancelled(),
+    )
+    .expect("bounded covering window");
+    let resource = url::Url::parse(&result.matches[0].resource_uri).expect("resource URI");
+    let length = resource
+        .query_pairs()
+        .find_map(|(key, value)| (key == "length").then(|| value.parse::<usize>().unwrap()))
+        .expect("window length");
+    assert!(length <= super::super::MAX_BODY_PAGE_LENGTH);
+}
+
+#[test]
+fn folded_matcher_retains_only_query_bounded_original_boundaries() {
+    let cancelled = not_cancelled();
+    let mut matcher = FoldedMatcher::new("aba".chars().collect(), &cancelled).expect("matcher");
+    let mut ranges = Vec::new();
+    for index in 0usize..10_000 {
+        let value = if index.is_multiple_of(2) { 'a' } else { 'b' };
+        if let Some(range) = matcher
+            .push(
+                value,
+                OriginalBoundary {
+                    start: index,
+                    end: index + 1,
+                },
+            )
+            .expect("streamed unit")
+        {
+            ranges.push(range);
+        }
+    }
+    assert!(ranges.starts_with(&[(0, 3), (2, 5), (4, 7)]));
+    assert_eq!(matcher.retained_boundaries(), 3);
+    assert_eq!(matcher.boundary_capacity(), 3);
+}
+
+#[test]
+fn form_values_decode_literal_and_percent_encoded_equals_entirely() {
+    let result = extract_capture_body(
+        b"target=a=b&target=a%3Db&target=plus+space&target=bad%2G%FF",
+        Some("application/x-www-form-urlencoded"),
+        &ExtractSelector::FormField {
+            key: "target".to_owned(),
+        },
+        JSON_SELECTION_URI,
+        &not_cancelled(),
+    )
+    .expect("form extraction");
+    assert_eq!(
+        result.inline.as_deref(),
+        Some(r#"["a=b","a=b","plus space","bad%2G�"]"#)
+    );
+}
+
+#[test]
+fn form_component_decoding_checks_cancellation_during_one_giant_field() {
+    let input = b"%61".repeat(32 * 1_024);
+    let mut decoder = FormComponentDecoder::default();
+    let mut checkpoints = 0usize;
+    let error = decoder
+        .decode_with(&input, super::super::MAX_DECODED_CONTENT_BYTES, || {
+            checkpoints += 1;
+            if checkpoints == 3 {
+                Err(ControlError::cancelled("cancelled component"))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("component decoding must stop at a bounded checkpoint");
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+    assert_eq!(checkpoints, 3);
+}
+
+#[test]
+fn capped_json_array_writer_reserves_closing_byte_and_never_exceeds_capacity() {
+    let mut writer = CappedJsonArrayWriter::with_limit(8);
+    assert!(CappedJsonArrayWriter::new().capacity() <= super::super::MAX_INLINE_SELECTION_BYTES);
+    writer.write_all(b"123456").expect("six payload bytes");
+    assert!(writer.write_all(b"7").is_err());
+    assert!(writer.len() <= 7);
+    assert!(writer.capacity() <= 8);
+    let output = writer.finish().expect("closing bracket");
+    assert_eq!(output.len(), 8);
+    assert!(output.capacity() <= 8);
+}
+
+#[test]
+fn form_json_control_expansion_stops_at_the_output_cap() {
+    let controls = "%01".repeat(2_800_000);
+    let input = format!("target={controls}");
+    let error = extract_capture_body(
+        input.as_bytes(),
+        Some("application/x-www-form-urlencoded"),
+        &ExtractSelector::FormField {
+            key: "target".to_owned(),
+        },
+        JSON_SELECTION_URI,
+        &not_cancelled(),
+    )
+    .expect_err("JSON escaping expansion limit");
+    assert_eq!(error.code, ControlErrorCode::JsonSizeLimit);
 }

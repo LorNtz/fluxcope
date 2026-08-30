@@ -1054,6 +1054,7 @@ impl BodyJobScheduler {
                         source_truncated: status.preview_limit.is_some(),
                         source_truncation_reason: status.preview_limit,
                         decoded_encoding_chain: decoded.encoding_chain.clone(),
+                        decoded_output_limited: decoded.output_limited,
                     })
                 },
             )

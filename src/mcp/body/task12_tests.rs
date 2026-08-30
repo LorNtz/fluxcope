@@ -64,6 +64,24 @@ fn task12_inputs_are_closed_and_build_exact_private_operations() {
     let mut unknown = required_input(json!({"query": "x"}));
     unknown["unexpected"] = json!(true);
     assert!(serde_json::from_value::<SearchCaptureBodyInput>(unknown).is_err());
+
+    let maximum = "x".repeat(8 * 1_024);
+    let search: SearchCaptureBodyInput =
+        serde_json::from_value(required_input(json!({"query": maximum})))
+            .expect("maximum-byte search input");
+    search.operation().expect("maximum-byte search operation");
+    let oversized = SearchCaptureBodyInput {
+        query: "x".repeat(8 * 1_024 + 1),
+        ..search
+    };
+    assert_eq!(
+        oversized
+            .operation()
+            .expect_err("oversized search query")
+            .code
+            .as_str(),
+        "invalid_argument"
+    );
 }
 
 #[test]
@@ -84,6 +102,8 @@ fn task12_schemas_require_exact_target_and_bound_optional_search_controls() {
             assert!(required.contains(&json!(field)), "missing {field}");
         }
     }
+    assert_eq!(search["properties"]["query"]["minLength"], json!(1));
+    assert_eq!(search["properties"]["query"]["maxLength"], json!(8192));
     assert_eq!(search["properties"]["limit"]["minimum"], json!(1));
     assert_eq!(search["properties"]["limit"]["maximum"], json!(50));
     assert_eq!(search["properties"]["context_bytes"]["minimum"], json!(0));

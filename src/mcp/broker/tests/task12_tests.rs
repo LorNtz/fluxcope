@@ -77,6 +77,7 @@ impl InstanceProbe for Task12DispatchProbe {
                             source_truncated: false,
                             source_truncation_reason: None,
                             decoded_encoding_chain: Vec::new(),
+                            decoded_output_limited: true,
                         }),
                     })
                 }
@@ -160,6 +161,11 @@ async fn broker_dispatches_search_extract_and_selected_resource_with_exact_ident
         .await
         .expect("search dispatch");
     assert_eq!(searched.result.capture_revision, 7);
+    assert!(searched.result.decoded_output_limited);
+    assert_eq!(
+        serde_json::to_value(&searched).expect("search MCP output")["decoded_output_limited"],
+        json!(true)
+    );
     assert_eq!(
         searched.instance.proxy_endpoint,
         Some(descriptor.proxy_endpoint())

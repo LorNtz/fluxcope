@@ -72,3 +72,18 @@ The source-limit regression now asserts only that no runtime command is queued a
 ## Review
 
 Initial implementation is GREEN. Required design/maintainability and performance/memory review is pending.
+
+## Review fix round 1/5
+
+Replaced full-body folded-unit materialization with streaming Unicode KMP and a query-length original-boundary ring; added the fixed 8192-byte query contract and bounded covering-window/schema regressions. Search results now expose `decoded_output_limited` through runtime, RPC serialization, MCP output, and tests so totals are identifiable as decoded-prefix totals. Form selection now uses complete component decoding (literal/encoded `=`, `+`, percent escapes, UTF-8 repair), incremental 32 KiB delimiter scans with deterministic cancellation barriers, and a capped JSON-array writer that reserves its closing byte and reports expansion overflow as `json_size_limit`. Added runtime decoded-limit, MCP schema/output, and child-contract regressions. No command, formatter, commit, or work-record operation was run.
+
+## Main review-fix verification
+
+Main fixed the first focused compile failure, then tightened the form path beyond the initial patch: component decoding now checks cancellation and repairs UTF-8 in bounded chunks, caps decoded component output, reuses one decoder across fields, and avoids reserving the full 16 MiB output limit for small selections. The capped writer remains length-bounded while growing on demand.
+
+- `cargo test task12_ --all-features`: 29 passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --all-targets --all-features`: 731 passed.
+
+All six initial specialist findings are addressed. Focused re-review is pending.

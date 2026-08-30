@@ -15,7 +15,7 @@ The request requires:
 - capture ID;
 - exact capture revision;
 - request or response body side;
-- a non-empty Unicode query;
+- a non-empty Unicode query capped at 8 KiB of UTF-8;
 - retained match limit, default 10 and range `1..=50`;
 - context bytes per side, default 160 and range `0..=1024`.
 
@@ -25,6 +25,7 @@ The result contains:
 - total matches and omitted matches;
 - decoded bytes inspected;
 - source truncation/stream metadata consistent with Task 10 body replies;
+- decoded-output-limit state, independently from source truncation;
 - retained matches in source order.
 
 Each retained match contains:

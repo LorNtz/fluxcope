@@ -233,6 +233,10 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> 
             .contains(&json!("query"))
     );
     assert_eq!(
+        body_search.input_schema["properties"]["query"]["maxLength"],
+        json!(8192)
+    );
+    assert_eq!(
         body_search.input_schema["properties"]["limit"]["minimum"],
         json!(1)
     );

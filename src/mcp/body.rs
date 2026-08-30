@@ -119,6 +119,7 @@ pub(crate) struct SearchCaptureBodyInput {
     pub(crate) capture_revision: u64,
     #[schemars(with = "String")]
     pub(crate) side: BodySide,
+    #[schemars(length(min = 1, max = 8192))]
     pub(crate) query: String,
     #[schemars(range(min = 1, max = 50))]
     pub(crate) limit: Option<usize>,

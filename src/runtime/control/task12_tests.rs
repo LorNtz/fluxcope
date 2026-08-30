@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
-use std::{sync::Arc, time::Duration};
+use std::{io::Write as _, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use flate2::{Compression, write::GzEncoder};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -16,7 +17,7 @@ use crate::{
         RuntimeReply, RuntimeRequest,
         body::{
             CaptureBodyMetadataReply, CaptureBodySnapshotReply, ExtractSelector,
-            SearchCaptureBodyRequest, SelectionContentRequest,
+            MAX_DECODED_CONTENT_BYTES, SearchCaptureBodyRequest, SelectionContentRequest,
         },
         json_walk::JsonPointer,
     },
@@ -88,6 +89,15 @@ async fn answer_body(
     body: Bytes,
     content_type: &str,
 ) {
+    answer_body_with_headers(receiver, instance, body, headers(content_type)).await;
+}
+
+async fn answer_body_with_headers(
+    receiver: &mut super::RuntimeControlReceiver,
+    instance: &InstanceScope,
+    body: Bytes,
+    headers: CapturedHeaders,
+) {
     let retained = body.len();
     for _ in 0..2 {
         let command = receiver.recv().await.expect("metadata command");
@@ -107,7 +117,7 @@ async fn answer_body(
                     capture_revision: 3,
                     side: BodySide::Response,
                     status: body_status(retained),
-                    headers: headers(content_type),
+                    headers: headers.clone(),
                     retained_bytes: retained,
                 },
             ))))
@@ -131,7 +141,7 @@ async fn answer_body(
                 capture_revision: 3,
                 side: BodySide::Response,
                 status: body_status(retained),
-                headers: headers(content_type),
+                headers,
                 retained_bytes: retained,
                 preview: CapturedBodyPreview::unbudgeted(body),
             },
@@ -317,4 +327,54 @@ async fn task12_source_preview_limit_rejects_extraction_before_snapshot_without_
     assert_eq!(admission.test_snapshot().active, 0);
     assert_eq!(admission.test_snapshot().queued, 0);
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn task12_search_marks_prefix_totals_when_decoded_output_is_limited() {
+    let (handler, mut receiver, admission) = handler();
+    let operation = ControlOperation::SearchCaptureBody(Box::new(SearchCaptureBodyRequest {
+        capture_id: CaptureSequence::new(7),
+        capture_revision: 3,
+        side: BodySide::Response,
+        query: "needle".to_owned(),
+        limit: 10,
+        context_bytes: 0,
+    }));
+    let call = tokio::spawn(async move {
+        handler
+            .handle(
+                context("task12-decoded-limit"),
+                operation,
+                CancellationToken::new(),
+            )
+            .await
+    });
+    let mut plain = vec![b'x'; MAX_DECODED_CONTENT_BYTES + 1];
+    plain[..6].copy_from_slice(b"needle");
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&plain).expect("gzip input");
+    let encoded = encoder.finish().expect("gzip finish");
+    let encoded_headers = CapturedHeaders::unbudgeted(
+        vec![
+            ("Content-Type".to_owned(), "text/plain".to_owned()),
+            ("Content-Encoding".to_owned(), "gzip".to_owned()),
+        ]
+        .into(),
+    );
+    answer_body_with_headers(
+        &mut receiver,
+        &scope(),
+        Bytes::from(encoded),
+        encoded_headers,
+    )
+    .await;
+    let ControlResult::SearchCaptureBody { result, .. } =
+        call.await.expect("join").expect("limited decoded search")
+    else {
+        panic!("expected search result");
+    };
+    assert!(result.decoded_output_limited);
+    assert_eq!(result.decoded_bytes_inspected, MAX_DECODED_CONTENT_BYTES);
+    assert_eq!(result.total_matches, 1);
+    assert_eq!(admission.test_snapshot().active, 0);
 }
