@@ -87,3 +87,14 @@ Main fixed the first focused compile failure, then tightened the form path beyon
 - `cargo test --all-targets --all-features`: 731 passed.
 
 All six initial specialist findings are addressed. Focused re-review is pending.
+
+## Review fix round 2/5
+
+Design re-review approved round 1. Performance re-review confirmed every original finding fixed but found that exact-capacity growth could reallocate once per small JSON escape fragment. The capped writer now doubles geometrically up to its hard limit and directly tracks growth under tests. A 600 KiB control-character serialization completes in at most eight growth operations.
+
+- `cargo test task12_ --all-features`: 30 passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --all-targets --all-features`: 732 passed.
+
+Performance re-review of the geometric-growth correction is pending.

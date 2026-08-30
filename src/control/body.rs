@@ -932,6 +932,8 @@ pub(crate) fn extract_selected_bytes(
 pub(crate) struct CappedJsonArrayWriter {
     output: Vec<u8>,
     limit: usize,
+    #[cfg(test)]
+    growth_count: usize,
 }
 
 impl CappedJsonArrayWriter {
@@ -942,7 +944,12 @@ impl CappedJsonArrayWriter {
     pub(crate) fn with_limit(limit: usize) -> Self {
         let mut output = Vec::with_capacity(limit.min(MAX_INLINE_SELECTION_BYTES));
         output.push(b'[');
-        Self { output, limit }
+        Self {
+            output,
+            limit,
+            #[cfg(test)]
+            growth_count: 0,
+        }
     }
 
     #[cfg(test)]
@@ -953,6 +960,11 @@ impl CappedJsonArrayWriter {
     #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
         self.output.capacity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn growth_count(&self) -> usize {
+        self.growth_count
     }
 
     fn can_finish(&self) -> bool {
@@ -970,20 +982,31 @@ impl CappedJsonArrayWriter {
 
 impl io::Write for CappedJsonArrayWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self
-            .output
-            .len()
-            .checked_add(bytes.len())
-            .is_none_or(|end| end >= self.limit)
-        {
+        let Some(required) = self.output.len().checked_add(bytes.len()) else {
+            return Err(io::Error::other(
+                "selected form representation exceeds the size limit",
+            ));
+        };
+        if required >= self.limit {
             return Err(io::Error::other(
                 "selected form representation exceeds the size limit",
             ));
         }
-        if self.output.spare_capacity_mut().len() < bytes.len() {
+        if self.output.capacity() < required {
+            let target = self
+                .output
+                .capacity()
+                .max(1)
+                .saturating_mul(2)
+                .max(required)
+                .min(self.limit);
             self.output
-                .try_reserve_exact(bytes.len())
+                .try_reserve_exact(target - self.output.len())
                 .map_err(io::Error::other)?;
+            #[cfg(test)]
+            {
+                self.growth_count += 1;
+            }
         }
         self.output.extend_from_slice(bytes);
         Ok(bytes.len())

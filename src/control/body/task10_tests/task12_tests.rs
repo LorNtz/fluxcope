@@ -478,6 +478,17 @@ fn capped_json_array_writer_reserves_closing_byte_and_never_exceeds_capacity() {
 }
 
 #[test]
+fn capped_json_array_writer_grows_logarithmically_for_fragmented_escapes() {
+    let mut writer = CappedJsonArrayWriter::with_limit(1_024 * 1_024);
+    let value = "\u{1}".repeat(100_000);
+    serde_json::to_writer(&mut writer, &value).expect("bounded escaped value");
+    assert!(writer.growth_count() <= 8);
+    assert!(writer.capacity() <= 1_024 * 1_024);
+    let output = writer.finish().expect("closing bracket");
+    assert!(output.len() < 1_024 * 1_024);
+}
+
+#[test]
 fn form_json_control_expansion_stops_at_the_output_cap() {
     let controls = "%01".repeat(2_800_000);
     let input = format!("target={controls}");
