@@ -43,6 +43,7 @@ cargo test mcp::capture --all-features
 - Marked the compatibility page matcher and runtime-reply inspection helper test-only, reduced the capture fixture helper to seven arguments, collapsed the matcher-hook branch, and added deterministic detail concurrency/cancellation permit-lifetime coverage.
 - Public search semantic validation now runs in `spawn_blocking` only after public-call admission. The blocking worker owns the public permit during validation, including after outer-future cancellation; all matcher patterns have a shared 64-KiB pre-allocation bound with typed field/max/received error details at both public and private trust boundaries.
 - Multi-batch page accounting now distinguishes the full single-row limit from remaining page capacity: only a row exceeding the full seven-MiB budget is `resource_limit`, while a smaller row that does not fit the remaining capacity is omitted with its inclusive sequence cursor. A real runtime/handler multi-batch regression covers exact resumption.
+- Public search computes its single ordinary deadline before blocking validation. Validation selects the same deadline and cancellation token while the detached worker retains the public-call permit, and forwarding receives that exact deadline rather than a fresh 30-second budget; a paused-time gated regression proves typed timeout, retained permit ownership, and zero registry/probe dispatch.
 - No formatter, build, lint, test, or Git command was run by this worker.
 
 ## Modified files
@@ -106,10 +107,15 @@ Strict Clippy may continue to report explicitly staged Task 9+ or unrelated pre-
 ## Main GREEN evidence
 
 - Focused capture query, runtime control, private protocol, MCP capture, and broker-child suites pass: 16 + 23 + 20 + 9 + 2 tests.
-- Full all-target/all-feature suite passes: 585 tests.
+- Full all-target/all-feature suite passes: 586 tests.
 - `cargo fmt --all -- --check` and `git diff --check` pass.
 - Strict Clippy again reports no Task 8 findings; only deliberately staged later-task and pre-existing unrelated warnings remain.
 
+## Review-fix round 3
+
+- Public search now creates one ordinary deadline before blocking validation, enforces it during validation, and forwards the same deadline through selector resolution/private RPC.
+- A deterministic gated validation timeout regression proves typed `deadline_exceeded`, detached-worker permit retention, and zero registry/probe dispatch.
+
 ## Completion
 
-Status: `GREEN — round-two re-review pending`
+Status: `GREEN — round-three re-review pending`

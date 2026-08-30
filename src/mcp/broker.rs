@@ -233,9 +233,10 @@ impl std::fmt::Debug for PublicCallPermit {
 async fn validate_public_search_input(
     input: SearchCapturesInput,
     permit: PublicCallPermit,
+    deadline: Instant,
     cancelled: CancellationToken,
 ) -> Result<(SearchCapturesInput, PublicCallPermit), ControlError> {
-    run_public_search_validation(permit, cancelled, move || {
+    run_public_search_validation(permit, deadline, cancelled, move || {
         input.validate()?;
         Ok(input)
     })
@@ -244,6 +245,7 @@ async fn validate_public_search_input(
 
 async fn run_public_search_validation<F>(
     permit: PublicCallPermit,
+    deadline: Instant,
     cancelled: CancellationToken,
     validate: F,
 ) -> Result<(SearchCapturesInput, PublicCallPermit), ControlError>
@@ -256,6 +258,11 @@ where
             let (permit, input) = result
                 .map_err(|_| ControlError::internal("capture search validation worker failed"))?;
             input.map(|input| (input, permit))
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            Err(ControlError::deadline_exceeded(
+                "capture search validation deadline elapsed",
+            ))
         }
         _ = cancelled.cancelled() => {
             Err(ControlError::cancelled("capture search validation cancelled"))
@@ -986,21 +993,17 @@ impl Broker {
         Parameters(input): Parameters<SearchCapturesInput>,
         context: RequestContext<RoleServer>,
     ) -> Result<Json<SearchCapturesResult>, ErrorData> {
+        let deadline = Instant::now() + ORDINARY_DEADLINE;
         let call = self.try_admit_public_call().map_err(to_mcp_error)?;
         let cancelled = context.ct.clone();
-        let (input, _call) = validate_public_search_input(input, call, cancelled.clone())
+        let (input, _call) = validate_public_search_input(input, call, deadline, cancelled.clone())
             .await
             .map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
-        self.search_captures_impl(
-            input,
-            client,
-            Instant::now() + ORDINARY_DEADLINE,
-            context.ct.clone(),
-        )
-        .await
-        .map(Json)
-        .map_err(to_mcp_error)
+        self.search_captures_impl(input, client, deadline, cancelled)
+            .await
+            .map(Json)
+            .map_err(to_mcp_error)
     }
 }
 
@@ -1850,11 +1853,16 @@ mod tests {
         let cancelled = CancellationToken::new();
         let task_cancelled = cancelled.clone();
         let task = tokio::spawn(async move {
-            run_public_search_validation(permit, task_cancelled, move || {
-                started_tx.send(()).expect("validation started");
-                worker_gate.wait();
-                Ok(SearchCapturesInput::default())
-            })
+            run_public_search_validation(
+                permit,
+                Instant::now() + Duration::from_secs(60),
+                task_cancelled,
+                move || {
+                    started_tx.send(()).expect("validation started");
+                    worker_gate.wait();
+                    Ok(SearchCapturesInput::default())
+                },
+            )
             .await
         });
 
@@ -1879,6 +1887,52 @@ mod tests {
         })
         .await
         .expect("validation worker released permit");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn public_search_validation_timeout_uses_outer_deadline_and_retains_permit() {
+        let selected = descriptor(19001, RUN_A);
+        let registry = FakeRegistry::new(vec![selected.clone()]);
+        let probe = FakeProbe::live(&[selected]);
+        let broker = broker(Arc::clone(&registry), Arc::clone(&probe));
+        let permit = broker.try_admit_public_call().expect("public call permit");
+        let gate = Arc::new(BlockingGate::default());
+        let worker_gate = Arc::clone(&gate);
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let deadline = Instant::now() + super::ORDINARY_DEADLINE;
+        let validation_cancelled = CancellationToken::new();
+        let dispatch_cancelled = validation_cancelled.clone();
+        let task_broker = broker.clone();
+        let task = tokio::spawn(async move {
+            let (input, _permit) =
+                run_public_search_validation(permit, deadline, validation_cancelled, move || {
+                    started_tx.send(()).expect("validation started");
+                    worker_gate.wait();
+                    Ok(SearchCapturesInput::default())
+                })
+                .await?;
+            task_broker
+                .search_captures_impl(input, client(), deadline, dispatch_cancelled)
+                .await
+        });
+
+        started_rx.recv().await.expect("blocking worker started");
+        tokio::time::advance(super::ORDINARY_DEADLINE).await;
+        let error = task
+            .await
+            .expect("public search task")
+            .expect_err("validation deadline");
+        assert_eq!(error.code(), ControlErrorCode::DeadlineExceeded);
+        assert_eq!(
+            broker.call_admission.available_permits(),
+            31,
+            "timed-out validation worker must retain the public permit"
+        );
+        assert_eq!(registry.scan_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.endpoint_calls.load(Ordering::SeqCst), 0);
+        assert!(probe.calls().is_empty(), "probe must not be dispatched");
+
+        gate.release();
     }
 
     #[tokio::test]
