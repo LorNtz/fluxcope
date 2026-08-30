@@ -7,6 +7,8 @@ mod publisher;
 mod store;
 
 use hyper::Method;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
 pub(crate) use change::{CaptureChangeError, CaptureChangeFeed, CaptureChangeKind};
@@ -37,7 +39,10 @@ pub(crate) fn benchmark_ordered_store(captures: Vec<CapturedExchange>) -> usize 
 }
 
 /// Monotonic identity assigned when a request is admitted for capture.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(transparent)]
 pub struct CaptureSequence(u64);
 
 impl CaptureSequence {

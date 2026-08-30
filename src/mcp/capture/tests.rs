@@ -1,6 +1,5 @@
 use super::{
-    SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
-    SetRecordingEnabledResult,
+    SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput, SetRecordingEnabledResult,
 };
 use crate::{
     control::capture_query::{CaptureQuery, CaptureSearchCursor},
@@ -15,7 +14,7 @@ use rmcp::{
     ServiceExt,
     model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion},
 };
-use schemars::{schema_for, JsonSchema};
+use schemars::{JsonSchema, schema_for};
 use serde_json::{Value, json};
 use std::str::FromStr;
 use tokio::io::duplex;
@@ -122,7 +121,9 @@ fn snapshot_search_allows_an_omitted_selector_but_keeps_query_cursor_and_limit_s
     assert_eq!(explicit.query.method.as_deref(), Some("POST"));
     assert_eq!(
         explicit.cursor,
-        Some(CaptureSearchCursor::new(crate::capture::CaptureSequence::new(30)))
+        Some(CaptureSearchCursor::new(
+            crate::capture::CaptureSequence::new(30)
+        ))
     );
     assert_eq!(explicit.limit, Some(10));
 }

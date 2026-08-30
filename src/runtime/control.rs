@@ -10,14 +10,20 @@ use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use tokio::{
     net::UnixListener,
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     task::{JoinHandle, JoinSet},
     time,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    control::{RuntimeReply, RuntimeRequest},
+    control::{
+        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
+        capture_query::{
+            CAPTURE_SEARCH_BATCH_SIZE, CaptureQuery, CaptureSearchCursor, CaptureSearchPage,
+            CompactCapture, CompiledCaptureQuery, match_capture_page, normalize_capture_page_limit,
+        },
+    },
     control_rpc::{
         client::ControlRpcClient,
         protocol::{
@@ -113,14 +119,162 @@ impl RuntimeControlReceiver {
     }
 }
 
+pub(super) struct CaptureSearchAdmission {
+    permits: Arc<Semaphore>,
+}
+
+impl CaptureSearchAdmission {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        cancelled: &CancellationToken,
+    ) -> Result<OwnedSemaphorePermit, ControlError> {
+        tokio::select! {
+            permit = Arc::clone(&self.permits).acquire_owned() => permit.map_err(|_| {
+                ControlError::service_unavailable("capture search admission is closed")
+            }),
+            _ = cancelled.cancelled() => {
+                Err(ControlError::cancelled("capture search cancelled before admission"))
+            }
+        }
+    }
+
+    pub(super) async fn run_blocking<T, F>(
+        &self,
+        cancelled: CancellationToken,
+        work: F,
+    ) -> Result<T, ControlError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, ControlError> + Send + 'static,
+    {
+        let permit = self.acquire(&cancelled).await?;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        });
+        tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                Err(ControlError::cancelled("capture search cancelled"))
+            }
+            result = task => {
+                result.map_err(|_| ControlError::internal("capture search worker failed"))?
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn available_permits_for_test(&self) -> usize {
+        self.permits.available_permits()
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RuntimeControlHandler {
     runtime: RuntimeControlClient,
+    capture_searches: Arc<CaptureSearchAdmission>,
 }
 
 impl RuntimeControlHandler {
     pub(super) fn new(runtime: RuntimeControlClient) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
+        }
+    }
+
+    async fn instance_snapshot(
+        runtime: &RuntimeControlClient,
+        cancelled: &CancellationToken,
+    ) -> Result<InstanceRuntimeSnapshot, ControlError> {
+        match runtime
+            .request(RuntimeRequest::GetStatus, cancelled.clone())
+            .await?
+        {
+            RuntimeReply::Instance(snapshot) => Ok(snapshot),
+            _ => Err(ControlError::internal(
+                "runtime returned an unexpected status reply",
+            )),
+        }
+    }
+
+    async fn search_captures(
+        runtime: RuntimeControlClient,
+        admission: Arc<CaptureSearchAdmission>,
+        query: CaptureQuery,
+        mut cursor: Option<CaptureSearchCursor>,
+        limit: Option<usize>,
+        cancelled: CancellationToken,
+    ) -> Result<(Vec<CompactCapture>, Option<CaptureSearchCursor>), ControlError> {
+        let limit = normalize_capture_page_limit(limit)?;
+        let query = Arc::new(CompiledCaptureQuery::compile(query)?);
+        let mut permit = admission.acquire(&cancelled).await?;
+        let mut captures = Vec::with_capacity(limit);
+
+        loop {
+            let batch = match runtime
+                .request(
+                    RuntimeRequest::GetCaptureSearchBatch {
+                        cursor,
+                        max_rows: CAPTURE_SEARCH_BATCH_SIZE,
+                    },
+                    cancelled.clone(),
+                )
+                .await?
+            {
+                RuntimeReply::CaptureSearchBatch(batch) => batch,
+                _ => {
+                    return Err(ControlError::internal(
+                        "runtime returned an unexpected capture batch reply",
+                    ));
+                }
+            };
+            if batch.snapshots.is_empty() {
+                return Ok((captures, None));
+            }
+
+            let remaining = limit - captures.len();
+            let query = Arc::clone(&query);
+            let worker_cancelled = cancelled.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let page = match_capture_page(
+                    &batch.snapshots,
+                    &query,
+                    None,
+                    remaining,
+                    &worker_cancelled,
+                );
+                (permit, batch.next_cursor, page)
+            });
+            let (returned_permit, batch_cursor, page) = tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => {
+                    return Err(ControlError::cancelled("capture search cancelled"));
+                }
+                result = worker => {
+                    result.map_err(|_| ControlError::internal("capture search worker failed"))?
+                }
+            };
+            permit = returned_permit;
+            let CaptureSearchPage {
+                captures: matched,
+                next_cursor: page_cursor,
+            } = page?;
+            captures.extend(matched);
+            if captures.len() == limit {
+                return Ok((captures, page_cursor.or(batch_cursor)));
+            }
+            let Some(next_cursor) = batch_cursor else {
+                return Ok((captures, None));
+            };
+            cursor = Some(next_cursor);
+        }
     }
 }
 
@@ -132,19 +286,113 @@ impl ControlRpcHandler for RuntimeControlHandler {
         cancelled: CancellationToken,
     ) -> impl Future<Output = Result<ControlResult, ControlError>> + Send {
         let runtime = self.runtime.clone();
+        let capture_searches = Arc::clone(&self.capture_searches);
         async move {
-            let request = match operation {
-                ControlOperation::DescribeInstance => RuntimeRequest::DescribeInstance,
-            };
-            match runtime.request(request, cancelled).await? {
-                RuntimeReply::Instance(snapshot) => Ok(ControlResult::DescribeInstance {
-                    instance: snapshot.instance,
-                    config_mode: snapshot.config_mode,
-                    persistence: snapshot.persistence,
-                    recording_enabled: snapshot.recording_enabled,
-                    retained_capture_count: snapshot.retained_capture_count,
-                    settings_revision: snapshot.settings_revision,
-                }),
+            match operation {
+                ControlOperation::DescribeInstance => {
+                    let snapshot = match runtime
+                        .request(RuntimeRequest::DescribeInstance, cancelled.clone())
+                        .await?
+                    {
+                        RuntimeReply::Instance(snapshot) => snapshot,
+                        _ => {
+                            return Err(ControlError::internal(
+                                "runtime returned an unexpected description reply",
+                            ));
+                        }
+                    };
+                    Ok(ControlResult::DescribeInstance {
+                        instance: snapshot.instance,
+                        config_mode: snapshot.config_mode,
+                        persistence: snapshot.persistence,
+                        recording_enabled: snapshot.recording_enabled,
+                        retained_capture_count: snapshot.retained_capture_count,
+                        settings_revision: snapshot.settings_revision,
+                    })
+                }
+                ControlOperation::GetStatus => {
+                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
+                    Ok(ControlResult::GetStatus {
+                        instance: snapshot.instance,
+                        config_mode: snapshot.config_mode,
+                        persistence: snapshot.persistence,
+                        recording_enabled: snapshot.recording_enabled,
+                        retained_capture_count: snapshot.retained_capture_count,
+                        settings_revision: snapshot.settings_revision,
+                    })
+                }
+                ControlOperation::SetRecordingEnabled { enabled } => {
+                    let update = match runtime
+                        .request(
+                            RuntimeRequest::SetRecordingEnabled { enabled },
+                            cancelled.clone(),
+                        )
+                        .await?
+                    {
+                        RuntimeReply::RecordingUpdated(update) => update,
+                        _ => {
+                            return Err(ControlError::internal(
+                                "runtime returned an unexpected recording reply",
+                            ));
+                        }
+                    };
+                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
+                    Ok(ControlResult::SetRecordingEnabled {
+                        instance: snapshot.instance,
+                        previous: update.previous,
+                        current: update.current,
+                    })
+                }
+                ControlOperation::SearchCaptures {
+                    query,
+                    cursor,
+                    limit,
+                } => {
+                    CompiledCaptureQuery::compile(query.clone())?;
+                    normalize_capture_page_limit(limit)?;
+                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
+                    let (captures, next_cursor) = Self::search_captures(
+                        runtime,
+                        capture_searches,
+                        query,
+                        cursor,
+                        limit,
+                        cancelled,
+                    )
+                    .await?;
+                    Ok(ControlResult::SearchCaptures {
+                        instance: snapshot.instance,
+                        captures,
+                        next_cursor,
+                    })
+                }
+                ControlOperation::GetCapture {
+                    capture_id,
+                    expected_revision,
+                } => {
+                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
+                    let capture = match runtime
+                        .request(
+                            RuntimeRequest::GetCapture {
+                                capture_id,
+                                expected_revision,
+                            },
+                            cancelled,
+                        )
+                        .await?
+                    {
+                        RuntimeReply::CaptureDetail(capture) => capture,
+                        _ => {
+                            return Err(ControlError::internal(
+                                "runtime returned an unexpected capture detail reply",
+                            ));
+                        }
+                    };
+                    Ok(ControlResult::GetCapture {
+                        instance: snapshot.instance,
+                        capture,
+                    })
+                }
             }
         }
     }
@@ -183,6 +431,9 @@ impl ExistingDescriptorProbe for ControlRpcDescriptorProbe {
             .await?
             {
                 ControlResult::DescribeInstance { instance, .. } => Ok(instance),
+                _ => Err(ControlError::invalid_argument(
+                    "private descriptor probe returned an unexpected operation",
+                )),
             }
         })
     }

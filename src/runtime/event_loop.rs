@@ -37,8 +37,14 @@ use crate::{
 };
 #[cfg(unix)]
 use crate::{
-    control::{AppControlSummary, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest},
-    control_rpc::protocol::{ControlError, InstanceScope},
+    capture::{CaptureSequence, CaptureSnapshotMode},
+    control::{
+        AppControlSummary, InstanceRuntimeSnapshot, RecordingUpdate, RuntimeReply, RuntimeRequest,
+        capture_query::{
+            CAPTURE_SEARCH_BATCH_SIZE, CaptureDetail, CaptureSearchBatch, cursor_before,
+        },
+    },
+    control_rpc::protocol::{ControlError, ControlErrorCode, InstanceScope},
     instance::InstanceIdentity,
     instance_registry::RegistryPublisher,
 };
@@ -451,7 +457,7 @@ impl AppRuntime {
             .identity
             .as_ref()
             .ok_or_else(|| ControlError::instance_unavailable("runtime control is not enabled"))?;
-        execute_control_request(identity, &self.app, &self.settings, request)
+        execute_control_request(identity, &mut self.app, &self.settings, request)
     }
 
     #[cfg(unix)]
@@ -459,9 +465,10 @@ impl AppRuntime {
         if command.cancelled.is_cancelled() {
             return false;
         }
+        let dirty = matches!(command.request, RuntimeRequest::SetRecordingEnabled { .. });
         let result = self.execute_control(command.request);
         let _ = command.reply.send(result);
-        false
+        dirty
     }
 
     #[cfg(unix)]
@@ -516,12 +523,12 @@ async fn receive_control_event(
 #[cfg(unix)]
 fn execute_control_request(
     identity: &InstanceIdentity,
-    app: &App,
+    app: &mut App,
     settings: &SettingsSession,
     request: RuntimeRequest,
 ) -> std::result::Result<RuntimeReply, ControlError> {
     match request {
-        RuntimeRequest::DescribeInstance => {
+        RuntimeRequest::DescribeInstance | RuntimeRequest::GetStatus => {
             let AppControlSummary {
                 recording_enabled,
                 retained_capture_count,
@@ -540,11 +547,85 @@ fn execute_control_request(
                 settings_revision,
             }))
         }
+        RuntimeRequest::SetRecordingEnabled { enabled } => {
+            let previous = app.set_recording_enabled(enabled);
+            Ok(RuntimeReply::RecordingUpdated(RecordingUpdate {
+                previous,
+                current: enabled,
+            }))
+        }
+        RuntimeRequest::GetCaptureSearchBatch { cursor, max_rows } => {
+            let max_rows = max_rows.min(CAPTURE_SEARCH_BATCH_SIZE);
+            let mut snapshots = Vec::with_capacity(max_rows);
+            let mut cursor = cursor
+                .map(|cursor| cursor.sequence())
+                .unwrap_or(CaptureSequence::new(u64::MAX));
+            while snapshots.len() < max_rows {
+                let Some(record) = app.capture_at_or_before(cursor) else {
+                    break;
+                };
+                let sequence = record.sequence();
+                snapshots.push(record.snapshot(CaptureSnapshotMode::MetadataOnly));
+                let Some(older) = sequence.value().checked_sub(1) else {
+                    break;
+                };
+                cursor = CaptureSequence::new(older);
+            }
+            let next_cursor = snapshots.last().and_then(|snapshot| {
+                let cursor = cursor_before(snapshot.sequence)?;
+                app.capture_at_or_before(cursor.sequence()).map(|_| cursor)
+            });
+            Ok(RuntimeReply::CaptureSearchBatch(CaptureSearchBatch {
+                snapshots,
+                next_cursor,
+            }))
+        }
+        RuntimeRequest::GetCapture {
+            capture_id,
+            expected_revision,
+        } => {
+            let record = app.capture_record(capture_id).ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::CaptureNotFound,
+                    "capture is not retained",
+                    false,
+                    serde_json::json!({"capture_id": capture_id}),
+                )
+            })?;
+            let snapshot = record.snapshot(CaptureSnapshotMode::MetadataOnly);
+            if let Some(expected_revision) = expected_revision
+                && expected_revision != snapshot.revision
+            {
+                return Err(ControlError::new(
+                    ControlErrorCode::CaptureRevisionConflict,
+                    "capture revision changed",
+                    false,
+                    serde_json::json!({
+                        "capture_id": capture_id,
+                        "expected_revision": expected_revision,
+                        "current_revision": snapshot.revision,
+                    }),
+                ));
+            }
+            Ok(RuntimeReply::CaptureDetail(CaptureDetail::from_snapshot(
+                &snapshot,
+            )))
+        }
         #[cfg(test)]
         RuntimeRequest::UnsupportedForTest => Err(ControlError::invalid_argument(
             "unsupported runtime control operation",
         )),
     }
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn execute_control_request_for_test(
+    identity: &InstanceIdentity,
+    app: &mut App,
+    settings: &SettingsSession,
+    request: RuntimeRequest,
+) -> std::result::Result<RuntimeReply, ControlError> {
+    execute_control_request(identity, app, settings, request)
 }
 
 fn is_fatal_service(kind: ServiceKind) -> bool {
@@ -565,7 +646,7 @@ impl ControlExecutionHarness {
         &mut self,
         request: RuntimeRequest,
     ) -> std::result::Result<RuntimeReply, ControlError> {
-        execute_control_request(&self.identity, &self.app, &self.settings, request)
+        execute_control_request(&self.identity, &mut self.app, &self.settings, request)
     }
 
     async fn process_next_control_command(&mut self) -> Result<bool> {
@@ -577,9 +658,10 @@ impl ControlExecutionHarness {
         if command.cancelled.is_cancelled() {
             return Ok(false);
         }
+        let dirty = matches!(command.request, RuntimeRequest::SetRecordingEnabled { .. });
         let result = self.execute_control(command.request);
         let _ = command.reply.send(result);
-        Ok(false)
+        Ok(dirty)
     }
 
     fn close_control_ingress(&mut self) {
@@ -793,7 +875,9 @@ mod tests {
         let reply = runtime
             .execute_control(RuntimeRequest::DescribeInstance)
             .expect("describe runtime");
-        let RuntimeReply::Instance(snapshot) = reply;
+        let RuntimeReply::Instance(snapshot) = reply else {
+            panic!("expected instance runtime reply");
+        };
 
         assert_eq!(snapshot.instance.proxy_endpoint, identity.proxy_endpoint());
         assert_eq!(snapshot.instance.run_id, *identity.run_id());

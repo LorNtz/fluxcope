@@ -1,4 +1,9 @@
 use crate::{
+    capture::CaptureSequence,
+    control::capture_query::{
+        CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture, CompiledCaptureQuery,
+        normalize_capture_page_limit,
+    },
     instance::RunId,
     settings::{ConfigMode, PersistenceMode},
 };
@@ -11,7 +16,7 @@ use std::{
 
 pub(crate) const RPC_VERSION: u16 = 1;
 const MAX_IDENTIFIER_BYTES: usize = 128;
-const DESCRIBE_INSTANCE_MAX_DEADLINE: Duration = Duration::from_secs(30);
+const ORDINARY_MAX_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +29,10 @@ pub(crate) struct DeclaredClient {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlOperationKind {
     DescribeInstance,
+    GetStatus,
+    SetRecordingEnabled,
+    SearchCaptures,
+    GetCapture,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -47,14 +56,55 @@ pub(crate) struct ControlRequest {
     pub(crate) operation: ControlOperation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ControlOperation {
     DescribeInstance,
+    GetStatus,
+    SetRecordingEnabled {
+        enabled: bool,
+    },
+    SearchCaptures {
+        query: CaptureQuery,
+        cursor: Option<CaptureSearchCursor>,
+        limit: Option<usize>,
+    },
+    GetCapture {
+        capture_id: CaptureSequence,
+        expected_revision: Option<u64>,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DescribeInstanceArguments {}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GetStatusArguments {}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SetRecordingEnabledArguments {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SearchCapturesArguments {
+    query: CaptureQuery,
+    #[serde(default)]
+    cursor: Option<CaptureSearchCursor>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GetCaptureArguments {
+    capture_id: CaptureSequence,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -74,12 +124,38 @@ pub(crate) enum ControlResult {
         retained_capture_count: usize,
         settings_revision: u64,
     },
+    GetStatus {
+        instance: InstanceScope,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        recording_enabled: bool,
+        retained_capture_count: usize,
+        settings_revision: u64,
+    },
+    SetRecordingEnabled {
+        instance: InstanceScope,
+        previous: bool,
+        current: bool,
+    },
+    SearchCaptures {
+        instance: InstanceScope,
+        captures: Vec<CompactCapture>,
+        next_cursor: Option<CaptureSearchCursor>,
+    },
+    GetCapture {
+        instance: InstanceScope,
+        capture: CaptureDetail,
+    },
 }
 
 impl ControlResult {
     pub(crate) fn instance_scope(&self) -> &InstanceScope {
         match self {
-            Self::DescribeInstance { instance, .. } => instance,
+            Self::DescribeInstance { instance, .. }
+            | Self::GetStatus { instance, .. }
+            | Self::SetRecordingEnabled { instance, .. }
+            | Self::SearchCaptures { instance, .. }
+            | Self::GetCapture { instance, .. } => instance,
         }
     }
 }
@@ -95,6 +171,8 @@ pub(crate) enum ControlErrorCode {
     InstanceUnavailable,
     RpcVersionMismatch,
     RpcFrameTooLarge,
+    CaptureNotFound,
+    CaptureRevisionConflict,
     ServiceUnavailable,
     DeadlineExceeded,
     Cancelled,
@@ -128,6 +206,8 @@ impl ControlErrorCode {
             Self::InstanceUnavailable => "instance_unavailable",
             Self::RpcVersionMismatch => "rpc_version_mismatch",
             Self::RpcFrameTooLarge => "rpc_frame_too_large",
+            Self::CaptureNotFound => "capture_not_found",
+            Self::CaptureRevisionConflict => "capture_revision_conflict",
             Self::ServiceUnavailable => "service_unavailable",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
@@ -282,8 +362,37 @@ impl RequestEnvelope {
         let (operation, arguments) = match operation {
             ControlOperation::DescribeInstance => (
                 ControlOperationKind::DescribeInstance,
-                RawValue::from_string("{}".to_owned())
-                    .map_err(|error| ControlError::invalid_argument(error.to_string()))?,
+                serialize_arguments(&DescribeInstanceArguments {})?,
+            ),
+            ControlOperation::GetStatus => (
+                ControlOperationKind::GetStatus,
+                serialize_arguments(&GetStatusArguments {})?,
+            ),
+            ControlOperation::SetRecordingEnabled { enabled } => (
+                ControlOperationKind::SetRecordingEnabled,
+                serialize_arguments(&SetRecordingEnabledArguments { enabled })?,
+            ),
+            ControlOperation::SearchCaptures {
+                query,
+                cursor,
+                limit,
+            } => (
+                ControlOperationKind::SearchCaptures,
+                serialize_arguments(&SearchCapturesArguments {
+                    query,
+                    cursor,
+                    limit,
+                })?,
+            ),
+            ControlOperation::GetCapture {
+                capture_id,
+                expected_revision,
+            } => (
+                ControlOperationKind::GetCapture,
+                serialize_arguments(&GetCaptureArguments {
+                    capture_id,
+                    expected_revision,
+                })?,
             ),
         };
         Ok(Self {
@@ -299,7 +408,11 @@ impl RequestEnvelope {
 
     pub(crate) fn clamped_deadline(&self, received_at: Instant) -> Instant {
         let maximum = match self.operation {
-            ControlOperationKind::DescribeInstance => DESCRIBE_INSTANCE_MAX_DEADLINE,
+            ControlOperationKind::DescribeInstance
+            | ControlOperationKind::GetStatus
+            | ControlOperationKind::SetRecordingEnabled
+            | ControlOperationKind::SearchCaptures
+            | ControlOperationKind::GetCapture => ORDINARY_MAX_DEADLINE,
         };
         received_at + Duration::from_millis(self.deadline_ms).min(maximum)
     }
@@ -327,6 +440,33 @@ impl RequestEnvelope {
             ControlOperationKind::DescribeInstance => {
                 parse_arguments::<DescribeInstanceArguments>(&self.arguments)?;
                 ControlOperation::DescribeInstance
+            }
+            ControlOperationKind::GetStatus => {
+                parse_arguments::<GetStatusArguments>(&self.arguments)?;
+                ControlOperation::GetStatus
+            }
+            ControlOperationKind::SetRecordingEnabled => {
+                let arguments = parse_arguments::<SetRecordingEnabledArguments>(&self.arguments)?;
+                ControlOperation::SetRecordingEnabled {
+                    enabled: arguments.enabled,
+                }
+            }
+            ControlOperationKind::SearchCaptures => {
+                let arguments = parse_arguments::<SearchCapturesArguments>(&self.arguments)?;
+                CompiledCaptureQuery::compile(arguments.query.clone())?;
+                normalize_capture_page_limit(arguments.limit)?;
+                ControlOperation::SearchCaptures {
+                    query: arguments.query,
+                    cursor: arguments.cursor,
+                    limit: arguments.limit,
+                }
+            }
+            ControlOperationKind::GetCapture => {
+                let arguments = parse_arguments::<GetCaptureArguments>(&self.arguments)?;
+                ControlOperation::GetCapture {
+                    capture_id: arguments.capture_id,
+                    expected_revision: arguments.expected_revision,
+                }
             }
         };
         let deadline = self.clamped_deadline(received_at);
@@ -430,6 +570,15 @@ where
         .end()
         .map_err(|error| ControlError::invalid_argument(error.to_string()))?;
     Ok(value)
+}
+
+fn serialize_arguments<T>(arguments: &T) -> Result<Box<RawValue>, ControlError>
+where
+    T: Serialize,
+{
+    let value = serde_json::to_string(arguments)
+        .map_err(|error| ControlError::invalid_argument(error.to_string()))?;
+    RawValue::from_string(value).map_err(|error| ControlError::invalid_argument(error.to_string()))
 }
 
 fn parse_arguments<T>(arguments: &RawValue) -> Result<T, ControlError>

@@ -63,6 +63,7 @@ pub(crate) struct ListInstancesResult {
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GetStatusResult {
     pub(crate) instance: InstanceSelector,
     #[schemars(with = "String")]

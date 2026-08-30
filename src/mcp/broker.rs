@@ -39,6 +39,10 @@ use crate::{
 };
 
 use super::{
+    capture::{
+        SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
+        SetRecordingEnabledResult, recording_result, search_result,
+    },
     schema::{
         BrokerLimits, BrokerStatusResult, BrokerVersions, DiscoverySummary, GetStatusInput,
         GetStatusResult, InstanceSelector, InstanceSummary, ListInstancesResult, RegistryStatus,
@@ -123,6 +127,51 @@ pub(crate) trait InstanceProbe: Send + Sync + 'static {
         deadline: Instant,
         cancelled: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>>;
+
+    fn call<'a>(
+        &'a self,
+        descriptor: &'a InstanceDescriptor,
+        operation: ControlOperation,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>> {
+        Box::pin(async move {
+            match operation {
+                ControlOperation::DescribeInstance => {
+                    self.describe(descriptor, client, deadline, cancelled).await
+                }
+                ControlOperation::GetStatus => {
+                    match self
+                        .describe(descriptor, client, deadline, cancelled)
+                        .await?
+                    {
+                        ControlResult::DescribeInstance {
+                            instance,
+                            config_mode,
+                            persistence,
+                            recording_enabled,
+                            retained_capture_count,
+                            settings_revision,
+                        } => Ok(ControlResult::GetStatus {
+                            instance,
+                            config_mode,
+                            persistence,
+                            recording_enabled,
+                            retained_capture_count,
+                            settings_revision,
+                        }),
+                        _ => Err(ControlError::internal(
+                            "instance description returned an unexpected result",
+                        )),
+                    }
+                }
+                _ => Err(ControlError::service_unavailable(
+                    "instance probe does not implement control calls",
+                )),
+            }
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -140,6 +189,26 @@ impl InstanceProbe for ControlRpcProbe {
             ControlRpcClient::call(
                 descriptor,
                 ControlOperation::DescribeInstance,
+                deadline.into_std(),
+                client,
+                cancelled,
+            )
+            .await
+        })
+    }
+
+    fn call<'a>(
+        &'a self,
+        descriptor: &'a InstanceDescriptor,
+        operation: ControlOperation,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<ControlResult, ControlError>> + Send + 'a>> {
+        Box::pin(async move {
+            ControlRpcClient::call(
+                descriptor,
+                operation,
                 deadline.into_std(),
                 client,
                 cancelled,
@@ -500,8 +569,9 @@ impl Broker {
         while let Some(result) = probes.next().await {
             match result {
                 Ok((descriptor, description))
-                    if description.instance_scope().proxy_endpoint
-                        == descriptor.proxy_endpoint()
+                    if matches!(description, ControlResult::DescribeInstance { .. })
+                        && description.instance_scope().proxy_endpoint
+                            == descriptor.proxy_endpoint()
                         && description.instance_scope().run_id == *descriptor.run_id() =>
                 {
                     live_instances.push(ResolvedInstance {
@@ -630,7 +700,7 @@ impl Broker {
             .live_instances
             .into_iter()
             .map(instance_summary)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ListInstancesResult {
             instances,
             diagnostics: DiscoverySummary {
@@ -664,7 +734,66 @@ impl Broker {
                 cancelled,
             )
             .await?;
-        Ok(status_result(resolved))
+        status_result(resolved.description)
+    }
+
+    pub(crate) async fn set_recording_enabled_impl(
+        &self,
+        input: SetRecordingEnabledInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<SetRecordingEnabledResult, McpDomainError> {
+        input.validate()?;
+        let resolved = self
+            .resolve_with_client(
+                input.instance.clone(),
+                SelectorRequirement::Mutation,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(
+                &resolved.descriptor,
+                input.operation(),
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        recording_result(result)
+    }
+
+    pub(crate) async fn search_captures_impl(
+        &self,
+        input: SearchCapturesInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<SearchCapturesResult, McpDomainError> {
+        let resolved = self
+            .resolve_with_client(
+                input.instance.clone(),
+                SelectorRequirement::SnapshotRead,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(
+                &resolved.descriptor,
+                input.operation(),
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        search_result(result)
     }
 
     async fn get_broker_status_impl(
@@ -781,6 +910,62 @@ impl Broker {
         .map(Json)
         .map_err(to_mcp_error)
     }
+
+    #[tool(
+        name = "set_recording_enabled",
+        description = "Explicitly enable or disable live recording for one Wirelens instance",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_recording_enabled(
+        &self,
+        Parameters(input): Parameters<SetRecordingEnabledInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<SetRecordingEnabledResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.set_recording_enabled_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "search_captures",
+        description = "Search retained capture metadata newest-first with a stable sequence cursor",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn search_captures(
+        &self,
+        Parameters(input): Parameters<SearchCapturesInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<SearchCapturesResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.search_captures_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -798,7 +983,7 @@ impl ServerHandler for Broker {
     }
 }
 
-fn instance_summary(resolved: ResolvedInstance) -> InstanceSummary {
+fn instance_summary(resolved: ResolvedInstance) -> Result<InstanceSummary, ControlError> {
     let descriptor = resolved.descriptor;
     let ControlResult::DescribeInstance {
         config_mode,
@@ -807,8 +992,13 @@ fn instance_summary(resolved: ResolvedInstance) -> InstanceSummary {
         retained_capture_count,
         settings_revision,
         ..
-    } = resolved.description;
-    InstanceSummary {
+    } = resolved.description
+    else {
+        return Err(ControlError::internal(
+            "instance probe returned an unexpected description result",
+        ));
+    };
+    Ok(InstanceSummary {
         instance: InstanceSelector {
             proxy_endpoint: Some(descriptor.proxy_endpoint()),
             run_id: Some(descriptor.run_id().clone()),
@@ -823,30 +1013,58 @@ fn instance_summary(resolved: ResolvedInstance) -> InstanceSummary {
         recording_enabled,
         retained_capture_count,
         settings_revision,
-    }
+    })
 }
 
-fn status_result(resolved: ResolvedInstance) -> GetStatusResult {
-    let descriptor = resolved.descriptor;
-    let ControlResult::DescribeInstance {
+fn status_result(result: ControlResult) -> Result<GetStatusResult, ControlError> {
+    let (
+        instance,
         config_mode,
         persistence,
         recording_enabled,
         retained_capture_count,
         settings_revision,
-        ..
-    } = resolved.description;
-    GetStatusResult {
+    ) = match result {
+        ControlResult::GetStatus {
+            instance,
+            config_mode,
+            persistence,
+            recording_enabled,
+            retained_capture_count,
+            settings_revision,
+        }
+        | ControlResult::DescribeInstance {
+            instance,
+            config_mode,
+            persistence,
+            recording_enabled,
+            retained_capture_count,
+            settings_revision,
+        } => (
+            instance,
+            config_mode,
+            persistence,
+            recording_enabled,
+            retained_capture_count,
+            settings_revision,
+        ),
+        _ => {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected status result",
+            ));
+        }
+    };
+    Ok(GetStatusResult {
         instance: InstanceSelector {
-            proxy_endpoint: Some(descriptor.proxy_endpoint()),
-            run_id: Some(descriptor.run_id().clone()),
+            proxy_endpoint: Some(instance.proxy_endpoint),
+            run_id: Some(instance.run_id),
         },
         config_mode,
         persistence,
         recording_enabled,
         retained_capture_count,
         settings_revision,
-    }
+    })
 }
 
 fn declared_client(context: &RequestContext<RoleServer>) -> Result<DeclaredClient, McpDomainError> {
@@ -2104,12 +2322,8 @@ mod tests {
         pub(super) mod capture {
             use super::super::*;
             use crate::{
-                capture::{
-                    CaptureRecord, CaptureSequence, CaptureSnapshotMode, CapturedExchange,
-                },
-                control::capture_query::{
-                    CaptureQuery, CompiledCaptureQuery, match_capture_page,
-                },
+                capture::{CaptureRecord, CaptureSequence, CaptureSnapshotMode, CapturedExchange},
+                control::capture_query::{CaptureQuery, CompiledCaptureQuery, match_capture_page},
                 control_rpc::protocol::ControlOperation,
             };
             use hyper::Method;
@@ -2261,10 +2475,7 @@ mod tests {
                         descriptor.proxy_endpoint().to_string()
                     );
                     assert_eq!(value["instance"]["run_id"], descriptor.run_id().to_string());
-                    assert_eq!(
-                        value["captures"][0]["capture_sequence"],
-                        expected_sequence
-                    );
+                    assert_eq!(value["captures"][0]["capture_sequence"], expected_sequence);
                 }
 
                 let mutation = client
@@ -2298,5 +2509,4 @@ mod tests {
             }
         }
     }
-
 }

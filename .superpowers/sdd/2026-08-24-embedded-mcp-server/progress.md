@@ -13,4 +13,4 @@ Task 6: fix round 1/5 (all lifecycle/bounded-work review findings addressed — 
 Task 6: complete (commits 919270b..5dc6508, review clean)
 Task 7: fix round 1/5 (all design/performance findings addressed — deterministic lock-held snapshot proof, lazy trailing buffers, O(n) chunk iteration, single-copy decode success path, sticky retained prefix)
 Task 7: complete (capture 53, proxy 11, full 539; design PASS, performance PASS, review clean)
-Task 8: RED complete (capture query/runtime/private RPC/MCP contract tests authored; focused suite fails only on missing Task 8 production APIs)
+Task 8: initial GREEN (capture query/store/runtime/private RPC/MCP tools; focused 12+17+7, RPC 20, child 2, full 572; review pending)

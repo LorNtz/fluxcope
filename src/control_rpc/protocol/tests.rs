@@ -1,7 +1,6 @@
 use super::{
     ControlError, ControlErrorCode, ControlOperation, ControlOperationKind, ControlResult,
-    DeclaredClient,
-    RPC_VERSION, RequestEnvelope, ResponseEnvelope, decode_request_payload,
+    DeclaredClient, RPC_VERSION, RequestEnvelope, ResponseEnvelope, decode_request_payload,
     decode_response_payload,
 };
 use crate::{
@@ -333,11 +332,7 @@ fn task8_request(operation: &str, arguments: serde_json::Value, deadline_ms: u64
 fn task8_requests_decode_to_operation_specific_typed_arguments() {
     let received_at = Instant::now();
     let cases = [
-        (
-            "get_status",
-            json!({}),
-            ControlOperation::GetStatus,
-        ),
+        ("get_status", json!({}), ControlOperation::GetStatus),
         (
             "set_recording_enabled",
             json!({"enabled": true}),
@@ -371,11 +366,9 @@ fn task8_requests_decode_to_operation_specific_typed_arguments() {
     ];
 
     for (operation, arguments, expected) in cases {
-        let request = decode_request_payload(
-            &task8_request(operation, arguments, 5_000),
-            received_at,
-        )
-        .expect("valid Task 8 request");
+        let request =
+            decode_request_payload(&task8_request(operation, arguments, 5_000), received_at)
+                .expect("valid Task 8 request");
         assert_eq!(request.operation, expected);
         assert_eq!(request.deadline, received_at + Duration::from_secs(5));
     }
@@ -410,18 +403,13 @@ fn task8_operations_reject_unknown_missing_malformed_and_out_of_range_arguments(
         ("search_captures", json!({"query": {}, "limit": 101})),
         ("get_capture", json!({})),
         ("get_capture", json!({"capture_id": "seven"})),
-        (
-            "get_capture",
-            json!({"capture_id": 7, "unexpected": true}),
-        ),
+        ("get_capture", json!({"capture_id": 7, "unexpected": true})),
     ];
 
     for (operation, arguments) in invalid {
-        let error = decode_request_payload(
-            &task8_request(operation, arguments, 1_000),
-            Instant::now(),
-        )
-        .expect_err("invalid operation arguments");
+        let error =
+            decode_request_payload(&task8_request(operation, arguments, 1_000), Instant::now())
+                .expect_err("invalid operation arguments");
         assert_eq!(
             error.code,
             ControlErrorCode::InvalidArgument,
@@ -443,11 +431,9 @@ fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
         ("search_captures", json!({"query": {}})),
         ("get_capture", json!({"capture_id": 1})),
     ] {
-        let request = decode_request_payload(
-            &task8_request(operation, arguments, u64::MAX),
-            received_at,
-        )
-        .expect("valid request");
+        let request =
+            decode_request_payload(&task8_request(operation, arguments, u64::MAX), received_at)
+                .expect("valid request");
         assert_eq!(
             request.deadline,
             received_at + Duration::from_secs(30),

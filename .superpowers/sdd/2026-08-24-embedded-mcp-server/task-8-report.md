@@ -24,6 +24,56 @@ cargo test runtime::control --all-features
 cargo test mcp::capture --all-features
 ```
 
+## Implementation notes
+
+- Added the strict capture-query domain with explicit substring/glob modes, compiled Unicode case-folded AND matching, validated status/time/sequence bounds, mapping/lifecycle precedence, cancellation-aware 4 KiB folding quanta, newest-first sequence cursors, and metadata-only compact/detail DTOs.
+- Added direct stored-`Arc` retrieval and an O(log n) newest-at-or-before store lookup. Runtime batches use at most 32 metadata/header snapshots and never run text/glob/header matching on the event loop.
+- Added runtime status, explicit live-recording mutation, bounded search batches, and one-snapshot capture detail with typed not-found/revision-conflict errors.
+- Added one shared four-search admission per runtime control handler. Blocking workers own their semaphore permit, so cancellation or dropping the outer future cannot release capacity before the blocking matcher exits.
+- Added strict private `get_status`, `set_recording_enabled`, `search_captures`, and `get_capture` operations/results with 30-second deadline clamps and typed capture errors.
+- Added closed public schemas and annotated `get_status`, `set_recording_enabled`, and `search_captures` tools. `get_capture` remains private-only.
+- Public `get_status` deliberately reuses the selector-resolution `DescribeInstance` private snapshot instead of opening a redundant second private status connection; the distinct strict private `GetStatus` operation remains implemented for internal/private callers.
+- No formatter, build, lint, test, or Git command was run by this worker.
+
+## Modified files
+
+```text
+src/app.rs
+src/app/requests.rs
+src/capture/mod.rs
+src/capture/store.rs
+src/control/mod.rs
+src/control/capture_query.rs
+src/control_rpc/protocol.rs
+src/mcp/broker.rs
+src/mcp/capture.rs
+src/mcp/schema.rs
+src/recording.rs
+src/runtime/control.rs
+src/runtime/event_loop.rs
+.superpowers/sdd/2026-08-24-embedded-mcp-server/task-8-report.md
+```
+
+## Expected focused GREEN commands for Main
+
+```text
+cargo test control::capture_query --all-features
+cargo test runtime::control --all-features
+cargo test mcp::capture --all-features
+```
+
+## Main GREEN evidence
+
+- Corrected two contradictory mismatch fixtures so the UTC and sequence filters remain valid while still excluding the representative capture; inverted ranges continue to be rejected by their dedicated validation cases.
+- `cargo test control::capture_query --all-features`: 12 passed.
+- `cargo test runtime::control --all-features`: 17 passed.
+- `cargo test mcp::capture --all-features`: 7 passed.
+- `cargo test control_rpc::protocol --all-features`: 20 passed.
+- `cargo test --test mcp_broker_child --all-features`: 2 passed.
+- `cargo test --all-targets --all-features`: 572 passed.
+- `cargo fmt --all -- --check` and `cargo check --all-targets --all-features` passed.
+- Strict Clippy still reports staged dead-code surfaces deliberately introduced by earlier/future MCP tasks, plus pre-existing test-only warnings; Task 8 review will assess its own findings before finalization.
+
 ## Completion
 
-Status: `NEEDS_RED_RUN`
+Status: `GREEN`

@@ -1,7 +1,7 @@
 use super::{
     CaptureDetail, CaptureHeaderFilter, CaptureLifecycle, CaptureQuery, CaptureSearchCursor,
-    CaptureStatusFilter, CaptureTextFilter, CompiledCaptureQuery, MappingPath,
-    classify_lifecycle, classify_mapping, match_capture_page,
+    CaptureStatusFilter, CaptureTextFilter, CompiledCaptureQuery, MappingPath, classify_lifecycle,
+    classify_mapping, match_capture_page,
 };
 use crate::{
     capture::{
@@ -76,12 +76,7 @@ fn query() -> CaptureQuery {
 fn mapping_classification_covers_all_four_paths() {
     let cases = [
         ("https://a/x", "https://a/x", None, MappingPath::Unmapped),
-        (
-            "https://a/x",
-            "https://b/x",
-            None,
-            MappingPath::RemoteOnly,
-        ),
+        ("https://a/x", "https://b/x", None, MappingPath::RemoteOnly),
         (
             "https://a/x",
             "https://a/x",
@@ -138,7 +133,9 @@ fn all_capture_filters_are_and_combined_with_explicit_text_modes() {
     let capture = representative_snapshot();
     let mut all = query();
     all.method = Some("patch".to_owned());
-    all.original_url = Some(CaptureTextFilter::Substring("ORIGIN.EXAMPLE/STRASSE".to_owned()));
+    all.original_url = Some(CaptureTextFilter::Substring(
+        "ORIGIN.EXAMPLE/STRASSE".to_owned(),
+    ));
     all.effective_url = Some(CaptureTextFilter::Glob(
         "https://remote.example/*?q=1".to_owned(),
     ));
@@ -212,10 +209,12 @@ fn all_capture_filters_are_and_combined_with_explicit_text_modes() {
         ("UTC lower bound", {
             let mut q = all.clone();
             q.started_at_min = Some("2026-08-24T12:30:01Z".to_owned());
+            q.started_at_max = Some("2026-08-24T12:30:01Z".to_owned());
             q
         }),
         ("sequence upper bound", {
             let mut q = all.clone();
+            q.sequence_min = Some(26);
             q.sequence_max = Some(26);
             q
         }),
@@ -412,14 +411,8 @@ fn sequence_cursor_pagination_is_newest_first_and_stable_across_new_arrivals() {
             .collect::<Vec<_>>()
     };
     let compiled = CompiledCaptureQuery::compile(query()).expect("empty query");
-    let first = match_capture_page(
-        &make(40),
-        &compiled,
-        None,
-        10,
-        &CancellationToken::new(),
-    )
-    .expect("first page");
+    let first = match_capture_page(&make(40), &compiled, None, 10, &CancellationToken::new())
+        .expect("first page");
     assert_eq!(
         first
             .captures
@@ -453,7 +446,10 @@ fn sequence_cursor_pagination_is_newest_first_and_stable_across_new_arrivals() {
 
 #[test]
 fn omitted_page_limit_defaults_to_twenty_and_explicit_limit_caps_at_one_hundred() {
-    assert_eq!(super::normalize_capture_page_limit(None).expect("default"), 20);
+    assert_eq!(
+        super::normalize_capture_page_limit(None).expect("default"),
+        20
+    );
     assert_eq!(
         super::normalize_capture_page_limit(Some(100)).expect("maximum"),
         100

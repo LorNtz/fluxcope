@@ -174,6 +174,10 @@ impl App {
     pub fn is_recording(&self) -> bool {
         self.recording.is_enabled()
     }
+    #[cfg(unix)]
+    pub(crate) fn set_recording_enabled(&mut self, enabled: bool) -> bool {
+        self.recording.set_enabled(enabled)
+    }
 
     pub fn toggle_recording(&mut self) {
         let enabled = self.recording.toggle();

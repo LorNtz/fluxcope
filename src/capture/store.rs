@@ -55,6 +55,12 @@ impl CaptureStore {
     pub fn get(&self, sequence: CaptureSequence) -> Option<Arc<CaptureRecord>> {
         self.captures.get(&sequence).map(Arc::clone)
     }
+    pub fn next_at_or_before(&self, sequence: CaptureSequence) -> Option<Arc<CaptureRecord>> {
+        self.captures
+            .range(..=sequence)
+            .next_back()
+            .map(|(_, capture)| Arc::clone(capture))
+    }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Arc<CaptureRecord>> {
         self.captures.values()

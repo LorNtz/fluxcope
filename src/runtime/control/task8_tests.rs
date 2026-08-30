@@ -3,12 +3,9 @@
 use super::{CaptureSearchAdmission, RuntimeGateway};
 use crate::{
     app::{App, SettingsUiContext},
-    capture::{
-        CaptureRecord, CaptureRetentionPolicy, CaptureSequence, CapturedExchange,
-    },
+    capture::{CaptureRecord, CaptureRetentionPolicy, CaptureSequence, CapturedExchange},
     control::{
-        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
-        capture_query::CaptureSearchCursor,
+        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest, capture_query::CaptureSearchCursor,
     },
     control_rpc::protocol::{ControlErrorCode, InstanceScope},
     instance::InstanceIdentity,
@@ -132,9 +129,11 @@ fn recording_setter_reports_previous_and_current_and_never_changes_launch_settin
     let (identity, mut app, settings) = runtime_fixture(10);
     assert!(!settings.snapshot().recording.start_record_on_launch);
 
-    for (enabled, expected_previous, expected_current) in
-        [(true, false, true), (true, true, true), (false, true, false)]
-    {
+    for (enabled, expected_previous, expected_current) in [
+        (true, false, true),
+        (true, true, true),
+        (false, true, false),
+    ] {
         let reply = execute_control_request_for_test(
             &identity,
             &mut app,
@@ -313,7 +312,12 @@ async fn dropping_outer_search_keeps_its_permit_until_the_blocking_matcher_exits
     assert_eq!(started_rx.recv().await, Some(1));
 
     first.abort();
-    assert!(first.await.expect_err("outer future aborted").is_cancelled());
+    assert!(
+        first
+            .await
+            .expect_err("outer future aborted")
+            .is_cancelled()
+    );
     assert_eq!(admission.available_permits_for_test(), 0);
 
     let second_admission = Arc::clone(&admission);

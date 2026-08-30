@@ -22,6 +22,10 @@ impl RecordingState {
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
+    #[cfg(unix)]
+    pub(crate) fn set_enabled(&self, enabled: bool) -> bool {
+        self.enabled.swap(enabled, Ordering::Relaxed)
+    }
 
     pub fn toggle(&self) -> bool {
         self.enabled.fetch_xor(true, Ordering::Relaxed) ^ true
