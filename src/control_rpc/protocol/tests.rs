@@ -346,11 +346,11 @@ fn task8_requests_decode_to_operation_specific_typed_arguments() {
                 "limit": 10
             }),
             ControlOperation::SearchCaptures {
-                query: CaptureQuery {
+                query: Box::new(CaptureQuery {
                     method: Some("get".to_owned()),
                     mapping_path: Some(crate::control::capture_query::MappingPath::RemoteOnly),
                     ..CaptureQuery::default()
-                },
+                }),
                 cursor: Some(CaptureSearchCursor::new(CaptureSequence::new(30))),
                 limit: Some(10),
             },
@@ -375,7 +375,7 @@ fn task8_requests_decode_to_operation_specific_typed_arguments() {
 }
 
 #[test]
-fn task8_operations_reject_unknown_missing_malformed_and_out_of_range_arguments() {
+fn task8_operations_reject_unknown_missing_and_structurally_malformed_arguments() {
     let invalid = [
         ("get_status", json!({"unexpected": true})),
         ("set_recording_enabled", json!({})),
@@ -391,16 +391,6 @@ fn task8_operations_reject_unknown_missing_malformed_and_out_of_range_arguments(
             "search_captures",
             json!({"query": {"mapping_path": "remote-local"}}),
         ),
-        (
-            "search_captures",
-            json!({"query": {"started_at_min": "not-a-time"}}),
-        ),
-        (
-            "search_captures",
-            json!({"query": {"sequence_min": 9, "sequence_max": 8}}),
-        ),
-        ("search_captures", json!({"query": {}, "limit": 0})),
-        ("search_captures", json!({"query": {}, "limit": 101})),
         ("get_capture", json!({})),
         ("get_capture", json!({"capture_id": "seven"})),
         ("get_capture", json!({"capture_id": 7, "unexpected": true})),

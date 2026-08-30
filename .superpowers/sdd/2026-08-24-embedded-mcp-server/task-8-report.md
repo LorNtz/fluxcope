@@ -26,13 +26,21 @@ cargo test mcp::capture --all-features
 
 ## Implementation notes
 
-- Added the strict capture-query domain with explicit substring/glob modes, compiled Unicode case-folded AND matching, validated status/time/sequence bounds, mapping/lifecycle precedence, cancellation-aware 4 KiB folding quanta, newest-first sequence cursors, and metadata-only compact/detail DTOs.
-- Added direct stored-`Arc` retrieval and an O(log n) newest-at-or-before store lookup. Runtime batches use at most 32 metadata/header snapshots and never run text/glob/header matching on the event loop.
-- Added runtime status, explicit live-recording mutation, bounded search batches, and one-snapshot capture detail with typed not-found/revision-conflict errors.
-- Added one shared four-search admission per runtime control handler. Blocking workers own their semaphore permit, so cancellation or dropping the outer future cannot release capacity before the blocking matcher exits.
+- Added the strict capture-query domain with explicit substring/glob modes, Unicode case-folded AND matching, validated non-empty status/time/sequence bounds, mapping/lifecycle precedence, newest-first sequence cursors, and metadata-only compact/detail DTOs.
+- Substring and header-value matching now streams Unicode case-folded characters through a linear-time matcher instead of allocating a second maximum-size folded header. Cancellation is checked at original-input quanta of at most 4 KiB, including matches that cross a quantum boundary.
+- Search pages have a seven-MiB compact-result JSON budget below the private eight-MiB frame limit. Byte-limited pages resume inclusively at the first omitted capture; a single row that cannot fit returns typed `resource_limit`.
+- Added direct stored-`Arc` retrieval and an O(log n) newest-at-or-before store lookup. Runtime batches use at most 32 metadata/header snapshots and never run text/glob/header matching or detail DTO materialization on the event loop.
+- Added runtime status, explicit live-recording mutation, bounded search batches, and one-snapshot capture detail with typed not-found/revision-conflict errors. Mutation and detail replies carry the authoritative run identity from the same runtime turn, avoiding a racy follow-up status request.
+- Added one shared four-search admission per runtime control handler. Admission is acquired before query compilation; blocking workers own their semaphore permit, so cancellation or dropping the outer future cannot release capacity before the blocking matcher exits.
+- Boxed the large capture snapshot reply, private search query, and private detail result payloads. Serde remains transparent through each box, so the strict private wire shapes are unchanged while runtime/broker enums stay compact.
+- Added a four-worker detail-materialization admission shared by each runtime control handler. A cancelled outer detail call cannot release its permit until the admitted blocking conversion exits; queued cancellations never spawn another worker.
 - Added strict private `get_status`, `set_recording_enabled`, `search_captures`, and `get_capture` operations/results with 30-second deadline clamps and typed capture errors.
-- Added closed public schemas and annotated `get_status`, `set_recording_enabled`, and `search_captures` tools. `get_capture` remains private-only.
+- Added closed public schemas and annotated `get_status`, `set_recording_enabled`, and `search_captures` tools. `get_capture` remains private-only. Public capture inputs retain structural serde errors, while semantic query/page/byte-limit failures are validated inside the tool and retain typed MCP `code`, `retryable`, and `details` data.
+- The mutation input schema now structurally requires both `instance.proxy_endpoint` and `instance.run_id`; snapshot search continues to allow an omitted selector.
+- The required run ID remains deserialized and validated as `RunId`; its public JSON Schema is explicitly represented as a string so schema generation does not require exposing an internal `JsonSchema` implementation on `RunId`.
 - Public `get_status` deliberately reuses the selector-resolution `DescribeInstance` private snapshot instead of opening a redundant second private status connection; the distinct strict private `GetStatus` operation remains implemented for internal/private callers.
+- Narrow adjacent test corrections cover semantic MCP errors through real rmcp transport, structural mutation identity, request/result byte bounds, same-turn mutation/detail identity, real handler admission, streaming header matching, and status-filter non-emptiness.
+- Marked the compatibility page matcher and runtime-reply inspection helper test-only, reduced the capture fixture helper to seven arguments, collapsed the matcher-hook branch, and added deterministic detail concurrency/cancellation permit-lifetime coverage.
 - No formatter, build, lint, test, or Git command was run by this worker.
 
 ## Modified files
@@ -40,40 +48,52 @@ cargo test mcp::capture --all-features
 ```text
 src/app.rs
 src/app/requests.rs
-src/capture/mod.rs
+src/capture/model.rs
 src/capture/store.rs
 src/control/mod.rs
 src/control/capture_query.rs
+src/control/capture_query/tests.rs
 src/control_rpc/protocol.rs
+src/control_rpc/protocol/tests.rs
 src/mcp/broker.rs
 src/mcp/capture.rs
+src/mcp/capture/tests.rs
 src/mcp/schema.rs
 src/recording.rs
 src/runtime/control.rs
+src/runtime/control/task8_tests.rs
 src/runtime/event_loop.rs
 .superpowers/sdd/2026-08-24-embedded-mcp-server/task-8-report.md
 ```
 
-## Expected focused GREEN commands for Main
+## Expected focused verification commands for Main
 
 ```text
 cargo test control::capture_query --all-features
 cargo test runtime::control --all-features
+cargo test control_rpc::protocol --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test mcp::capture --all-features
+cargo test --test mcp_broker_child --all-features
 ```
+
+Strict Clippy may continue to report explicitly staged Task 9+ or unrelated pre-existing warnings; the Task 8-owned warnings addressed here should be absent.
 
 ## Main GREEN evidence
 
-- Corrected two contradictory mismatch fixtures so the UTC and sequence filters remain valid while still excluding the representative capture; inverted ranges continue to be rejected by their dedicated validation cases.
-- `cargo test control::capture_query --all-features`: 12 passed.
-- `cargo test runtime::control --all-features`: 17 passed.
-- `cargo test mcp::capture --all-features`: 7 passed.
-- `cargo test control_rpc::protocol --all-features`: 20 passed.
-- `cargo test --test mcp_broker_child --all-features`: 2 passed.
-- `cargo test --all-targets --all-features`: 572 passed.
-- `cargo fmt --all -- --check` and `cargo check --all-targets --all-features` passed.
-- Strict Clippy still reports staged dead-code surfaces deliberately introduced by earlier/future MCP tasks, plus pre-existing test-only warnings; Task 8 review will assess its own findings before finalization.
+- Focused capture query, runtime control, private protocol, MCP capture, and broker-child suites pass: 15 + 22 + 20 + 8 + 2 tests.
+- Full all-target/all-feature suite passes: 581 tests.
+- `cargo fmt --all -- --check` and `git diff --check` pass.
+- Strict Clippy has no Task 8 findings. The command remains non-zero only for deliberately staged later-task APIs and pre-existing unrelated warnings that were already present before Task 8.
+
+## Review corrections
+
+- Preserved typed MCP semantic validation, required mutation identity in the advertised schema, non-empty status filters, and same-turn mutation identity.
+- Moved admitted query compilation and detail materialization to bounded blocking workers whose permits survive outer-future cancellation.
+- Replaced folded header allocation/scanning with cancellation-aware linear matching, bounded search pages below the private response limit, and inclusive byte-limit cursors.
+- Boxed new large protocol/runtime payload variants without changing their serde wire shapes and removed Task 8-specific lint debt.
+- Added production-handler admission, cancellation, maximum-header, schema, transport, page-budget, and detached-worker permit-lifetime regressions.
 
 ## Completion
 
-Status: `GREEN`
+Status: `GREEN — review-fix re-review pending`

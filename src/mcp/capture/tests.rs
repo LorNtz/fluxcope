@@ -1,5 +1,6 @@
 use super::{
-    SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput, SetRecordingEnabledResult,
+    RequiredInstanceSelector, SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
+    SetRecordingEnabledResult,
 };
 use crate::{
     control::capture_query::{CaptureQuery, CaptureSearchCursor},
@@ -11,8 +12,10 @@ use crate::{
     },
 };
 use rmcp::{
-    ServiceExt,
-    model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion},
+    ServiceError, ServiceExt,
+    model::{
+        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
+    },
 };
 use schemars::{JsonSchema, schema_for};
 use serde_json::{Value, json};
@@ -25,6 +28,13 @@ fn selected_instance() -> InstanceSelector {
     InstanceSelector {
         proxy_endpoint: Some("127.0.0.1:19040".parse().expect("endpoint")),
         run_id: Some(RunId::from_str(RUN_ID).expect("run ID")),
+    }
+}
+
+fn required_instance() -> RequiredInstanceSelector {
+    RequiredInstanceSelector {
+        proxy_endpoint: "127.0.0.1:19040".parse().expect("endpoint"),
+        run_id: RunId::from_str(RUN_ID).expect("run ID"),
     }
 }
 
@@ -68,20 +78,34 @@ fn capture_tool_inputs_are_closed_and_reject_malformed_query_enums_and_limits() 
         json!({"query": {"lifecycle": "done"}}),
         json!({"query": {"original_url": {"mode": "auto", "value": "*"}}}),
         json!({"query": {}, "cursor": "30"}),
-        json!({"query": {}, "limit": 0}),
-        json!({"query": {}, "limit": 101}),
         json!({"query": {}, "unexpected": true}),
     ] {
         assert!(
             serde_json::from_value::<SearchCapturesInput>(invalid).is_err(),
-            "strict search input must reject malformed values"
+            "strict search input must reject malformed structure"
+        );
+    }
+
+    for invalid_semantics in [
+        json!({"query": {"status": {}}}),
+        json!({"query": {"original_url": {"mode": "glob", "value": "["}}}),
+        json!({"query": {"sequence_min": 9, "sequence_max": 8}}),
+        json!({"query": {}, "limit": 0}),
+        json!({"query": {}, "limit": 101}),
+    ] {
+        let input = serde_json::from_value::<SearchCapturesInput>(invalid_semantics)
+            .expect("semantic validation happens after structural deserialization");
+        assert_eq!(
+            input.validate().expect_err("invalid search semantics").code,
+            ControlErrorCode::InvalidArgument
         );
     }
 }
 
 #[test]
-fn mutation_input_requires_endpoint_run_id_and_explicit_boolean() {
+fn mutation_input_schema_and_deserialization_require_endpoint_run_id_and_explicit_boolean() {
     for value in [
+        json!({"enabled": true}),
         json!({"instance": {}, "enabled": true}),
         json!({
             "instance": {"proxy_endpoint": "127.0.0.1:19040"},
@@ -89,17 +113,34 @@ fn mutation_input_requires_endpoint_run_id_and_explicit_boolean() {
         }),
         json!({"instance": {"run_id": RUN_ID}, "enabled": true}),
     ] {
-        let input: SetRecordingEnabledInput =
-            serde_json::from_value(value).expect("syntactically valid selector");
-        let error = input.validate().expect_err("mutation selector incomplete");
-        assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+        assert!(
+            serde_json::from_value::<SetRecordingEnabledInput>(value).is_err(),
+            "mutation identity is structurally required"
+        );
     }
 
+    let schema = schema_json::<SetRecordingEnabledInput>();
+    let selector_schema = schema["properties"]["instance"]
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| reference.rsplit('/').next())
+        .map_or(&schema["properties"]["instance"], |name| {
+            &schema["$defs"][name]
+        });
+    assert_eq!(
+        selector_schema["required"],
+        json!(["proxy_endpoint", "run_id"])
+    );
+
     let valid = SetRecordingEnabledInput {
-        instance: selected_instance(),
+        instance: required_instance(),
         enabled: false,
     };
-    valid.validate().expect("complete mutation selector");
+    assert_eq!(
+        valid.instance.proxy_endpoint,
+        selected_instance().proxy_endpoint.unwrap()
+    );
+    assert_eq!(valid.instance.run_id, selected_instance().run_id.unwrap());
 }
 
 #[test]
@@ -198,6 +239,24 @@ fn typed_control_failures_retain_code_retryability_and_structured_details_in_mcp
     );
 }
 
+#[test]
+fn public_query_input_bytes_are_bounded_before_dispatch() {
+    let input = SearchCapturesInput {
+        query: CaptureQuery {
+            text: Some("x".repeat(crate::control_rpc::framing::REQUEST_MAX_BYTES)),
+            ..CaptureQuery::default()
+        },
+        ..SearchCapturesInput::default()
+    };
+
+    let error = input.validate().expect_err("oversized public query");
+    assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+    assert_eq!(
+        error.details["max_bytes"],
+        crate::control_rpc::framing::REQUEST_MAX_BYTES
+    );
+}
+
 #[tokio::test]
 async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() {
     let home = tempfile::tempdir().expect("temporary home");
@@ -236,6 +295,22 @@ async fn real_broker_transport_advertises_only_the_task8_public_capture_tools() 
         assert_eq!(tool.input_schema["additionalProperties"], false);
     }
     assert!(tools.iter().all(|tool| tool.name != "get_capture"));
+
+    let invalid_search = json!({"query": {"status": {}}})
+        .as_object()
+        .expect("tool argument object")
+        .clone();
+    let error = client
+        .call_tool(CallToolRequestParams::new("search_captures").with_arguments(invalid_search))
+        .await
+        .expect_err("semantic validation error");
+    let ServiceError::McpError(error) = error else {
+        panic!("expected typed MCP error");
+    };
+    let data = error.data.expect("typed MCP error data");
+    assert_eq!(data["code"], "invalid_argument");
+    assert_eq!(data["retryable"], false);
+    assert!(data["details"].is_object());
 
     client.cancel().await.expect("close client");
     server.await.expect("server task");

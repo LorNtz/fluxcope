@@ -12,12 +12,13 @@ use crate::{
         BodyPreviewLimit, BodyStatus, BodyStreamState, CaptureSequence, CaptureSnapshot,
         CaptureTiming, MetadataTruncation,
     },
-    control_rpc::protocol::ControlError,
+    control_rpc::protocol::{ControlError, ControlErrorCode},
 };
 
 pub(crate) const CAPTURE_SEARCH_BATCH_SIZE: usize = 32;
 pub(crate) const DEFAULT_CAPTURE_PAGE_LIMIT: usize = 20;
 pub(crate) const MAX_CAPTURE_PAGE_LIMIT: usize = 100;
+pub(crate) const CAPTURE_SEARCH_PAGE_JSON_BUDGET: usize = 7 * 1024 * 1024;
 const SCAN_QUANTUM: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -81,6 +82,12 @@ pub(crate) struct CaptureQuery {
     pub(crate) sequence_min: Option<u64>,
     pub(crate) sequence_max: Option<u64>,
     pub(crate) text: Option<String>,
+}
+
+impl CaptureQuery {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        CompiledCaptureQuery::compile(self.clone()).map(drop)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -283,6 +290,9 @@ impl CaptureDetail {
 pub(crate) struct CaptureSearchPage {
     pub(crate) captures: Vec<CompactCapture>,
     pub(crate) next_cursor: Option<CaptureSearchCursor>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) serialized_bytes: usize,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureSearchBatch {
@@ -291,8 +301,32 @@ pub(crate) struct CaptureSearchBatch {
 }
 
 #[derive(Debug)]
+struct CompiledSubstring {
+    pattern: Vec<char>,
+    failure: Vec<usize>,
+}
+impl CompiledSubstring {
+    fn new(value: &str) -> Self {
+        let folded = fold(value);
+        let pattern = folded.chars().collect::<Vec<_>>();
+        let mut failure = vec![0; pattern.len()];
+        let mut matched = 0;
+        for index in 1..pattern.len() {
+            while matched > 0 && pattern[index] != pattern[matched] {
+                matched = failure[matched - 1];
+            }
+            if pattern[index] == pattern[matched] {
+                matched += 1;
+            }
+            failure[index] = matched;
+        }
+        Self { pattern, failure }
+    }
+}
+
+#[derive(Debug)]
 enum CompiledTextFilter {
-    Substring(String),
+    Substring(CompiledSubstring),
     Glob(GlobMatcher),
 }
 #[derive(Debug)]
@@ -302,14 +336,14 @@ pub(crate) struct CompiledCaptureQuery {
     effective_url: Option<CompiledTextFilter>,
     status: Option<CaptureStatusFilter>,
     header_name: Option<String>,
-    header_value: Option<String>,
+    header_value: Option<CompiledSubstring>,
     mapping_path: Option<MappingPath>,
     lifecycle: Option<CaptureLifecycle>,
     started_at_min: Option<DateTime<Utc>>,
     started_at_max: Option<DateTime<Utc>>,
     sequence_min: Option<CaptureSequence>,
     sequence_max: Option<CaptureSequence>,
-    text: Option<String>,
+    text: Option<CompiledSubstring>,
 }
 impl CompiledCaptureQuery {
     pub(crate) fn compile(q: CaptureQuery) -> Result<Self, ControlError> {
@@ -332,7 +366,10 @@ impl CompiledCaptureQuery {
             return Err(invalid("capture header name must not be empty"));
         }
         let (header_name, header_value) = q.header.map_or((None, None), |h| {
-            (Some(fold(&h.name)), h.value.map(|v| fold(&v)))
+            (
+                Some(fold(&h.name)),
+                h.value.map(|value| CompiledSubstring::new(&value)),
+            )
         });
         Ok(Self {
             method: q.method.map(|v| fold(&v)),
@@ -347,7 +384,7 @@ impl CompiledCaptureQuery {
             started_at_max,
             sequence_min: q.sequence_min.map(CaptureSequence::new),
             sequence_max: q.sequence_max.map(CaptureSequence::new),
-            text: q.text.map(|v| fold(&v)),
+            text: q.text.map(|value| CompiledSubstring::new(&value)),
         })
     }
     pub(crate) fn matches(
@@ -378,13 +415,13 @@ impl CompiledCaptureQuery {
         {
             return Ok(false);
         }
-        if let Some(x) = self.original_url.as_ref()
-            && !x.is_match(&fold_checked(&s.request.original_uri, c, &mut hook)?)
+        if let Some(filter) = self.original_url.as_ref()
+            && !filter.is_match(&s.request.original_uri, c, &mut hook)?
         {
             return Ok(false);
         }
-        if let Some(x) = self.effective_url.as_ref()
-            && !x.is_match(&fold_checked(&s.request.effective_uri, c, &mut hook)?)
+        if let Some(filter) = self.effective_url.as_ref()
+            && !filter.is_match(&s.request.effective_uri, c, &mut hook)?
         {
             return Ok(false);
         }
@@ -397,11 +434,11 @@ impl CompiledCaptureQuery {
             }
         }
         if let Some(name) = self.header_name.as_deref()
-            && !header_match(s, name, self.header_value.as_deref(), c, &mut hook)?
+            && !header_match(s, name, self.header_value.as_ref(), c, &mut hook)?
         {
             return Ok(false);
         }
-        if let Some(text) = self.text.as_deref()
+        if let Some(text) = self.text.as_ref()
             && !text_match(s, text, c, &mut hook)?
         {
             return Ok(false);
@@ -411,10 +448,15 @@ impl CompiledCaptureQuery {
     }
 }
 impl CompiledTextFilter {
-    fn is_match(&self, v: &str) -> bool {
+    fn is_match(
+        &self,
+        value: &str,
+        cancelled: &CancellationToken,
+        hook: &mut impl FnMut(usize),
+    ) -> Result<bool, ControlError> {
         match self {
-            Self::Substring(n) => v.contains(n),
-            Self::Glob(g) => g.is_match(v),
+            Self::Substring(needle) => contains_folded_checked(value, needle, cancelled, hook),
+            Self::Glob(glob) => Ok(glob.is_match(&fold_checked(value, cancelled, hook)?)),
         }
     }
 }
@@ -452,42 +494,78 @@ pub(crate) fn normalize_capture_page_limit(limit: Option<usize>) -> Result<usize
         Ok(n)
     }
 }
+#[cfg(test)]
 pub(crate) fn match_capture_page(
-    s: &[CaptureSnapshot],
-    q: &CompiledCaptureQuery,
+    snapshots: &[CaptureSnapshot],
+    query: &CompiledCaptureQuery,
     cursor: Option<CaptureSearchCursor>,
     limit: usize,
-    c: &CancellationToken,
+    cancelled: &CancellationToken,
+) -> Result<CaptureSearchPage, ControlError> {
+    match_capture_page_with_budget(
+        snapshots,
+        query,
+        cursor,
+        limit,
+        CAPTURE_SEARCH_PAGE_JSON_BUDGET,
+        cancelled,
+    )
+}
+
+pub(crate) fn match_capture_page_with_budget(
+    snapshots: &[CaptureSnapshot],
+    query: &CompiledCaptureQuery,
+    cursor: Option<CaptureSearchCursor>,
+    limit: usize,
+    max_serialized_bytes: usize,
+    cancelled: &CancellationToken,
 ) -> Result<CaptureSearchPage, ControlError> {
     let limit = normalize_capture_page_limit(Some(limit))?;
     let cursor = cursor.map(CaptureSearchCursor::sequence);
-    let mut v = s
+    let mut ordered = snapshots
         .iter()
-        .filter(|x| cursor.is_none_or(|n| x.sequence <= n))
+        .filter(|snapshot| cursor.is_none_or(|sequence| snapshot.sequence <= sequence))
         .collect::<Vec<_>>();
-    v.sort_unstable_by_key(|x| std::cmp::Reverse(x.sequence));
-    let mut captures = Vec::with_capacity(limit.min(v.len()));
-    let mut last = None;
+    ordered.sort_unstable_by_key(|snapshot| std::cmp::Reverse(snapshot.sequence));
+    let mut captures = Vec::with_capacity(limit.min(ordered.len()));
+    let mut serialized_bytes = 0_usize;
+    let mut last_scanned = None;
     let mut older = false;
-    for x in v {
-        check(c)?;
+    let mut byte_resume_cursor = None;
+    for snapshot in ordered {
+        check(cancelled)?;
         if captures.len() == limit {
             older = true;
             break;
         }
-        last = Some(x.sequence);
-        if q.matches(x, c)? {
-            captures.push(CompactCapture::from_snapshot(x));
+        last_scanned = Some(snapshot.sequence);
+        if query.matches(snapshot, cancelled)? {
+            let compact = CompactCapture::from_snapshot(snapshot);
+            let row_bytes = serialized_len(&compact)?;
+            if row_bytes > max_serialized_bytes {
+                return Err(resource_limit(
+                    "one capture search result exceeds the response byte budget",
+                    max_serialized_bytes,
+                ));
+            }
+            if serialized_bytes.saturating_add(row_bytes) > max_serialized_bytes {
+                older = true;
+                byte_resume_cursor = Some(CaptureSearchCursor::new(snapshot.sequence));
+                break;
+            }
+            serialized_bytes += row_bytes;
+            captures.push(compact);
         }
     }
-    let next_cursor = if captures.len() == limit && older {
-        last.and_then(cursor_before)
-    } else {
-        None
-    };
+    let next_cursor = byte_resume_cursor.or_else(|| {
+        (captures.len() == limit && older)
+            .then(|| last_scanned.and_then(cursor_before))
+            .flatten()
+    });
     Ok(CaptureSearchPage {
         captures,
         next_cursor,
+        serialized_bytes,
     })
 }
 pub(crate) fn cursor_before(s: CaptureSequence) -> Option<CaptureSearchCursor> {
@@ -505,20 +583,25 @@ fn headers(h: &[(String, String)]) -> Vec<CaptureHeader> {
         })
         .collect()
 }
-fn compile_text(t: CaptureTextFilter) -> Result<CompiledTextFilter, ControlError> {
-    match t {
-        CaptureTextFilter::Substring(v) => Ok(CompiledTextFilter::Substring(fold(&v))),
-        CaptureTextFilter::Glob(v) => {
-            let g = GlobBuilder::new(&fold(&v))
+fn compile_text(filter: CaptureTextFilter) -> Result<CompiledTextFilter, ControlError> {
+    match filter {
+        CaptureTextFilter::Substring(value) => Ok(CompiledTextFilter::Substring(
+            CompiledSubstring::new(&value),
+        )),
+        CaptureTextFilter::Glob(value) => {
+            let glob = GlobBuilder::new(&fold(&value))
                 .literal_separator(false)
                 .build()
-                .map_err(|e| invalid(format!("invalid capture URL glob: {e}")))?;
-            Ok(CompiledTextFilter::Glob(g.compile_matcher()))
+                .map_err(|error| invalid(format!("invalid capture URL glob: {error}")))?;
+            Ok(CompiledTextFilter::Glob(glob.compile_matcher()))
         }
     }
 }
 fn validate_status(s: Option<CaptureStatusFilter>) -> Result<(), ControlError> {
     let Some(s) = s else { return Ok(()) };
+    if s.exact.is_none() && s.minimum.is_none() && s.maximum.is_none() {
+        return Err(invalid("status filter requires exact, minimum, or maximum"));
+    }
     if s.exact.is_some() && (s.minimum.is_some() || s.maximum.is_some()) {
         return Err(invalid(
             "exact status cannot be combined with status bounds",
@@ -550,7 +633,7 @@ fn parse_time(name: &str, v: Option<&str>) -> Result<Option<DateTime<Utc>>, Cont
 fn header_match(
     snapshot: &CaptureSnapshot,
     expected_name: &str,
-    expected_value: Option<&str>,
+    expected_value: Option<&CompiledSubstring>,
     cancelled: &CancellationToken,
     hook: &mut impl FnMut(usize),
 ) -> Result<bool, ControlError> {
@@ -566,7 +649,7 @@ fn header_match(
         }
         match expected_value {
             None => return Ok(true),
-            Some(expected) if fold_checked(value, cancelled, hook)?.contains(expected) => {
+            Some(expected) if contains_folded_checked(value, expected, cancelled, hook)? => {
                 return Ok(true);
             }
             Some(_) => {}
@@ -575,38 +658,88 @@ fn header_match(
     Ok(false)
 }
 fn text_match(
-    s: &CaptureSnapshot,
-    text: &str,
-    c: &CancellationToken,
-    h: &mut impl FnMut(usize),
+    snapshot: &CaptureSnapshot,
+    text: &CompiledSubstring,
+    cancelled: &CancellationToken,
+    hook: &mut impl FnMut(usize),
 ) -> Result<bool, ControlError> {
-    for v in [
-        s.request.method.as_str(),
-        s.request.original_uri.as_str(),
-        s.request.effective_uri.as_str(),
+    for value in [
+        snapshot.request.method.as_str(),
+        snapshot.request.original_uri.as_str(),
+        snapshot.request.effective_uri.as_str(),
     ] {
-        if fold_checked(v, c, h)?.contains(text) {
+        if contains_folded_checked(value, text, cancelled, hook)? {
             return Ok(true);
         }
     }
-    if let Some(r) = s.response.as_ref()
-        && fold_checked(&r.status.to_string(), c, h)?.contains(text)
+    if let Some(response) = snapshot.response.as_ref()
+        && contains_folded_checked(&response.status.to_string(), text, cancelled, hook)?
     {
         return Ok(true);
     }
-    for (n, v) in s
-        .request
-        .headers
-        .iter()
-        .chain(s.response.iter().flat_map(|r| r.headers.iter()))
-    {
-        check(c)?;
-        if fold_checked(n, c, h)?.contains(text) || fold_checked(v, c, h)?.contains(text) {
+    for (name, value) in snapshot.request.headers.iter().chain(
+        snapshot
+            .response
+            .iter()
+            .flat_map(|response| response.headers.iter()),
+    ) {
+        check(cancelled)?;
+        if contains_folded_checked(name, text, cancelled, hook)?
+            || contains_folded_checked(value, text, cancelled, hook)?
+        {
             return Ok(true);
         }
     }
     Ok(false)
 }
+fn contains_folded_checked(
+    value: &str,
+    needle: &CompiledSubstring,
+    cancelled: &CancellationToken,
+    hook: &mut impl FnMut(usize),
+) -> Result<bool, ControlError> {
+    check(cancelled)?;
+    if needle.pattern.is_empty() {
+        return Ok(true);
+    }
+    let mut matched = 0;
+    let mut scanned = 0;
+    for original in value.chars() {
+        let original_bytes = original.len_utf8();
+        if scanned != 0 && scanned + original_bytes > SCAN_QUANTUM {
+            hook(scanned);
+            check(cancelled)?;
+            scanned = 0;
+        }
+        scanned += original_bytes;
+        for folded in original.case_fold() {
+            while matched > 0 && folded != needle.pattern[matched] {
+                matched = needle.failure[matched - 1];
+            }
+            if folded == needle.pattern[matched] {
+                matched += 1;
+                if matched == needle.pattern.len() {
+                    if scanned != 0 {
+                        hook(scanned);
+                    }
+                    check(cancelled)?;
+                    return Ok(true);
+                }
+            }
+        }
+        if scanned == SCAN_QUANTUM {
+            hook(scanned);
+            check(cancelled)?;
+            scanned = 0;
+        }
+    }
+    if scanned != 0 {
+        hook(scanned);
+    }
+    check(cancelled)?;
+    Ok(false)
+}
+
 fn fold_checked(
     v: &str,
     c: &CancellationToken,
@@ -643,8 +776,36 @@ fn check(c: &CancellationToken) -> Result<(), ControlError> {
         Ok(())
     }
 }
+fn serialized_len(value: &impl Serialize) -> Result<usize, ControlError> {
+    #[derive(Default)]
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|_| ControlError::internal("failed to size capture search result"))?;
+    Ok(counter.0)
+}
+
 fn invalid(message: impl Into<String>) -> ControlError {
     ControlError::invalid_argument(message)
+}
+fn resource_limit(message: impl Into<String>, max_bytes: usize) -> ControlError {
+    ControlError::new(
+        ControlErrorCode::ResourceLimit,
+        message,
+        false,
+        serde_json::json!({ "max_bytes": max_bytes }),
+    )
 }
 fn millis(v: Option<Duration>) -> Option<u64> {
     v.map(|x| u64::try_from(x.as_millis()).unwrap_or(u64::MAX))

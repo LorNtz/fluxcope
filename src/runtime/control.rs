@@ -20,8 +20,9 @@ use crate::{
     control::{
         InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
         capture_query::{
-            CAPTURE_SEARCH_BATCH_SIZE, CaptureQuery, CaptureSearchCursor, CaptureSearchPage,
-            CompactCapture, CompiledCaptureQuery, match_capture_page, normalize_capture_page_limit,
+            CAPTURE_SEARCH_BATCH_SIZE, CAPTURE_SEARCH_PAGE_JSON_BUDGET, CaptureDetail,
+            CaptureQuery, CaptureSearchCursor, CaptureSearchPage, CompactCapture,
+            CompiledCaptureQuery, match_capture_page_with_budget, normalize_capture_page_limit,
         },
     },
     control_rpc::{
@@ -123,6 +124,15 @@ pub(super) struct CaptureSearchAdmission {
     permits: Arc<Semaphore>,
 }
 
+pub(super) struct ActiveCaptureSearch {
+    permit: Option<OwnedSemaphorePermit>,
+    query: Arc<CompiledCaptureQuery>,
+}
+
+pub(super) struct DetailMaterializationAdmission {
+    permits: Arc<Semaphore>,
+}
+
 impl CaptureSearchAdmission {
     pub(super) fn new(limit: usize) -> Self {
         Self {
@@ -144,6 +154,77 @@ impl CaptureSearchAdmission {
         }
     }
 
+    pub(super) async fn admit(
+        &self,
+        query: CaptureQuery,
+        cancelled: CancellationToken,
+    ) -> Result<ActiveCaptureSearch, ControlError> {
+        let permit = self.acquire(&cancelled).await?;
+        let worker = tokio::task::spawn_blocking(move || {
+            let compiled = CompiledCaptureQuery::compile(query);
+            (permit, compiled)
+        });
+        let (permit, compiled) = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                return Err(ControlError::cancelled("capture search cancelled"));
+            }
+            result = worker => {
+                result.map_err(|_| ControlError::internal("capture search worker failed"))?
+            }
+        };
+        Ok(ActiveCaptureSearch {
+            permit: Some(permit),
+            query: Arc::new(compiled?),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn available_permits_for_test(&self) -> usize {
+        self.permits.available_permits()
+    }
+}
+
+impl ActiveCaptureSearch {
+    pub(super) async fn run_blocking<T, F>(
+        &mut self,
+        cancelled: CancellationToken,
+        work: F,
+    ) -> Result<T, ControlError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<CompiledCaptureQuery>) -> Result<T, ControlError> + Send + 'static,
+    {
+        let permit = self
+            .permit
+            .take()
+            .ok_or_else(|| ControlError::internal("capture search permit is not available"))?;
+        let query = Arc::clone(&self.query);
+        let worker = tokio::task::spawn_blocking(move || {
+            let result = work(query);
+            (permit, result)
+        });
+        let (permit, result) = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                return Err(ControlError::cancelled("capture search cancelled"));
+            }
+            result = worker => {
+                result.map_err(|_| ControlError::internal("capture search worker failed"))?
+            }
+        };
+        self.permit = Some(permit);
+        result
+    }
+}
+
+impl DetailMaterializationAdmission {
+    pub(super) fn new(limit: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
     pub(super) async fn run_blocking<T, F>(
         &self,
         cancelled: CancellationToken,
@@ -151,22 +232,34 @@ impl CaptureSearchAdmission {
     ) -> Result<T, ControlError>
     where
         T: Send + 'static,
-        F: FnOnce() -> Result<T, ControlError> + Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
     {
-        let permit = self.acquire(&cancelled).await?;
-        let task = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            work()
+        let permit = tokio::select! {
+            permit = Arc::clone(&self.permits).acquire_owned() => permit.map_err(|_| {
+                ControlError::service_unavailable("capture detail admission is closed")
+            })?,
+            _ = cancelled.cancelled() => {
+                return Err(ControlError::cancelled(
+                    "capture detail cancelled before admission",
+                ));
+            }
+        };
+        let worker = tokio::task::spawn_blocking(move || {
+            let value = work();
+            (permit, value)
         });
-        tokio::select! {
+        let (_permit, value) = tokio::select! {
             biased;
             _ = cancelled.cancelled() => {
-                Err(ControlError::cancelled("capture search cancelled"))
+                return Err(ControlError::cancelled("capture detail cancelled"));
             }
-            result = task => {
-                result.map_err(|_| ControlError::internal("capture search worker failed"))?
+            result = worker => {
+                result.map_err(|_| {
+                    ControlError::internal("capture detail worker failed")
+                })?
             }
-        }
+        };
+        Ok(value)
     }
 
     #[cfg(test)]
@@ -179,6 +272,7 @@ impl CaptureSearchAdmission {
 pub(super) struct RuntimeControlHandler {
     runtime: RuntimeControlClient,
     capture_searches: Arc<CaptureSearchAdmission>,
+    capture_details: Arc<DetailMaterializationAdmission>,
 }
 
 impl RuntimeControlHandler {
@@ -186,6 +280,7 @@ impl RuntimeControlHandler {
         Self {
             runtime,
             capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
+            capture_details: Arc::new(DetailMaterializationAdmission::new(4)),
         }
     }
 
@@ -211,13 +306,24 @@ impl RuntimeControlHandler {
         mut cursor: Option<CaptureSearchCursor>,
         limit: Option<usize>,
         cancelled: CancellationToken,
-    ) -> Result<(Vec<CompactCapture>, Option<CaptureSearchCursor>), ControlError> {
+    ) -> Result<
+        (
+            InstanceRuntimeSnapshot,
+            Vec<CompactCapture>,
+            Option<CaptureSearchCursor>,
+        ),
+        ControlError,
+    > {
         let limit = normalize_capture_page_limit(limit)?;
-        let query = Arc::new(CompiledCaptureQuery::compile(query)?);
-        let mut permit = admission.acquire(&cancelled).await?;
+        let mut active = admission.admit(query, cancelled.clone()).await?;
+        let instance = Self::instance_snapshot(&runtime, &cancelled).await?;
         let mut captures = Vec::with_capacity(limit);
+        let mut serialized_bytes = 0;
 
         loop {
+            if serialized_bytes == CAPTURE_SEARCH_PAGE_JSON_BUDGET {
+                return Ok((instance, captures, cursor));
+            }
             let batch = match runtime
                 .request(
                     RuntimeRequest::GetCaptureSearchBatch {
@@ -236,42 +342,39 @@ impl RuntimeControlHandler {
                 }
             };
             if batch.snapshots.is_empty() {
-                return Ok((captures, None));
+                return Ok((instance, captures, None));
             }
-
+            let remaining_bytes = CAPTURE_SEARCH_PAGE_JSON_BUDGET.saturating_sub(serialized_bytes);
             let remaining = limit - captures.len();
-            let query = Arc::clone(&query);
+            let batch_cursor = batch.next_cursor;
             let worker_cancelled = cancelled.clone();
-            let worker = tokio::task::spawn_blocking(move || {
-                let page = match_capture_page(
-                    &batch.snapshots,
-                    &query,
-                    None,
-                    remaining,
-                    &worker_cancelled,
-                );
-                (permit, batch.next_cursor, page)
-            });
-            let (returned_permit, batch_cursor, page) = tokio::select! {
-                biased;
-                _ = cancelled.cancelled() => {
-                    return Err(ControlError::cancelled("capture search cancelled"));
-                }
-                result = worker => {
-                    result.map_err(|_| ControlError::internal("capture search worker failed"))?
-                }
-            };
-            permit = returned_permit;
+            let page = active
+                .run_blocking(cancelled.clone(), move |query| {
+                    match_capture_page_with_budget(
+                        &batch.snapshots,
+                        &query,
+                        None,
+                        remaining,
+                        remaining_bytes,
+                        &worker_cancelled,
+                    )
+                })
+                .await?;
             let CaptureSearchPage {
                 captures: matched,
                 next_cursor: page_cursor,
-            } = page?;
+                serialized_bytes: matched_bytes,
+            } = page;
+            serialized_bytes += matched_bytes;
             captures.extend(matched);
             if captures.len() == limit {
-                return Ok((captures, page_cursor.or(batch_cursor)));
+                return Ok((instance, captures, page_cursor.or(batch_cursor)));
+            }
+            if page_cursor.is_some() {
+                return Ok((instance, captures, page_cursor));
             }
             let Some(next_cursor) = batch_cursor else {
-                return Ok((captures, None));
+                return Ok((instance, captures, None));
             };
             cursor = Some(next_cursor);
         }
@@ -287,6 +390,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
     ) -> impl Future<Output = Result<ControlResult, ControlError>> + Send {
         let runtime = self.runtime.clone();
         let capture_searches = Arc::clone(&self.capture_searches);
+        let capture_details = Arc::clone(&self.capture_details);
         async move {
             match operation {
                 ControlOperation::DescribeInstance => {
@@ -336,9 +440,8 @@ impl ControlRpcHandler for RuntimeControlHandler {
                             ));
                         }
                     };
-                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
                     Ok(ControlResult::SetRecordingEnabled {
-                        instance: snapshot.instance,
+                        instance: update.instance,
                         previous: update.previous,
                         current: update.current,
                     })
@@ -348,13 +451,10 @@ impl ControlRpcHandler for RuntimeControlHandler {
                     cursor,
                     limit,
                 } => {
-                    CompiledCaptureQuery::compile(query.clone())?;
-                    normalize_capture_page_limit(limit)?;
-                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
-                    let (captures, next_cursor) = Self::search_captures(
+                    let (snapshot, captures, next_cursor) = Self::search_captures(
                         runtime,
                         capture_searches,
-                        query,
+                        *query,
                         cursor,
                         limit,
                         cancelled,
@@ -370,27 +470,30 @@ impl ControlRpcHandler for RuntimeControlHandler {
                     capture_id,
                     expected_revision,
                 } => {
-                    let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
-                    let capture = match runtime
+                    let snapshot = match runtime
                         .request(
                             RuntimeRequest::GetCapture {
                                 capture_id,
                                 expected_revision,
                             },
-                            cancelled,
+                            cancelled.clone(),
                         )
                         .await?
                     {
-                        RuntimeReply::CaptureDetail(capture) => capture,
+                        RuntimeReply::CaptureSnapshot(snapshot) => snapshot,
                         _ => {
                             return Err(ControlError::internal(
-                                "runtime returned an unexpected capture detail reply",
+                                "runtime returned an unexpected capture snapshot reply",
                             ));
                         }
                     };
+                    let crate::control::CaptureSnapshotReply { instance, snapshot } = *snapshot;
+                    let capture = capture_details
+                        .run_blocking(cancelled, move || CaptureDetail::from_snapshot(&snapshot))
+                        .await?;
                     Ok(ControlResult::GetCapture {
-                        instance: snapshot.instance,
-                        capture,
+                        instance,
+                        capture: Box::new(capture),
                     })
                 }
             }

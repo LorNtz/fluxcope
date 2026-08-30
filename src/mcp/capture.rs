@@ -1,32 +1,45 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     control::capture_query::{
-        CaptureQuery, CaptureSearchCursor, CompactCapture, CompiledCaptureQuery,
-        normalize_capture_page_limit,
+        CaptureQuery, CaptureSearchCursor, CompactCapture, normalize_capture_page_limit,
     },
-    control_rpc::protocol::{ControlError, ControlOperation, ControlResult},
+    control_rpc::{
+        framing::REQUEST_MAX_BYTES,
+        protocol::{ControlError, ControlOperation, ControlResult},
+    },
 };
 
 use super::schema::InstanceSelector;
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RequiredInstanceSelector {
+    pub(crate) proxy_endpoint: std::net::SocketAddr,
+    #[schemars(with = "String")]
+    pub(crate) run_id: crate::instance::RunId,
+}
+
+impl RequiredInstanceSelector {
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        InstanceSelector {
+            proxy_endpoint: Some(self.proxy_endpoint),
+            run_id: Some(self.run_id.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetRecordingEnabledInput {
-    #[serde(default)]
-    pub(crate) instance: InstanceSelector,
+    pub(crate) instance: RequiredInstanceSelector,
     pub(crate) enabled: bool,
 }
 
 impl SetRecordingEnabledInput {
     pub(crate) fn validate(&self) -> Result<(), ControlError> {
-        if self.instance.proxy_endpoint.is_none() || self.instance.run_id.is_none() {
-            return Err(ControlError::invalid_argument(
-                "set_recording_enabled requires instance.proxy_endpoint and instance.run_id",
-            ));
-        }
-        Ok(())
+        validate_public_input_size(self)
     }
 
     pub(crate) fn operation(&self) -> ControlOperation {
@@ -44,8 +57,8 @@ pub(crate) struct SetRecordingEnabledResult {
     pub(crate) current: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct SearchCapturesInput {
     #[schemars(default)]
     pub(crate) instance: InstanceSelector,
@@ -55,49 +68,16 @@ pub(crate) struct SearchCapturesInput {
     pub(crate) limit: Option<usize>,
 }
 
-#[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RawSearchCapturesInput {
-    instance: InstanceSelector,
-    query: CaptureQuery,
-    cursor: Option<CaptureSearchCursor>,
-    limit: Option<usize>,
-}
-
-impl Default for RawSearchCapturesInput {
-    fn default() -> Self {
-        Self {
-            instance: InstanceSelector::default(),
-            query: CaptureQuery::default(),
-            cursor: None,
-            limit: None,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SearchCapturesInput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawSearchCapturesInput::deserialize(deserializer)?;
-        CompiledCaptureQuery::compile(raw.query.clone())
-            .map_err(|error| de::Error::custom(error.message()))?;
-        normalize_capture_page_limit(raw.limit)
-            .map_err(|error| de::Error::custom(error.message()))?;
-        Ok(Self {
-            instance: raw.instance,
-            query: raw.query,
-            cursor: raw.cursor,
-            limit: raw.limit,
-        })
-    }
-}
-
 impl SearchCapturesInput {
+    pub(crate) fn validate(&self) -> Result<(), ControlError> {
+        validate_public_input_size(self)?;
+        self.query.validate()?;
+        normalize_capture_page_limit(self.limit).map(drop)
+    }
+
     pub(crate) fn operation(&self) -> ControlOperation {
         ControlOperation::SearchCaptures {
-            query: self.query.clone(),
+            query: Box::new(self.query.clone()),
             cursor: self.cursor,
             limit: self.limit,
         }
@@ -110,6 +90,38 @@ pub(crate) struct SearchCapturesResult {
     pub(crate) instance: InstanceSelector,
     pub(crate) captures: Vec<CompactCapture>,
     pub(crate) next_cursor: Option<CaptureSearchCursor>,
+}
+
+fn validate_public_input_size(input: &impl Serialize) -> Result<(), ControlError> {
+    #[derive(Default)]
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, input)
+        .map_err(|_| ControlError::invalid_argument("capture tool input is not serializable"))?;
+    if counter.0 > REQUEST_MAX_BYTES.saturating_sub(4 * 1024) {
+        Err(ControlError::new(
+            crate::control_rpc::protocol::ControlErrorCode::InvalidArgument,
+            "capture tool input exceeds the private request byte limit",
+            false,
+            serde_json::json!({
+                "max_bytes": REQUEST_MAX_BYTES,
+                "received_bytes": counter.0,
+            }),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn recording_result(

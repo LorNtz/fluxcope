@@ -18,13 +18,13 @@ use tokio_util::sync::CancellationToken;
 fn snapshot(
     sequence: u64,
     method: Method,
-    original_url: &str,
-    effective_url: &str,
+    urls: (&str, &str),
     local_path: Option<&str>,
     status: Option<u16>,
     request_headers: Vec<(&str, &str)>,
     response_headers: Vec<(&str, &str)>,
 ) -> CaptureSnapshot {
+    let (original_url, effective_url) = urls;
     let record = CaptureRecord::from_completed(CapturedExchange {
         sequence: CaptureSequence::new(sequence),
         method,
@@ -50,8 +50,10 @@ fn representative_snapshot() -> CaptureSnapshot {
     let mut capture = snapshot(
         27,
         Method::PATCH,
-        "https://origin.example/straße?q=1",
-        "https://remote.example/straße?q=1",
+        (
+            "https://origin.example/straße?q=1",
+            "https://remote.example/straße?q=1",
+        ),
         Some("/tmp/local.json"),
         Some(206),
         vec![
@@ -95,8 +97,7 @@ fn mapping_classification_covers_all_four_paths() {
         let capture = snapshot(
             1,
             Method::GET,
-            original,
-            effective,
+            (original, effective),
             local,
             Some(200),
             vec![],
@@ -267,8 +268,7 @@ fn response_dependent_filters_do_not_match_before_response_metadata_exists() {
     let capture = snapshot(
         3,
         Method::GET,
-        "https://example.test/live",
-        "https://example.test/live",
+        ("https://example.test/live", "https://example.test/live"),
         None,
         None,
         vec![("X-Request", "present")],
@@ -310,6 +310,11 @@ fn invalid_globs_ranges_times_and_page_limits_reject_before_matching() {
         {
             let mut q = query();
             q.original_url = Some(CaptureTextFilter::Glob("[unterminated".to_owned()));
+            q
+        },
+        {
+            let mut q = query();
+            q.status = Some(CaptureStatusFilter::default());
             q
         },
         {
@@ -400,8 +405,10 @@ fn sequence_cursor_pagination_is_newest_first_and_stable_across_new_arrivals() {
                 snapshot(
                     sequence,
                     Method::GET,
-                    &format!("https://example.test/{sequence}"),
-                    &format!("https://example.test/{sequence}"),
+                    (
+                        &format!("https://example.test/{sequence}"),
+                        &format!("https://example.test/{sequence}"),
+                    ),
                     None,
                     Some(200),
                     vec![],
@@ -512,30 +519,161 @@ fn maximum_retained_header_matching_observes_cancellation_within_one_scan_quantu
     let capture = snapshot(
         88,
         Method::GET,
-        "https://example.test/large",
-        "https://example.test/large",
+        ("https://example.test/large", "https://example.test/large"),
         None,
         Some(200),
         vec![("X-Large", &"ß".repeat(MAX_RETAINED_HEADER / 2))],
         vec![],
     );
     let mut q = query();
-    q.text = Some("not-present".to_owned());
+    q.header = Some(CaptureHeaderFilter {
+        name: "x-large".to_owned(),
+        value: Some("not-present".to_owned()),
+    });
     let compiled = CompiledCaptureQuery::compile(q).expect("query");
     let cancelled = CancellationToken::new();
     let cancellation = cancelled.clone();
-    let mut first_observed = None;
+    let mut total_scanned = 0;
+    let header_name_bytes = "X-Large".len();
+    let mut value_scan_at_cancellation = None;
 
     let error = compiled
         .matches_with_scan_hook(&capture, &cancelled, |bytes_scanned| {
-            first_observed.get_or_insert(bytes_scanned);
-            cancellation.cancel();
+            total_scanned += bytes_scanned;
+            if total_scanned > header_name_bytes {
+                value_scan_at_cancellation
+                    .get_or_insert(total_scanned.saturating_sub(header_name_bytes));
+                cancellation.cancel();
+            }
         })
         .expect_err("scan cancellation");
 
     assert_eq!(error.code, ControlErrorCode::Cancelled);
     assert!(
-        first_observed.expect("scan hook") <= 4 * 1024,
-        "matching must check cancellation at least once per 4 KiB"
+        value_scan_at_cancellation.expect("large value scan") <= 4 * 1024,
+        "matching must check cancellation at least once per 4 KiB of the large value"
     );
+}
+
+#[test]
+fn unicode_substring_matching_preserves_matches_across_scan_quanta() {
+    let boundary_prefix = "a".repeat(4 * 1024 - 3);
+    let header_value = format!("{boundary_prefix}Straße");
+    let capture = snapshot(
+        89,
+        Method::GET,
+        (
+            "https://example.test/boundary",
+            "https://example.test/boundary",
+        ),
+        None,
+        Some(200),
+        vec![("X-Large", &header_value)],
+        vec![],
+    );
+    let mut q = query();
+    q.header = Some(CaptureHeaderFilter {
+        name: "x-large".to_owned(),
+        value: Some("STRASSE".to_owned()),
+    });
+
+    assert!(
+        CompiledCaptureQuery::compile(q)
+            .expect("query")
+            .matches(&capture, &CancellationToken::new())
+            .expect("match")
+    );
+}
+
+#[test]
+fn byte_bounded_pages_resume_at_the_first_omitted_capture() {
+    let large_method = Method::from_bytes(&vec![
+        b'A';
+        super::CAPTURE_SEARCH_PAGE_JSON_BUDGET / 2 + 1024
+    ])
+    .expect("large extension method");
+    let snapshots = vec![
+        snapshot(
+            1,
+            large_method.clone(),
+            ("https://example.test/1", "https://example.test/1"),
+            None,
+            Some(200),
+            vec![],
+            vec![],
+        ),
+        snapshot(
+            2,
+            large_method,
+            ("https://example.test/2", "https://example.test/2"),
+            None,
+            Some(200),
+            vec![],
+            vec![],
+        ),
+    ];
+    let compiled = CompiledCaptureQuery::compile(query()).expect("query");
+
+    let first = match_capture_page(&snapshots, &compiled, None, 100, &CancellationToken::new())
+        .expect("first byte-bounded page");
+    assert_eq!(
+        first
+            .captures
+            .iter()
+            .map(|capture| capture.capture_sequence.value())
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(
+        first.next_cursor,
+        Some(CaptureSearchCursor::new(CaptureSequence::new(1)))
+    );
+
+    let second = match_capture_page(
+        &snapshots,
+        &compiled,
+        first.next_cursor,
+        100,
+        &CancellationToken::new(),
+    )
+    .expect("second byte-bounded page");
+    assert_eq!(
+        second
+            .captures
+            .iter()
+            .map(|capture| capture.capture_sequence.value())
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(second.next_cursor, None);
+}
+
+#[test]
+fn a_single_compact_row_larger_than_the_page_budget_is_typed() {
+    let oversized_method =
+        Method::from_bytes(&vec![b'A'; super::CAPTURE_SEARCH_PAGE_JSON_BUDGET + 1])
+            .expect("oversized extension method");
+    let capture = snapshot(
+        90,
+        oversized_method,
+        (
+            "https://example.test/oversized",
+            "https://example.test/oversized",
+        ),
+        None,
+        Some(200),
+        vec![],
+        vec![],
+    );
+
+    let error = match_capture_page(
+        &[capture],
+        &CompiledCaptureQuery::compile(query()).expect("query"),
+        None,
+        100,
+        &CancellationToken::new(),
+    )
+    .expect_err("single oversized row");
+
+    assert_eq!(error.code, ControlErrorCode::ResourceLimit);
 }

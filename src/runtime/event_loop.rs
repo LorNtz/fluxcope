@@ -39,10 +39,9 @@ use crate::{
 use crate::{
     capture::{CaptureSequence, CaptureSnapshotMode},
     control::{
-        AppControlSummary, InstanceRuntimeSnapshot, RecordingUpdate, RuntimeReply, RuntimeRequest,
-        capture_query::{
-            CAPTURE_SEARCH_BATCH_SIZE, CaptureDetail, CaptureSearchBatch, cursor_before,
-        },
+        AppControlSummary, CaptureSnapshotReply, InstanceRuntimeSnapshot, RecordingUpdate,
+        RuntimeReply, RuntimeRequest,
+        capture_query::{CAPTURE_SEARCH_BATCH_SIZE, CaptureSearchBatch, cursor_before},
     },
     control_rpc::protocol::{ControlError, ControlErrorCode, InstanceScope},
     instance::InstanceIdentity,
@@ -550,6 +549,10 @@ fn execute_control_request(
         RuntimeRequest::SetRecordingEnabled { enabled } => {
             let previous = app.set_recording_enabled(enabled);
             Ok(RuntimeReply::RecordingUpdated(RecordingUpdate {
+                instance: InstanceScope {
+                    proxy_endpoint: identity.proxy_endpoint(),
+                    run_id: identity.run_id().clone(),
+                },
                 previous,
                 current: enabled,
             }))
@@ -607,8 +610,14 @@ fn execute_control_request(
                     }),
                 ));
             }
-            Ok(RuntimeReply::CaptureDetail(CaptureDetail::from_snapshot(
-                &snapshot,
+            Ok(RuntimeReply::CaptureSnapshot(Box::new(
+                CaptureSnapshotReply {
+                    instance: InstanceScope {
+                        proxy_endpoint: identity.proxy_endpoint(),
+                        run_id: identity.run_id().clone(),
+                    },
+                    snapshot,
+                },
             )))
         }
         #[cfg(test)]

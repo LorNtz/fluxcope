@@ -747,7 +747,7 @@ impl Broker {
         input.validate()?;
         let resolved = self
             .resolve_with_client(
-                input.instance.clone(),
+                input.instance.selector(),
                 SelectorRequirement::Mutation,
                 client.clone(),
                 deadline,
@@ -774,6 +774,7 @@ impl Broker {
         deadline: Instant,
         cancelled: CancellationToken,
     ) -> Result<SearchCapturesResult, McpDomainError> {
+        input.validate()?;
         let resolved = self
             .resolve_with_client(
                 input.instance.clone(),
@@ -2384,7 +2385,7 @@ mod tests {
                                     vec![record.snapshot(CaptureSnapshotMode::MetadataOnly)];
                                 let page = match_capture_page(
                                     &snapshots,
-                                    &CompiledCaptureQuery::compile(query)?,
+                                    &CompiledCaptureQuery::compile(*query)?,
                                     cursor,
                                     limit.unwrap_or(20),
                                     &cancelled,

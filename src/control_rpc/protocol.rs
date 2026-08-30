@@ -1,9 +1,6 @@
 use crate::{
     capture::CaptureSequence,
-    control::capture_query::{
-        CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture, CompiledCaptureQuery,
-        normalize_capture_page_limit,
-    },
+    control::capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
     instance::RunId,
     settings::{ConfigMode, PersistenceMode},
 };
@@ -64,7 +61,7 @@ pub(crate) enum ControlOperation {
         enabled: bool,
     },
     SearchCaptures {
-        query: CaptureQuery,
+        query: Box<CaptureQuery>,
         cursor: Option<CaptureSearchCursor>,
         limit: Option<usize>,
     },
@@ -144,7 +141,7 @@ pub(crate) enum ControlResult {
     },
     GetCapture {
         instance: InstanceScope,
-        capture: CaptureDetail,
+        capture: Box<CaptureDetail>,
     },
 }
 
@@ -171,6 +168,7 @@ pub(crate) enum ControlErrorCode {
     InstanceUnavailable,
     RpcVersionMismatch,
     RpcFrameTooLarge,
+    ResourceLimit,
     CaptureNotFound,
     CaptureRevisionConflict,
     ServiceUnavailable,
@@ -206,6 +204,7 @@ impl ControlErrorCode {
             Self::InstanceUnavailable => "instance_unavailable",
             Self::RpcVersionMismatch => "rpc_version_mismatch",
             Self::RpcFrameTooLarge => "rpc_frame_too_large",
+            Self::ResourceLimit => "resource_limit",
             Self::CaptureNotFound => "capture_not_found",
             Self::CaptureRevisionConflict => "capture_revision_conflict",
             Self::ServiceUnavailable => "service_unavailable",
@@ -379,7 +378,7 @@ impl RequestEnvelope {
             } => (
                 ControlOperationKind::SearchCaptures,
                 serialize_arguments(&SearchCapturesArguments {
-                    query,
+                    query: *query,
                     cursor,
                     limit,
                 })?,
@@ -453,10 +452,8 @@ impl RequestEnvelope {
             }
             ControlOperationKind::SearchCaptures => {
                 let arguments = parse_arguments::<SearchCapturesArguments>(&self.arguments)?;
-                CompiledCaptureQuery::compile(arguments.query.clone())?;
-                normalize_capture_page_limit(arguments.limit)?;
                 ControlOperation::SearchCaptures {
-                    query: arguments.query,
+                    query: Box::new(arguments.query),
                     cursor: arguments.cursor,
                     limit: arguments.limit,
                 }

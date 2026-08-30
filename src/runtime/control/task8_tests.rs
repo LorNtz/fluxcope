@@ -1,13 +1,24 @@
 #![cfg(unix)]
 
-use super::{CaptureSearchAdmission, RuntimeGateway};
+use super::{
+    CaptureSearchAdmission, DetailMaterializationAdmission, RuntimeControlHandler, RuntimeGateway,
+};
 use crate::{
     app::{App, SettingsUiContext},
     capture::{CaptureRecord, CaptureRetentionPolicy, CaptureSequence, CapturedExchange},
     control::{
-        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest, capture_query::CaptureSearchCursor,
+        InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
+        capture_query::{
+            CaptureHeaderFilter, CaptureQuery, CaptureSearchBatch, CaptureSearchCursor,
+            CaptureStatusFilter, CaptureTextFilter,
+        },
     },
-    control_rpc::protocol::{ControlErrorCode, InstanceScope},
+    control_rpc::{
+        protocol::{
+            ControlErrorCode, ControlOperation, ControlResult, DeclaredClient, InstanceScope,
+        },
+        server::{ControlCallContext, ControlRpcHandler},
+    },
     instance::InstanceIdentity,
     logging::LogRetentionPolicy,
     recording::RecordingState,
@@ -15,7 +26,10 @@ use crate::{
     settings::{AppSettings, ConfigMode, PersistenceMode, SettingsSession},
 };
 use hyper::Method;
-use std::sync::{Arc, Condvar, Mutex};
+use std::{
+    sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +65,17 @@ fn runtime_fixture(max_records: usize) -> (InstanceIdentity, App, SettingsSessio
     let identity =
         InstanceIdentity::new("127.0.0.1:19028".parse().expect("endpoint")).expect("identity");
     (identity, app, settings)
+}
+
+fn control_context(request_id: impl Into<String>) -> ControlCallContext {
+    ControlCallContext {
+        request_id: request_id.into(),
+        declared_client: DeclaredClient {
+            name: "task-8-test".to_owned(),
+            version: "1".to_owned(),
+        },
+        deadline: Instant::now() + Duration::from_secs(30),
+    }
 }
 
 #[test]
@@ -144,6 +169,13 @@ fn recording_setter_reports_previous_and_current_and_never_changes_launch_settin
         let RuntimeReply::RecordingUpdated(result) = reply else {
             panic!("expected recording update")
         };
+        assert_eq!(
+            result.instance,
+            InstanceScope {
+                proxy_endpoint: identity.proxy_endpoint(),
+                run_id: identity.run_id().clone(),
+            }
+        );
         assert_eq!(result.previous, expected_previous);
         assert_eq!(result.current, expected_current);
         assert_eq!(app.is_recording(), expected_current);
@@ -171,11 +203,12 @@ fn capture_detail_uses_current_revision_and_distinguishes_conflict_not_found_and
         },
     )
     .expect("current detail");
-    let RuntimeReply::CaptureDetail(detail) = current else {
-        panic!("expected capture detail")
+    let RuntimeReply::CaptureSnapshot(capture) = current else {
+        panic!("expected capture snapshot")
     };
-    assert_eq!(detail.capture_sequence, CaptureSequence::new(7));
-    assert_eq!(detail.capture_revision, revision);
+    assert_eq!(capture.instance.run_id, identity.run_id().clone());
+    assert_eq!(capture.snapshot.sequence, CaptureSequence::new(7));
+    assert_eq!(capture.snapshot.revision, revision);
 
     let conflict = execute_control_request_for_test(
         &identity,
@@ -215,6 +248,165 @@ fn capture_detail_uses_current_revision_and_distinguishes_conflict_not_found_and
     .expect_err("retention eviction");
     assert_eq!(evicted.code, ControlErrorCode::CaptureNotFound);
 }
+#[tokio::test]
+async fn recording_mutation_returns_same_turn_identity_without_a_follow_up_status_request() {
+    let (identity, _, _) = runtime_fixture(1);
+    let scope = InstanceScope {
+        proxy_endpoint: identity.proxy_endpoint(),
+        run_id: identity.run_id().clone(),
+    };
+    let (client, mut receiver) = RuntimeGateway::new(4);
+    let handler = RuntimeControlHandler::new(client);
+    let call = tokio::spawn({
+        let handler = handler.clone();
+        async move {
+            handler
+                .handle(
+                    control_context("recording-same-turn"),
+                    ControlOperation::SetRecordingEnabled { enabled: true },
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    });
+
+    let command = receiver.recv().await.expect("recording command");
+    assert_eq!(
+        command.request,
+        RuntimeRequest::SetRecordingEnabled { enabled: true }
+    );
+    command
+        .reply
+        .send(Ok(RuntimeReply::RecordingUpdated(
+            crate::control::RecordingUpdate {
+                instance: scope.clone(),
+                previous: false,
+                current: true,
+            },
+        )))
+        .expect("recording reply receiver");
+
+    let ControlResult::SetRecordingEnabled { instance, .. } =
+        call.await.expect("handler task").expect("recording result")
+    else {
+        panic!("expected recording result")
+    };
+    assert_eq!(instance, scope);
+    assert!(
+        receiver.try_recv().is_err(),
+        "recording mutation must not issue a racy follow-up status request"
+    );
+}
+
+#[tokio::test]
+async fn private_handler_rejects_invalid_search_semantics_before_runtime_dispatch() {
+    let (client, mut receiver) = RuntimeGateway::new(1);
+    let handler = RuntimeControlHandler::new(client);
+    let cases = [
+        (
+            CaptureQuery {
+                original_url: Some(CaptureTextFilter::Glob("[unterminated".to_owned())),
+                ..CaptureQuery::default()
+            },
+            Some(20),
+        ),
+        (
+            CaptureQuery {
+                status: Some(CaptureStatusFilter::default()),
+                ..CaptureQuery::default()
+            },
+            Some(20),
+        ),
+        (
+            CaptureQuery {
+                started_at_min: Some("not-a-time".to_owned()),
+                ..CaptureQuery::default()
+            },
+            Some(20),
+        ),
+        (
+            CaptureQuery {
+                sequence_min: Some(9),
+                sequence_max: Some(8),
+                ..CaptureQuery::default()
+            },
+            Some(20),
+        ),
+        (CaptureQuery::default(), Some(0)),
+        (CaptureQuery::default(), Some(101)),
+    ];
+
+    for (index, (query, limit)) in cases.into_iter().enumerate() {
+        let error = handler
+            .handle(
+                control_context(format!("invalid-search-{index}")),
+                ControlOperation::SearchCaptures {
+                    query: Box::new(query),
+                    cursor: None,
+                    limit,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("invalid query");
+        assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "invalid searches must not reach AppRuntime"
+    );
+}
+
+#[tokio::test]
+async fn private_detail_uses_the_identity_returned_with_its_single_runtime_snapshot() {
+    let (identity, _, _) = runtime_fixture(1);
+    let scope = InstanceScope {
+        proxy_endpoint: identity.proxy_endpoint(),
+        run_id: identity.run_id().clone(),
+    };
+    let snapshot = completed_capture(7).snapshot(crate::capture::CaptureSnapshotMode::MetadataOnly);
+    let (client, mut receiver) = RuntimeGateway::new(2);
+    let handler = RuntimeControlHandler::new(client);
+    let call = tokio::spawn({
+        let handler = handler.clone();
+        async move {
+            handler
+                .handle(
+                    control_context("detail-same-turn"),
+                    ControlOperation::GetCapture {
+                        capture_id: CaptureSequence::new(7),
+                        expected_revision: Some(0),
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    });
+
+    let command = receiver.recv().await.expect("detail command");
+    assert!(matches!(command.request, RuntimeRequest::GetCapture { .. }));
+    command
+        .reply
+        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
+            crate::control::CaptureSnapshotReply {
+                instance: scope.clone(),
+                snapshot,
+            },
+        ))))
+        .expect("detail reply receiver");
+
+    let ControlResult::GetCapture { instance, capture } =
+        call.await.expect("detail task").expect("detail result")
+    else {
+        panic!("expected detail result")
+    };
+    assert_eq!(instance, scope);
+    assert_eq!(capture.capture_sequence, CaptureSequence::new(7));
+    assert!(
+        receiver.try_recv().is_err(),
+        "detail must not issue a racy status request"
+    );
+}
 
 #[derive(Default)]
 struct BlockingGate {
@@ -237,6 +429,76 @@ impl BlockingGate {
 }
 
 #[tokio::test]
+async fn detail_materialization_is_bounded_and_keeps_permits_until_detached_workers_exit() {
+    let admission = Arc::new(DetailMaterializationAdmission::new(4));
+    let gate = Arc::new(BlockingGate::default());
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let mut active = Vec::new();
+    for index in 0..4 {
+        let admission = Arc::clone(&admission);
+        let gate = Arc::clone(&gate);
+        let started = started_tx.clone();
+        let cancelled = CancellationToken::new();
+        let worker_cancelled = cancelled.clone();
+        let task = tokio::spawn(async move {
+            admission
+                .run_blocking(worker_cancelled, move || {
+                    started.send(index).expect("started receiver");
+                    gate.wait();
+                })
+                .await
+        });
+        active.push((cancelled, task));
+    }
+    for _ in 0..4 {
+        started_rx.recv().await.expect("four active details");
+    }
+    assert_eq!(admission.available_permits_for_test(), 0);
+
+    let (detached_cancelled, detached) = active.remove(0);
+    detached_cancelled.cancel();
+    let error = detached
+        .await
+        .expect("cancelled detail task")
+        .expect_err("outer detail future cancelled");
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+    assert_eq!(
+        admission.available_permits_for_test(),
+        0,
+        "the detached blocking worker must retain its permit"
+    );
+
+    let fifth_admission = Arc::clone(&admission);
+    let fifth_gate = Arc::clone(&gate);
+    let fifth_started = started_tx.clone();
+    let (fifth_attempted_tx, fifth_attempted_rx) = oneshot::channel();
+    let fifth = tokio::spawn(async move {
+        fifth_attempted_tx.send(()).expect("attempted receiver");
+        fifth_admission
+            .run_blocking(CancellationToken::new(), move || {
+                fifth_started.send(4).expect("started receiver");
+                fifth_gate.wait();
+            })
+            .await
+    });
+    fifth_attempted_rx.await.expect("fifth attempted admission");
+    assert!(
+        started_rx.try_recv().is_err(),
+        "a fifth detail worker must wait for admission"
+    );
+
+    gate.release();
+    assert_eq!(started_rx.recv().await, Some(4));
+    fifth
+        .await
+        .expect("fifth detail task")
+        .expect("fifth detail");
+    for (_, task) in active {
+        task.await.expect("detail task").expect("detail result");
+    }
+}
+
+#[tokio::test]
 async fn at_most_four_capture_searches_are_active_and_a_fifth_cancels_while_waiting() {
     let admission = Arc::new(CaptureSearchAdmission::new(4));
     let gate = Arc::new(BlockingGate::default());
@@ -248,8 +510,12 @@ async fn at_most_four_capture_searches_are_active_and_a_fifth_cancels_while_wait
         let gate = Arc::clone(&gate);
         let started_tx = started_tx.clone();
         active.push(tokio::spawn(async move {
-            admission
-                .run_blocking(CancellationToken::new(), move || {
+            let cancelled = CancellationToken::new();
+            let mut search = admission
+                .admit(CaptureQuery::default(), cancelled.clone())
+                .await?;
+            search
+                .run_blocking(cancelled, move |_query| {
                     started_tx.send(index).expect("started receiver");
                     gate.wait();
                     Ok::<_, crate::control_rpc::protocol::ControlError>(())
@@ -266,15 +532,12 @@ async fn at_most_four_capture_searches_are_active_and_a_fifth_cancels_while_wait
     let cancellation = fifth_cancelled.clone();
     let (attempted_tx, attempted_rx) = oneshot::channel();
     let fifth_admission = Arc::clone(&admission);
-    let fifth_started_tx = started_tx.clone();
     let fifth = tokio::spawn(async move {
         attempted_tx.send(()).expect("attempted receiver");
         fifth_admission
-            .run_blocking(fifth_cancelled, move || {
-                fifth_started_tx.send(5).expect("started receiver");
-                Ok::<_, crate::control_rpc::protocol::ControlError>(())
-            })
+            .admit(CaptureQuery::default(), fifth_cancelled)
             .await
+            .map(drop)
     });
     attempted_rx.await.expect("fifth attempted admission");
     assert!(started_rx.try_recv().is_err());
@@ -301,8 +564,12 @@ async fn dropping_outer_search_keeps_its_permit_until_the_blocking_matcher_exits
     let first_gate = Arc::clone(&gate);
     let first_started = started_tx.clone();
     let first = tokio::spawn(async move {
-        first_admission
-            .run_blocking(CancellationToken::new(), move || {
+        let cancelled = CancellationToken::new();
+        let mut search = first_admission
+            .admit(CaptureQuery::default(), cancelled.clone())
+            .await?;
+        search
+            .run_blocking(cancelled, move |_query| {
                 first_started.send(1).expect("started receiver");
                 first_gate.wait();
                 Ok::<_, crate::control_rpc::protocol::ControlError>(())
@@ -325,8 +592,12 @@ async fn dropping_outer_search_keeps_its_permit_until_the_blocking_matcher_exits
     let (attempted_tx, attempted_rx) = oneshot::channel();
     let second = tokio::spawn(async move {
         attempted_tx.send(()).expect("attempted receiver");
-        second_admission
-            .run_blocking(CancellationToken::new(), move || {
+        let cancelled = CancellationToken::new();
+        let mut search = second_admission
+            .admit(CaptureQuery::default(), cancelled.clone())
+            .await?;
+        search
+            .run_blocking(cancelled, move |_query| {
                 second_started.send(2).expect("started receiver");
                 Ok::<_, crate::control_rpc::protocol::ControlError>(())
             })
@@ -341,18 +612,49 @@ async fn dropping_outer_search_keeps_its_permit_until_the_blocking_matcher_exits
 }
 
 #[tokio::test]
-async fn a_blocked_maximum_header_matcher_does_not_block_an_unrelated_runtime_status_command() {
+async fn a_blocked_real_header_matcher_does_not_block_an_unrelated_runtime_status_command() {
     let admission = Arc::new(CaptureSearchAdmission::new(4));
     let gate = Arc::new(BlockingGate::default());
     let (matcher_started_tx, matcher_started_rx) = oneshot::channel();
     let search_admission = Arc::clone(&admission);
     let search_gate = Arc::clone(&gate);
+    let large = CaptureRecord::from_completed(CapturedExchange {
+        sequence: CaptureSequence::new(99),
+        method: Method::GET,
+        uri: "https://example.test/large".to_owned(),
+        mapped_uri: None,
+        local_path: None,
+        status: Some(200),
+        req_headers: vec![("X-Large".to_owned(), "ß".repeat(128 * 1024))],
+        res_headers: vec![],
+        req_body: None,
+        res_body: None,
+    })
+    .snapshot(crate::capture::CaptureSnapshotMode::MetadataOnly);
+    let query = CaptureQuery {
+        header: Some(CaptureHeaderFilter {
+            name: "x-large".to_owned(),
+            value: Some("not-present".to_owned()),
+        }),
+        ..CaptureQuery::default()
+    };
     let search = tokio::spawn(async move {
-        search_admission
-            .run_blocking(CancellationToken::new(), move || {
-                matcher_started_tx.send(()).expect("matcher receiver");
-                search_gate.wait();
-                Ok::<_, crate::control_rpc::protocol::ControlError>(())
+        let cancelled = CancellationToken::new();
+        let matcher_cancelled = cancelled.clone();
+        let mut active = search_admission.admit(query, cancelled.clone()).await?;
+        active
+            .run_blocking(cancelled, move |query| {
+                let mut scanned = 0;
+                let mut started = Some(matcher_started_tx);
+                query.matches_with_scan_hook(&large, &matcher_cancelled, |bytes| {
+                    scanned += bytes;
+                    if scanned > "X-Large".len()
+                        && let Some(started) = started.take()
+                    {
+                        started.send(()).expect("matcher receiver");
+                        search_gate.wait();
+                    }
+                })
             })
             .await
     });
@@ -396,4 +698,90 @@ async fn a_blocked_maximum_header_matcher_does_not_block_an_unrelated_runtime_st
 
     gate.release();
     search.await.expect("search task").expect("search result");
+}
+
+#[tokio::test]
+async fn real_search_handler_admits_only_four_calls_and_cancels_the_fifth_before_runtime_work() {
+    let (identity, _, _) = runtime_fixture(1);
+    let scope = InstanceScope {
+        proxy_endpoint: identity.proxy_endpoint(),
+        run_id: identity.run_id().clone(),
+    };
+    let status = RuntimeReply::Instance(InstanceRuntimeSnapshot {
+        instance: scope,
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+        recording_enabled: false,
+        retained_capture_count: 0,
+        settings_revision: 0,
+    });
+    let (client, mut receiver) = RuntimeGateway::new(32);
+    let handler = RuntimeControlHandler::new(client);
+    let mut calls = Vec::new();
+    for index in 0..5 {
+        let cancelled = CancellationToken::new();
+        let task = tokio::spawn({
+            let handler = handler.clone();
+            let task_cancelled = cancelled.clone();
+            async move {
+                handler
+                    .handle(
+                        control_context(format!("search-{index}")),
+                        ControlOperation::SearchCaptures {
+                            query: Box::new(CaptureQuery::default()),
+                            cursor: None,
+                            limit: Some(20),
+                        },
+                        task_cancelled,
+                    )
+                    .await
+            }
+        });
+        calls.push((cancelled, task));
+    }
+
+    let mut batches = Vec::new();
+    while batches.len() < 4 {
+        let command = receiver.recv().await.expect("admitted search work");
+        match command.request {
+            RuntimeRequest::GetStatus => {
+                command
+                    .reply
+                    .send(Ok(status.clone()))
+                    .expect("status receiver");
+            }
+            RuntimeRequest::GetCaptureSearchBatch { .. } => batches.push(command),
+            other => panic!("unexpected runtime request: {other:?}"),
+        }
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "the fifth search must wait before sending runtime work"
+    );
+
+    calls[4].0.cancel();
+    let (_, fifth) = calls.pop().expect("fifth call");
+    let error = fifth
+        .await
+        .expect("fifth task")
+        .expect_err("fifth cancelled while waiting");
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+
+    for command in batches {
+        command
+            .reply
+            .send(Ok(RuntimeReply::CaptureSearchBatch(CaptureSearchBatch {
+                snapshots: Vec::new(),
+                next_cursor: None,
+            })))
+            .expect("batch receiver");
+    }
+    for (_, task) in calls {
+        let ControlResult::SearchCaptures { captures, .. } =
+            task.await.expect("search task").expect("search result")
+        else {
+            panic!("expected search result")
+        };
+        assert!(captures.is_empty());
+    }
 }

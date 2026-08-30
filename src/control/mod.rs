@@ -1,8 +1,8 @@
 pub(crate) mod capture_query;
 
 use crate::{
-    capture::CaptureSequence,
-    control::capture_query::{CaptureDetail, CaptureSearchBatch, CaptureSearchCursor},
+    capture::{CaptureSequence, CaptureSnapshot},
+    control::capture_query::{CaptureSearchBatch, CaptureSearchCursor},
     control_rpc::protocol::InstanceScope,
     settings::{ConfigMode, PersistenceMode},
 };
@@ -25,10 +25,17 @@ pub(crate) struct InstanceRuntimeSnapshot {
     pub(crate) retained_capture_count: usize,
     pub(crate) settings_revision: u64,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct RecordingUpdate {
+    pub(crate) instance: InstanceScope,
     pub(crate) previous: bool,
     pub(crate) current: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CaptureSnapshotReply {
+    pub(crate) instance: InstanceScope,
+    pub(crate) snapshot: CaptureSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,14 +62,15 @@ pub(crate) enum RuntimeReply {
     Instance(InstanceRuntimeSnapshot),
     RecordingUpdated(RecordingUpdate),
     CaptureSearchBatch(CaptureSearchBatch),
-    CaptureDetail(CaptureDetail),
+    CaptureSnapshot(Box<CaptureSnapshotReply>),
 }
 
+#[cfg(test)]
 impl RuntimeReply {
     pub(crate) fn instance(&self) -> &InstanceRuntimeSnapshot {
         match self {
             Self::Instance(instance) => instance,
-            Self::RecordingUpdated(_) | Self::CaptureSearchBatch(_) | Self::CaptureDetail(_) => {
+            Self::RecordingUpdated(_) | Self::CaptureSearchBatch(_) | Self::CaptureSnapshot(_) => {
                 panic!("runtime reply does not contain an instance snapshot")
             }
         }
