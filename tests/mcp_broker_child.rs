@@ -37,7 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task10_contract() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task11_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -78,10 +78,12 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task10_contract() -> 
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>(),
         vec![
+            "find_json_pointers",
             "get_broker_status",
             "get_capture",
             "get_status",
             "list_instances",
+            "probe_json_pointer_pattern",
             "search_captures",
             "set_recording_enabled",
             "wait_for_capture",
@@ -120,6 +122,79 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task10_contract() -> 
     assert!(search.input_schema["properties"]["query"].is_object());
     assert!(search.input_schema["properties"]["cursor"].is_object());
     assert!(search.input_schema["properties"]["limit"].is_object());
+    let find_json = tools
+        .iter()
+        .find(|tool| tool.name == "find_json_pointers")
+        .expect("find_json_pointers schema");
+    let probe_json = tools
+        .iter()
+        .find(|tool| tool.name == "probe_json_pointer_pattern")
+        .expect("probe_json_pointer_pattern schema");
+    for (tool, operation_field) in [(find_json, "field_name"), (probe_json, "pattern")] {
+        let required = tool.input_schema["required"]
+            .as_array()
+            .expect("structured JSON tool required fields");
+        for field in [
+            "instance",
+            "capture_id",
+            "capture_revision",
+            "side",
+            operation_field,
+        ] {
+            assert!(
+                required.contains(&json!(field)),
+                "{} must require {field}",
+                tool.name
+            );
+        }
+        let instance = resolve_local_schema(
+            tool.input_schema.as_ref(),
+            &tool.input_schema["properties"]["instance"],
+        );
+        let instance_required = instance["required"]
+            .as_array()
+            .expect("structured JSON instance required fields");
+        assert_eq!(instance_required.len(), 2);
+        assert!(instance_required.contains(&json!("proxy_endpoint")));
+        assert!(instance_required.contains(&json!("run_id")));
+        assert_eq!(
+            tool.input_schema["properties"]["side"]["type"],
+            json!("string")
+        );
+        assert!(
+            tool.description
+                .as_deref()
+                .expect("structured JSON tool description")
+                .contains("without returning values")
+        );
+    }
+    let match_mode = resolve_local_schema(
+        find_json.input_schema.as_ref(),
+        &find_json.input_schema["properties"]["match_mode"],
+    );
+    assert_eq!(
+        match_mode["enum"],
+        json!(["exact", "unicode_casefold_exact"])
+    );
+    assert_eq!(
+        find_json.input_schema["properties"]["limit"]["minimum"],
+        json!(1)
+    );
+    assert_eq!(
+        find_json.input_schema["properties"]["limit"]["maximum"],
+        json!(20)
+    );
+    assert!(
+        !find_json.input_schema["required"]
+            .as_array()
+            .expect("find required fields")
+            .contains(&json!("limit"))
+    );
+    let pattern = resolve_local_schema(
+        probe_json.input_schema.as_ref(),
+        &probe_json.input_schema["properties"]["pattern"],
+    );
+    assert_eq!(pattern["type"], json!("string"));
     let wait = tools
         .iter()
         .find(|tool| tool.name == "wait_for_capture")

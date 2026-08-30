@@ -53,7 +53,10 @@ use crate::{
 };
 
 use super::{
-    body::{BodyResourceUri, CONTENT_RESOURCE_TEMPLATE, body_page_resource_contents},
+    body::{
+        BodyResourceUri, CONTENT_RESOURCE_TEMPLATE, FindJsonPointersInput, FindJsonPointersOutput,
+        ProbeJsonPointerPatternInput, ProbeJsonPointerPatternOutput, body_page_resource_contents,
+    },
     capture::{
         BodyRepresentationLinks, CaptureBodyResources, GetCaptureInput, GetCaptureResult,
         SearchCapturesInput, SearchCapturesResult, SetRecordingEnabledInput,
@@ -987,6 +990,94 @@ impl Broker {
         })
     }
 
+    pub(crate) async fn find_json_pointers_impl(
+        &self,
+        input: FindJsonPointersInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<FindJsonPointersOutput, McpDomainError> {
+        let operation = input.operation()?;
+        let resolved = self
+            .resolve_with_client(
+                input.selector(),
+                SelectorRequirement::TargetedBody,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .await?;
+        let ControlResult::FindJsonPointers { instance, result } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected JSON field result",
+            ));
+        };
+        let result = *result;
+        if instance.proxy_endpoint != resolved.descriptor.proxy_endpoint()
+            || instance.run_id != *resolved.descriptor.run_id()
+            || result.capture_revision != input.capture_revision
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched JSON field identity",
+            ));
+        }
+        Ok(FindJsonPointersOutput {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            result,
+        })
+    }
+
+    pub(crate) async fn probe_json_pointer_pattern_impl(
+        &self,
+        input: ProbeJsonPointerPatternInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ProbeJsonPointerPatternOutput, McpDomainError> {
+        let operation = input.operation()?;
+        let resolved = self
+            .resolve_with_client(
+                input.selector(),
+                SelectorRequirement::TargetedBody,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .probe
+            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .await?;
+        let ControlResult::ProbeJsonPointerPattern { instance, result } = result else {
+            return Err(ControlError::internal(
+                "private RPC returned an unexpected JSON pattern result",
+            ));
+        };
+        let result = *result;
+        if instance.proxy_endpoint != resolved.descriptor.proxy_endpoint()
+            || instance.run_id != *resolved.descriptor.run_id()
+            || result.capture_revision != input.capture_revision
+        {
+            return Err(ControlError::internal(
+                "private RPC returned mismatched JSON pattern identity",
+            ));
+        }
+        Ok(ProbeJsonPointerPatternOutput {
+            instance: InstanceSelector {
+                proxy_endpoint: Some(instance.proxy_endpoint),
+                run_id: Some(instance.run_id),
+            },
+            result,
+        })
+    }
+
     async fn read_body_resource_impl(
         &self,
         requested: BodyResourceUri,
@@ -1319,6 +1410,62 @@ impl Broker {
         let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
         self.get_capture_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "find_json_pointers",
+        description = "Find bounded exact JSON field pointers and structural metadata in one revision-pinned decoded capture body without returning values",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_json_pointers(
+        &self,
+        Parameters(input): Parameters<FindJsonPointersInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<FindJsonPointersOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.find_json_pointers_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "probe_json_pointer_pattern",
+        description = "Probe one bounded RFC 6901 pointer pattern with single-segment wildcards in a revision-pinned decoded capture body without returning values",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn probe_json_pointer_pattern(
+        &self,
+        Parameters(input): Parameters<ProbeJsonPointerPatternInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<ProbeJsonPointerPatternOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.probe_json_pointer_pattern_impl(
             input,
             client,
             Instant::now() + ORDINARY_DEADLINE,
@@ -3070,5 +3217,6 @@ mod tests {
     }
 
     mod task10_tests;
+    mod task11_tests;
     mod task9_tests;
 }

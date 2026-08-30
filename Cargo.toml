@@ -36,6 +36,7 @@ bytes = "1"
 # Data & Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+json-event-parser = "0.2.3"
 serde_yaml = "0.9"
 http = "1"
 url = "2.5"

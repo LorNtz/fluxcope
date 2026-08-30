@@ -4,6 +4,10 @@ use crate::{
         WaitForCaptureRequest, WaitForCaptureResult,
         body::{BodyContentRequest, BodyPage},
         capture_query::{CaptureDetail, CaptureQuery, CaptureSearchCursor, CompactCapture},
+        json_walk::{
+            FindJsonPointersRequest, FindJsonPointersResult, ProbeJsonPointerPatternRequest,
+            ProbeJsonPointerPatternResult,
+        },
     },
     instance::RunId,
     settings::{ConfigMode, PersistenceMode},
@@ -37,6 +41,8 @@ pub(crate) enum ControlOperationKind {
     GetCapture,
     WaitForCapture,
     ReadCaptureBody,
+    FindJsonPointers,
+    ProbeJsonPointerPattern,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -78,6 +84,8 @@ pub(crate) enum ControlOperation {
     },
     WaitForCapture(Box<WaitForCaptureRequest>),
     ReadCaptureBody(Box<BodyContentRequest>),
+    FindJsonPointers(Box<FindJsonPointersRequest>),
+    ProbeJsonPointerPattern(Box<ProbeJsonPointerPatternRequest>),
 }
 
 impl ControlOperation {
@@ -90,6 +98,8 @@ impl ControlOperation {
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture(_) => ControlOperationKind::WaitForCapture,
             Self::ReadCaptureBody(_) => ControlOperationKind::ReadCaptureBody,
+            Self::FindJsonPointers(_) => ControlOperationKind::FindJsonPointers,
+            Self::ProbeJsonPointerPattern(_) => ControlOperationKind::ProbeJsonPointerPattern,
         }
     }
 }
@@ -175,6 +185,16 @@ pub(crate) enum ControlResult {
         instance: InstanceScope,
         page: Box<BodyPage>,
     },
+    FindJsonPointers {
+        instance: InstanceScope,
+        #[serde(flatten)]
+        result: Box<FindJsonPointersResult>,
+    },
+    ProbeJsonPointerPattern {
+        instance: InstanceScope,
+        #[serde(flatten)]
+        result: Box<ProbeJsonPointerPatternResult>,
+    },
 }
 
 impl ControlResult {
@@ -186,7 +206,9 @@ impl ControlResult {
             | Self::SearchCaptures { instance, .. }
             | Self::GetCapture { instance, .. }
             | Self::WaitForCapture { instance, .. }
-            | Self::ReadCaptureBody { instance, .. } => instance,
+            | Self::ReadCaptureBody { instance, .. }
+            | Self::FindJsonPointers { instance, .. }
+            | Self::ProbeJsonPointerPattern { instance, .. } => instance,
         }
     }
 
@@ -199,6 +221,8 @@ impl ControlResult {
             Self::GetCapture { .. } => ControlOperationKind::GetCapture,
             Self::WaitForCapture { .. } => ControlOperationKind::WaitForCapture,
             Self::ReadCaptureBody { .. } => ControlOperationKind::ReadCaptureBody,
+            Self::FindJsonPointers { .. } => ControlOperationKind::FindJsonPointers,
+            Self::ProbeJsonPointerPattern { .. } => ControlOperationKind::ProbeJsonPointerPattern,
         }
     }
 }
@@ -221,6 +245,10 @@ pub(crate) enum ControlErrorCode {
     UnsupportedBodyEncoding,
     DeadlineExceeded,
     Cancelled,
+    UndecodableBody,
+    MalformedJson,
+    JsonDepthLimit,
+    JsonSizeLimit,
     InternalError,
 }
 
@@ -258,6 +286,10 @@ impl ControlErrorCode {
             Self::UnsupportedBodyEncoding => "unsupported_body_encoding",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
+            Self::UndecodableBody => "undecodable_body",
+            Self::MalformedJson => "malformed_json",
+            Self::JsonDepthLimit => "json_depth_limit",
+            Self::JsonSizeLimit => "json_size_limit",
             Self::InternalError => "internal_error",
         }
     }
@@ -449,6 +481,14 @@ impl RequestEnvelope {
                 ControlOperationKind::ReadCaptureBody,
                 serialize_arguments(&*request)?,
             ),
+            ControlOperation::FindJsonPointers(request) => (
+                ControlOperationKind::FindJsonPointers,
+                serialize_arguments(&*request)?,
+            ),
+            ControlOperation::ProbeJsonPointerPattern(request) => (
+                ControlOperationKind::ProbeJsonPointerPattern,
+                serialize_arguments(&*request)?,
+            ),
         };
         Ok(Self {
             protocol_version: RPC_VERSION,
@@ -469,7 +509,9 @@ impl RequestEnvelope {
             | ControlOperationKind::SetRecordingEnabled
             | ControlOperationKind::SearchCaptures
             | ControlOperationKind::GetCapture
-            | ControlOperationKind::ReadCaptureBody => ORDINARY_MAX_DEADLINE,
+            | ControlOperationKind::ReadCaptureBody
+            | ControlOperationKind::FindJsonPointers
+            | ControlOperationKind::ProbeJsonPointerPattern => ORDINARY_MAX_DEADLINE,
         };
         received_at + Duration::from_millis(self.deadline_ms).min(maximum)
     }
@@ -530,6 +572,16 @@ impl RequestEnvelope {
                 let request = parse_arguments::<BodyContentRequest>(&self.arguments)?;
                 request.validate()?;
                 ControlOperation::ReadCaptureBody(Box::new(request))
+            }
+            ControlOperationKind::FindJsonPointers => {
+                let request = parse_arguments::<FindJsonPointersRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::FindJsonPointers(Box::new(request))
+            }
+            ControlOperationKind::ProbeJsonPointerPattern => {
+                let request = parse_arguments::<ProbeJsonPointerPatternRequest>(&self.arguments)?;
+                request.validate()?;
+                ControlOperation::ProbeJsonPointerPattern(Box::new(request))
             }
         };
         let deadline = self.clamped_deadline(received_at);

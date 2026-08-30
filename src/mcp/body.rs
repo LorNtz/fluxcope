@@ -2,18 +2,112 @@ use std::{fmt, net::SocketAddr, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use rmcp::model::{MetaObject, ResourceContents};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 use url::Url;
 
+use super::{capture::RequiredInstanceSelector, schema::InstanceSelector};
 use crate::{
     capture::{BodySide, CaptureSequence},
-    control::body::{
-        BodyContentRequest, BodyPage, BodyRepresentation, DEFAULT_BODY_PAGE_LENGTH,
-        MAX_BODY_PAGE_LENGTH,
+    control::{
+        body::{
+            BodyContentRequest, BodyPage, BodyRepresentation, DEFAULT_BODY_PAGE_LENGTH,
+            MAX_BODY_PAGE_LENGTH,
+        },
+        json_walk::{
+            FieldMatchMode, FindJsonPointersRequest, FindJsonPointersResult, JsonPointerPattern,
+            MAX_JSON_EXAMPLES, ProbeJsonPointerPatternRequest, ProbeJsonPointerPatternResult,
+        },
     },
     control_rpc::protocol::{ControlError, ControlErrorCode},
     instance::RunId,
 };
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindJsonPointersInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    pub(crate) capture_id: CaptureSequence,
+    pub(crate) capture_revision: u64,
+    #[schemars(with = "String")]
+    pub(crate) side: BodySide,
+    pub(crate) field_name: String,
+    pub(crate) match_mode: FieldMatchMode,
+    #[schemars(range(min = 1, max = 20))]
+    pub(crate) limit: Option<usize>,
+}
+
+impl FindJsonPointersInput {
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        self.instance.selector()
+    }
+
+    pub(crate) fn operation(
+        &self,
+    ) -> Result<crate::control_rpc::protocol::ControlOperation, ControlError> {
+        let request = FindJsonPointersRequest {
+            capture_id: self.capture_id,
+            capture_revision: self.capture_revision,
+            side: self.side,
+            field_name: self.field_name.clone(),
+            match_mode: self.match_mode,
+            limit: self.limit.unwrap_or(MAX_JSON_EXAMPLES),
+        };
+        request.validate()?;
+        Ok(crate::control_rpc::protocol::ControlOperation::FindJsonPointers(Box::new(request)))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProbeJsonPointerPatternInput {
+    pub(crate) instance: RequiredInstanceSelector,
+    pub(crate) capture_id: CaptureSequence,
+    pub(crate) capture_revision: u64,
+    #[schemars(with = "String")]
+    pub(crate) side: BodySide,
+    pub(crate) pattern: JsonPointerPattern,
+}
+
+impl ProbeJsonPointerPatternInput {
+    pub(crate) fn selector(&self) -> InstanceSelector {
+        self.instance.selector()
+    }
+
+    pub(crate) fn operation(
+        &self,
+    ) -> Result<crate::control_rpc::protocol::ControlOperation, ControlError> {
+        let request = ProbeJsonPointerPatternRequest {
+            capture_id: self.capture_id,
+            capture_revision: self.capture_revision,
+            side: self.side,
+            pattern: self.pattern.clone(),
+        };
+        request.validate()?;
+        Ok(
+            crate::control_rpc::protocol::ControlOperation::ProbeJsonPointerPattern(Box::new(
+                request,
+            )),
+        )
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FindJsonPointersOutput {
+    pub(crate) instance: InstanceSelector,
+    #[serde(flatten)]
+    pub(crate) result: FindJsonPointersResult,
+}
+
+#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProbeJsonPointerPatternOutput {
+    pub(crate) instance: InstanceSelector,
+    #[serde(flatten)]
+    pub(crate) result: ProbeJsonPointerPatternResult,
+}
 
 pub(super) const CONTENT_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}";
 
@@ -313,3 +407,5 @@ fn invalid_uri(message: impl Into<String>) -> ControlError {
 
 #[cfg(test)]
 mod task10_tests;
+#[cfg(test)]
+mod task11_tests;

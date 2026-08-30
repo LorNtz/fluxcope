@@ -1,5 +1,6 @@
 pub(crate) mod body;
 pub(crate) mod capture_query;
+pub(crate) mod json_walk;
 
 use crate::{
     capture::{BodyStreamState, CaptureSequence, CaptureSnapshot},

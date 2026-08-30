@@ -44,6 +44,9 @@ use crate::{
             CaptureQuery, CaptureSearchCursor, CaptureSearchPage, CompactCapture,
             CompiledCaptureQuery, match_capture_page_with_budget, normalize_capture_page_limit,
         },
+        json_walk::{
+            FindJsonPointersRequest, ProbeJsonPointerPatternRequest, find_json_pointers, probe_json,
+        },
         normalize_wait_timeout_ms,
     },
     control_rpc::{
@@ -901,6 +904,176 @@ impl BodyJobScheduler {
         }
     }
 
+    async fn find_json_pointers(
+        &self,
+        request: FindJsonPointersRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        let capture_revision = request.capture_revision;
+        let field_name = request.field_name;
+        let match_mode = request.match_mode;
+        let limit = request.limit;
+        let target = BodyContentRequest {
+            capture_id: request.capture_id,
+            capture_revision,
+            side: request.side,
+            representation: BodyRepresentation::Decoded,
+            offset: 0,
+            length: 1,
+        };
+        let (instance, result) = self
+            .inspect_decoded_body(
+                target,
+                deadline,
+                cancelled,
+                move |decoded, status, cancelled| {
+                    reject_limited_structured_input(decoded)?;
+                    let mut result = find_json_pointers(
+                        &decoded.bytes,
+                        &field_name,
+                        match_mode,
+                        limit,
+                        cancelled,
+                    )?;
+                    result.capture_revision = capture_revision;
+                    result.source_truncated = status.preview_limit.is_some();
+                    Ok(result)
+                },
+            )
+            .await?;
+        Ok(ControlResult::FindJsonPointers {
+            instance,
+            result: Box::new(result),
+        })
+    }
+
+    async fn probe_json_pointer_pattern(
+        &self,
+        request: ProbeJsonPointerPatternRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        request.validate()?;
+        let capture_revision = request.capture_revision;
+        let pattern = request.pattern;
+        let target = BodyContentRequest {
+            capture_id: request.capture_id,
+            capture_revision,
+            side: request.side,
+            representation: BodyRepresentation::Decoded,
+            offset: 0,
+            length: 1,
+        };
+        let (instance, result) = self
+            .inspect_decoded_body(
+                target,
+                deadline,
+                cancelled,
+                move |decoded, status, cancelled| {
+                    reject_limited_structured_input(decoded)?;
+                    let mut result = probe_json(&decoded.bytes, &pattern, cancelled)?;
+                    result.capture_revision = capture_revision;
+                    result.source_truncated = status.preview_limit.is_some();
+                    Ok(result)
+                },
+            )
+            .await?;
+        Ok(ControlResult::ProbeJsonPointerPattern {
+            instance,
+            result: Box::new(result),
+        })
+    }
+
+    async fn inspect_decoded_body<R, F>(
+        &self,
+        request: BodyContentRequest,
+        deadline: Instant,
+        cancelled: CancellationToken,
+        work: F,
+    ) -> Result<(InstanceScope, R), ControlError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&DecodedBytes, &BodyStatus, &AtomicBool) -> Result<R, ControlError>
+            + Send
+            + 'static,
+    {
+        self.apply_pending_changes();
+        let metadata = self.metadata(&request, cancelled.clone()).await?;
+        validate_body_metadata(&request, &metadata)?;
+        let mut plan = self.admission_plan(&request, &metadata);
+        let admission_deadline = tokio::time::Instant::from_std(deadline);
+        let mut queued = self.admission.try_admit_mcp_until(
+            plan.charge_bytes,
+            admission_deadline,
+            &cancelled,
+        )?;
+        let mut work = Some(work);
+        loop {
+            let active = queued
+                .acquire_active(admission_deadline, cancelled.clone())
+                .await?;
+            self.apply_pending_changes();
+            let current = self.metadata(&request, cancelled.clone()).await?;
+            validate_body_metadata(&request, &current)?;
+            let current_plan = self.admission_plan(&request, &current);
+            if plan.requires_readmission(&current_plan) {
+                let charge_bytes = current_plan.charge_bytes;
+                plan = current_plan;
+                queued = active.retry_mcp_after_revalidation(
+                    charge_bytes,
+                    admission_deadline,
+                    &cancelled,
+                )?;
+                continue;
+            }
+            let work = work
+                .take()
+                .ok_or_else(|| ControlError::internal("JSON body work was already consumed"))?;
+            if let Some(decoded) = current_plan.cached {
+                let instance = current.instance;
+                let result = inspect_cached_body_off_thread(
+                    decoded,
+                    current.status,
+                    active,
+                    deadline,
+                    cancelled,
+                    work,
+                )
+                .await?;
+                return Ok((instance, result));
+            }
+
+            let snapshot_epoch = self.change_feed.epoch();
+            let snapshot = self.snapshot(&request, cancelled.clone()).await?;
+            validate_body_snapshot(&request, &snapshot)?;
+            let cache_epoch =
+                (self.change_feed.epoch() == snapshot_epoch).then_some(snapshot_epoch);
+            let instance = snapshot.instance.clone();
+            let status = snapshot.status.clone();
+            let (decoded, result) = decode_and_inspect_body_off_thread(
+                snapshot.preview.clone(),
+                snapshot.headers.clone(),
+                status,
+                active,
+                deadline,
+                cancelled,
+                work,
+            )
+            .await?;
+            if should_cache_decoded_body(&snapshot.status)
+                && let Some(cache_epoch) = cache_epoch
+            {
+                self.apply_pending_changes();
+                self.change_feed.run_if_epoch(cache_epoch, || {
+                    self.cache.lock().insert_decoded(current_plan.key, decoded);
+                });
+            }
+            return Ok((instance, result));
+        }
+    }
+
     fn admission_plan(
         &self,
         request: &BodyContentRequest,
@@ -1122,6 +1295,112 @@ async fn decode_body_off_thread(
                         error.details(),
                     )
                 })
+        }
+    }
+}
+fn reject_limited_structured_input(decoded: &DecodedBytes) -> Result<(), ControlError> {
+    if decoded.output_limited {
+        return Err(ControlError::new(
+            ControlErrorCode::JsonSizeLimit,
+            "decoded capture JSON body exceeds the structured input limit",
+            false,
+            serde_json::json!({"maximum_bytes": crate::control::body::MAX_DECODED_CONTENT_BYTES}),
+        ));
+    }
+    Ok(())
+}
+
+async fn inspect_cached_body_off_thread<R, F>(
+    decoded: DecodedBytes,
+    status: BodyStatus,
+    active: ActiveBodyWorkLease,
+    deadline: Instant,
+    cancelled: CancellationToken,
+    work: F,
+) -> Result<R, ControlError>
+where
+    R: Send + 'static,
+    F: FnOnce(&DecodedBytes, &BodyStatus, &AtomicBool) -> Result<R, ControlError> + Send + 'static,
+{
+    let cancellation_flag = Arc::new(AtomicBool::new(false));
+    let mut cancel_worker_on_drop = DecodeWorkerCancellation::new(Arc::clone(&cancellation_flag));
+    let worker_flag = Arc::clone(&cancellation_flag);
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let _active = active;
+        work(&decoded, &status, &worker_flag)
+    });
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::cancelled("capture JSON traversal cancelled"))
+        }
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::deadline_exceeded("capture JSON traversal deadline elapsed"))
+        }
+        result = &mut worker => {
+            cancel_worker_on_drop.disarm();
+            result.map_err(|_| ControlError::internal("capture JSON traversal worker failed"))?
+        }
+    }
+}
+
+async fn decode_and_inspect_body_off_thread<R, F>(
+    preview: CapturedBodyPreview,
+    headers: CapturedHeaders,
+    status: BodyStatus,
+    active: ActiveBodyWorkLease,
+    deadline: Instant,
+    cancelled: CancellationToken,
+    work: F,
+) -> Result<(DecodedBytes, R), ControlError>
+where
+    R: Send + 'static,
+    F: FnOnce(&DecodedBytes, &BodyStatus, &AtomicBool) -> Result<R, ControlError> + Send + 'static,
+{
+    let cancellation_flag = Arc::new(AtomicBool::new(false));
+    let mut cancel_worker_on_drop = DecodeWorkerCancellation::new(Arc::clone(&cancellation_flag));
+    let worker_flag = Arc::clone(&cancellation_flag);
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let _active = active;
+        let decoded = decode_content_bytes(
+            &preview,
+            &headers,
+            &ContentDecodePolicy::default(),
+            &worker_flag,
+        )
+        .map_err(|error| {
+            ControlError::new(
+                error.code(),
+                "capture body decoding failed",
+                false,
+                error.details(),
+            )
+        })?;
+        let result = work(&decoded, &status, &worker_flag)?;
+        Ok((decoded, result))
+    });
+    tokio::select! {
+        biased;
+        _ = cancelled.cancelled() => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::cancelled("capture JSON decode or traversal cancelled"))
+        }
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            cancellation_flag.store(true, Ordering::Release);
+            let _ = worker.await;
+            Err(ControlError::deadline_exceeded(
+                "capture JSON decode or traversal deadline elapsed",
+            ))
+        }
+        result = &mut worker => {
+            cancel_worker_on_drop.disarm();
+            result
+                .map_err(|_| ControlError::internal("capture JSON body worker failed"))?
         }
     }
 }
@@ -1575,6 +1854,16 @@ impl ControlRpcHandler for RuntimeControlHandler {
                 }
                 ControlOperation::ReadCaptureBody(request) => {
                     body_jobs.read(*request, _context.deadline, cancelled).await
+                }
+                ControlOperation::FindJsonPointers(request) => {
+                    body_jobs
+                        .find_json_pointers(*request, _context.deadline, cancelled)
+                        .await
+                }
+                ControlOperation::ProbeJsonPointerPattern(request) => {
+                    body_jobs
+                        .probe_json_pointer_pattern(*request, _context.deadline, cancelled)
+                        .await
                 }
                 ControlOperation::WaitForCapture(request) => {
                     Self::wait_for_capture(
