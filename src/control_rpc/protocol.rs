@@ -599,3 +599,6 @@ fn validate_identifier(field: &str, value: &str) -> Result<(), ControlError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod task9_tests;

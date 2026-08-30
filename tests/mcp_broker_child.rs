@@ -4,7 +4,7 @@ use std::{path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use rmcp::{
-    ServiceExt,
+    ServiceError, ServiceExt,
     model::{
         CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
     },
@@ -36,7 +36,8 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_wait_for_capture_contract() -> Result<()>
+{
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -76,6 +77,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Resu
             "list_instances",
             "search_captures",
             "set_recording_enabled",
+            "wait_for_capture",
         ]
     );
     for tool in &tools {
@@ -83,7 +85,8 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Resu
         let expected_read_only = tool.name != "set_recording_enabled";
         assert_eq!(annotations.read_only_hint, Some(expected_read_only));
         assert_eq!(annotations.destructive_hint, Some(false));
-        assert_eq!(annotations.idempotent_hint, Some(true));
+        let expected_idempotent = tool.name != "wait_for_capture";
+        assert_eq!(annotations.idempotent_hint, Some(expected_idempotent));
         assert_eq!(annotations.open_world_hint, Some(false));
         assert_eq!(tool.input_schema.get("type"), Some(&json!("object")));
         assert_eq!(
@@ -110,6 +113,46 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Resu
     assert!(search.input_schema["properties"]["query"].is_object());
     assert!(search.input_schema["properties"]["cursor"].is_object());
     assert!(search.input_schema["properties"]["limit"].is_object());
+    let wait = tools
+        .iter()
+        .find(|tool| tool.name == "wait_for_capture")
+        .expect("wait_for_capture schema");
+    let required = wait.input_schema["required"]
+        .as_array()
+        .expect("wait required fields");
+    assert!(required.contains(&json!("instance")));
+    assert!(required.contains(&json!("milestone")));
+    let instance_required = wait.input_schema["properties"]["instance"]["required"]
+        .as_array()
+        .expect("wait instance required fields");
+    assert!(instance_required.contains(&json!("proxy_endpoint")));
+    assert!(instance_required.contains(&json!("run_id")));
+    assert_eq!(
+        wait.input_schema["properties"]["milestone"]["enum"],
+        json!(["request_seen", "response_started", "exchange_terminal"])
+    );
+    assert_eq!(
+        wait.input_schema["properties"]["timeout_ms"]["minimum"],
+        json!(1)
+    );
+    assert_eq!(
+        wait.input_schema["properties"]["timeout_ms"]["maximum"],
+        json!(300_000)
+    );
+    let wait_description = wait.description.as_deref().expect("wait description");
+    for required_phrase in [
+        "exact run",
+        "request_seen",
+        "response_started",
+        "exchange_terminal",
+        "five minutes",
+        "unmatched",
+    ] {
+        assert!(
+            wait_description.contains(required_phrase),
+            "wait description must contain {required_phrase:?}"
+        );
+    }
     assert!(tools.iter().all(|tool| tool.name != "get_capture"));
     for name in ["get_broker_status", "list_instances"] {
         let tool = tools
@@ -132,6 +175,32 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task8_tools() -> Resu
                 "omitted": 0
             }
         })
+    );
+
+    let zero_timeout = client
+        .call_tool(
+            CallToolRequestParams::new("wait_for_capture").with_arguments(
+                json!({
+                    "instance": {
+                        "proxy_endpoint": "127.0.0.1:19899",
+                        "run_id": "AAAAAAAAAAAAAAAAAAAAAA"
+                    },
+                    "milestone": "request_seen",
+                    "timeout_ms": 0
+                })
+                .as_object()
+                .expect("wait arguments")
+                .clone(),
+            ),
+        )
+        .await
+        .expect_err("zero wait timeout");
+    let ServiceError::McpError(zero_timeout) = zero_timeout else {
+        panic!("expected typed MCP error");
+    };
+    assert_eq!(
+        zero_timeout.data.expect("typed MCP error data")["code"],
+        json!("invalid_argument")
     );
 
     client.cancel().await?;

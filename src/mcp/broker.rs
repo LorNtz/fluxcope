@@ -2644,4 +2644,6 @@ mod tests {
             }
         }
     }
+
+    mod task9_tests;
 }

@@ -272,3 +272,6 @@ pub(crate) fn validate_peer_uid(actual: u32, expected: u32) -> Result<(), Contro
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod task9_tests;

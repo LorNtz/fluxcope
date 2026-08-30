@@ -213,8 +213,13 @@ fn response_rejects_both_or_neither_outcome() {
 
     for value in [both, neither] {
         let payload = serde_json::to_vec(&value).expect("response JSON");
-        let error = decode_response_payload(&payload, "request-1", &instance_scope())
-            .expect_err("invalid outcome cardinality");
+        let error = decode_response_payload(
+            &payload,
+            "request-1",
+            &instance_scope(),
+            ControlOperationKind::DescribeInstance,
+        )
+        .expect_err("invalid outcome cardinality");
         assert_eq!(error.code, ControlErrorCode::InvalidArgument);
     }
 }
@@ -230,8 +235,13 @@ fn response_rejects_duplicate_fields_and_trailing_json() {
     trailing.extend_from_slice(br#"{}"#);
 
     for payload in [duplicate.as_slice(), trailing.as_slice()] {
-        let error = decode_response_payload(payload, "request-1", &instance_scope())
-            .expect_err("strict response envelope");
+        let error = decode_response_payload(
+            payload,
+            "request-1",
+            &instance_scope(),
+            ControlOperationKind::DescribeInstance,
+        )
+        .expect_err("strict response envelope");
         assert_eq!(error.code, ControlErrorCode::InvalidArgument);
     }
 }
@@ -268,6 +278,7 @@ fn response_rejects_unknown_fields_versions_and_error_codes() {
         &serde_json::to_vec(&unknown_field).expect("response JSON"),
         "request-1",
         &instance_scope(),
+        ControlOperationKind::DescribeInstance,
     )
     .expect_err("unknown response field");
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
@@ -276,6 +287,7 @@ fn response_rejects_unknown_fields_versions_and_error_codes() {
         &serde_json::to_vec(&wrong_version).expect("response JSON"),
         "request-1",
         &instance_scope(),
+        ControlOperationKind::DescribeInstance,
     )
     .expect_err("wrong response version");
     assert_eq!(error.code, ControlErrorCode::RpcVersionMismatch);
@@ -284,6 +296,7 @@ fn response_rejects_unknown_fields_versions_and_error_codes() {
         &serde_json::to_vec(&unknown_error_code).expect("response JSON"),
         "request-1",
         &instance_scope(),
+        ControlOperationKind::DescribeInstance,
     )
     .expect_err("unknown error code");
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
@@ -296,6 +309,7 @@ fn response_rejects_mismatched_request_id_and_instance_scope() {
         &serde_json::to_vec(&matching).expect("response JSON"),
         "request-1",
         &instance_scope(),
+        ControlOperationKind::DescribeInstance,
     )
     .expect_err("mismatched request ID");
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
@@ -309,6 +323,7 @@ fn response_rejects_mismatched_request_id_and_instance_scope() {
             &serde_json::to_vec(&response).expect("response JSON"),
             "request-1",
             &instance_scope(),
+            ControlOperationKind::DescribeInstance,
         )
         .expect_err("mismatched instance scope");
         assert_eq!(error.code, ControlErrorCode::InstanceGenerationConflict);
