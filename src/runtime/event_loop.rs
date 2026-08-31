@@ -16,13 +16,17 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
-use super::control::{RuntimeCommand, RuntimeControlReceiver};
 use super::{
+    gateway::{RuntimeCommand, RuntimeControlReceiver},
     policy::RenderPolicy,
-    save_settings_draft,
     services::{ServiceKind, ServiceSupervisor},
+    settings::{
+        SettingsRevision, SettingsTransactionClient, SettingsTransactionOrigin,
+        SettingsTransactionToken,
+    },
 };
+#[cfg(all(test, unix))]
+use crate::settings::SettingsSession;
 use crate::{
     app::{App, BodyDisplayPreparation},
     capture::{
@@ -32,7 +36,7 @@ use crate::{
     logging::{LogRecord, LoggingMetrics, LoggingMetricsSnapshot, LoggingStatus},
     request_policy::RequestPolicyStore,
     request_search::{RequestSearchClient, RequestSearchDispatch, SearchJobOutcome},
-    settings::SettingsSession,
+    settings::{AppSettings, SettingsUiContext},
     ui::RootView,
 };
 #[cfg(unix)]
@@ -40,22 +44,23 @@ use crate::{
     capture::{BodySide, CaptureSequence, CaptureSnapshotMode, CapturedHeaders},
     control::{
         AppControlSummary, CaptureSnapshotReply, InstanceRuntimeSnapshot, RecordingUpdate,
-        RuntimeReply, RuntimeRequest,
         body::{CaptureBodyMetadataReply, CaptureBodySnapshotReply},
         capture_query::{CAPTURE_SEARCH_BATCH_SIZE, CaptureSearchBatch, cursor_before},
     },
-    control_rpc::protocol::{ControlError, ControlErrorCode, InstanceScope},
+    control_rpc::protocol::InstanceScope,
     instance::InstanceIdentity,
     instance_registry::RegistryPublisher,
 };
-#[cfg(unix)]
+use crate::{
+    control::{
+        RuntimeReply, RuntimeRequest,
+        settings::{BeginSettingsTransactionReply, MappingSettingsSnapshot},
+    },
+    control_rpc::protocol::{ControlError, ControlErrorCode},
+};
 type PlatformControlReceiver = RuntimeControlReceiver;
 
-#[cfg(not(unix))]
-struct PlatformControlReceiver;
-
 enum PlatformControlEvent {
-    #[cfg(unix)]
     Command(RuntimeCommand),
     Closed,
 }
@@ -78,14 +83,24 @@ pub(super) struct AppRuntime {
     request_search: RequestSearchClient,
     request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
     tui: Tui,
-    settings: SettingsSession,
+    settings: Arc<AppSettings>,
+    settings_context: SettingsUiContext,
+    settings_revision: SettingsRevision,
+    pending_settings_transaction: Option<(SettingsTransactionToken, SettingsTransactionOrigin)>,
+    next_settings_transaction_token: u64,
+    settings_transactions: SettingsTransactionClient,
+    settings_completion_rx: mpsc::Receiver<
+        std::result::Result<super::settings::SettingsTransactionResult, ControlError>,
+    >,
+    settings_completion_tx:
+        mpsc::Sender<std::result::Result<super::settings::SettingsTransactionResult, ControlError>>,
     request_policy_store: RequestPolicyStore,
     policy: RenderPolicy,
     services: ServiceSupervisor,
     shutdown: CancellationToken,
+    control_rx: Option<PlatformControlReceiver>,
     #[cfg(unix)]
     identity: Option<InstanceIdentity>,
-    control_rx: Option<PlatformControlReceiver>,
     #[cfg(unix)]
     control_publisher: Option<RegistryPublisher>,
 }
@@ -105,12 +120,16 @@ impl AppRuntime {
         request_search: RequestSearchClient,
         request_search_results: watch::Receiver<Option<Arc<SearchJobOutcome>>>,
         tui: Tui,
-        settings: SettingsSession,
+        settings: Arc<AppSettings>,
+        settings_context: SettingsUiContext,
+        settings_transactions: SettingsTransactionClient,
+        control_rx: RuntimeControlReceiver,
         request_policy_store: RequestPolicyStore,
         policy: RenderPolicy,
         services: ServiceSupervisor,
         shutdown: CancellationToken,
     ) -> Self {
+        let (settings_completion_tx, settings_completion_rx) = mpsc::channel(1);
         Self {
             app,
             ui: RootView::new(),
@@ -130,13 +149,20 @@ impl AppRuntime {
             request_search_results,
             tui,
             settings,
+            settings_context,
+            settings_revision: SettingsRevision::INITIAL,
+            pending_settings_transaction: None,
+            next_settings_transaction_token: 1,
+            settings_transactions,
+            settings_completion_rx,
+            settings_completion_tx,
             request_policy_store,
             policy,
             services,
             shutdown,
+            control_rx: Some(control_rx),
             #[cfg(unix)]
             identity: None,
-            control_rx: None,
             #[cfg(unix)]
             control_publisher: None,
         }
@@ -146,11 +172,9 @@ impl AppRuntime {
     pub(super) fn with_control(
         mut self,
         identity: InstanceIdentity,
-        control_rx: Option<RuntimeControlReceiver>,
         control_publisher: Option<RegistryPublisher>,
     ) -> Self {
         self.identity = Some(identity);
-        self.control_rx = control_rx;
         self.control_publisher = control_publisher;
         self
     }
@@ -172,9 +196,9 @@ impl AppRuntime {
 
     pub async fn run(mut self) -> Result<()> {
         let result = self.run_loop().await;
-        #[cfg(unix)]
-        self.close_control_ingress();
         self.shutdown.cancel();
+        self.drain_pending_settings_transaction().await;
+        self.close_control_ingress();
         self.services.shutdown(self.policy.shutdown_grace).await;
         #[cfg(unix)]
         self.control_publisher.take();
@@ -212,16 +236,33 @@ impl AppRuntime {
                     dirty = true;
                     dirty |= self.handle_settings_save_request();
                 }
+                completion = self.settings_completion_rx.recv() => {
+                    if let Some(completion) = completion {
+                        match completion {
+                            Ok(result) => {
+                                log::info!(
+                                    "TUI settings transaction {:?} at revision {} ({:?})",
+                                    result.outcome,
+                                    result.revision,
+                                    result.affected
+                                );
+                                self.app.finish_settings_save(
+                                    Arc::clone(&result.settings),
+                                    result.revision,
+                                );
+                            }
+                            Err(error) => self.app.fail_settings_save(error.message().to_string()),
+                        }
+                        dirty = true;
+                    }
+                }
                 control_event = receive_control_event(&mut self.control_rx) => {
-                    #[cfg(unix)]
                     match control_event {
                         PlatformControlEvent::Command(command) => {
                             dirty |= self.process_control_command(command);
                         }
                         PlatformControlEvent::Closed => self.control_rx = None,
                     }
-                    #[cfg(not(unix))]
-                    let _ = control_event;
                 }
                 capture = self.capture_rx.recv(), if captures_open => {
                     match capture {
@@ -310,7 +351,8 @@ impl AppRuntime {
                         | ServiceKind::ControlRpc
                         | ServiceKind::BodyPumps
                         | ServiceKind::Decoder
-                        | ServiceKind::RequestSearch => {
+                        | ServiceKind::RequestSearch
+                        | ServiceKind::SettingsTransactions => {
                             return Err(anyhow!("fatal service classification was inconsistent"));
                         }
                     }
@@ -400,14 +442,20 @@ impl AppRuntime {
         let Some(draft) = self.app.take_settings_save_request() else {
             return false;
         };
-
-        match save_settings_draft(&mut self.settings, &self.request_policy_store, draft) {
-            Ok(saved) => {
-                self.app.finish_settings_save(saved);
-                log::info!("Settings saved");
-            }
-            Err(error) => self.app.fail_settings_save(error.to_string()),
+        if self.app.settings_transaction_pending() {
+            self.app.fail_settings_save(
+                "settings transaction is pending; wait for it to finish".to_string(),
+            );
+            return true;
         }
+        self.app.set_settings_transaction_pending(true);
+        let client = self.settings_transactions.clone();
+        let completion = self.settings_completion_tx.clone();
+        let cancelled = self.shutdown.child_token();
+        tokio::spawn(async move {
+            let result = client.replace_from_tui(draft, cancelled).await;
+            let _ = completion.send(result).await;
+        });
         true
     }
 
@@ -448,30 +496,166 @@ impl AppRuntime {
         }
         changed
     }
-    #[cfg(unix)]
     fn execute_control(
         &mut self,
         request: RuntimeRequest,
     ) -> std::result::Result<RuntimeReply, ControlError> {
-        let identity = self
-            .identity
-            .as_ref()
-            .ok_or_else(|| ControlError::instance_unavailable("runtime control is not enabled"))?;
-        execute_control_request(identity, &mut self.app, &self.settings, request)
+        match request {
+            RuntimeRequest::GetMappingSettings => {
+                Ok(RuntimeReply::MappingSettings(MappingSettingsSnapshot {
+                    settings: Arc::clone(&self.settings),
+                    revision: self.settings_revision,
+                    config_mode: self.settings_context.config_mode,
+                    persistence: self.settings_context.persistence,
+                }))
+            }
+            RuntimeRequest::BeginSettingsTransaction {
+                expected_revision,
+                origin,
+            } => {
+                if let Some(expected) = expected_revision
+                    && expected != self.settings_revision
+                {
+                    return Err(ControlError::new(
+                        ControlErrorCode::SettingsRevisionConflict,
+                        "settings revision does not match",
+                        false,
+                        serde_json::json!({
+                            "expected_revision": expected,
+                            "current_revision": self.settings_revision,
+                        }),
+                    ));
+                }
+                if origin == SettingsTransactionOrigin::Mcp && self.app.settings_popup.is_dirty() {
+                    return Err(ControlError::new(
+                        ControlErrorCode::TuiDraftConflict,
+                        "mapping settings conflict with an unsaved TUI draft",
+                        false,
+                        serde_json::json!({"current_revision": self.settings_revision}),
+                    ));
+                }
+                if origin == SettingsTransactionOrigin::Mcp
+                    && self.app.settings_transaction_pending()
+                {
+                    return Err(ControlError::new(
+                        ControlErrorCode::ServiceUnavailable,
+                        "another settings transaction is pending",
+                        true,
+                        serde_json::json!({"stage": "settings_transaction_pending"}),
+                    ));
+                }
+                if self.pending_settings_transaction.is_some() {
+                    return Err(ControlError::new(
+                        ControlErrorCode::ServiceUnavailable,
+                        "another settings transaction is pending",
+                        true,
+                        serde_json::json!({"stage": "settings_transaction_pending"}),
+                    ));
+                }
+                let token = SettingsTransactionToken::new(self.next_settings_transaction_token);
+                self.next_settings_transaction_token =
+                    self.next_settings_transaction_token.saturating_add(1);
+                self.pending_settings_transaction = Some((token, origin));
+                self.app.set_settings_transaction_pending(true);
+                Ok(RuntimeReply::SettingsTransactionBegun(
+                    BeginSettingsTransactionReply {
+                        settings: Arc::clone(&self.settings),
+                        revision: self.settings_revision,
+                        token,
+                        config_mode: self.settings_context.config_mode,
+                        persistence: self.settings_context.persistence,
+                    },
+                ))
+            }
+            RuntimeRequest::FinalizeSettingsTransaction { token, commit } => {
+                let Some((pending, origin)) = self.pending_settings_transaction else {
+                    return Err(ControlError::internal(
+                        "settings transaction finalization has no pending token",
+                    ));
+                };
+                if pending != token || origin != commit.origin {
+                    return Err(ControlError::internal(
+                        "settings transaction finalization token does not match",
+                    ));
+                }
+                if commit.outcome == super::settings::SettingsTransactionOutcome::Committed {
+                    let policy = commit.policy.ok_or_else(|| {
+                        ControlError::internal(
+                            "committed settings transaction omitted compiled policy",
+                        )
+                    })?;
+                    self.request_policy_store.replace(policy);
+                    self.settings = Arc::clone(&commit.settings);
+                    self.settings_revision = self.settings_revision.next();
+                    self.app.apply_settings_transaction_commit_from_origin(
+                        commit.settings,
+                        self.settings_revision,
+                        origin,
+                    )?;
+                } else {
+                    self.app.set_settings_transaction_pending(false);
+                }
+                self.pending_settings_transaction = None;
+                Ok(RuntimeReply::SettingsTransactionFinalized(commit.outcome))
+            }
+            RuntimeRequest::AbortSettingsTransaction { token } => {
+                if self
+                    .pending_settings_transaction
+                    .is_some_and(|(pending, _)| pending == token)
+                {
+                    self.pending_settings_transaction = None;
+                    self.app.set_settings_transaction_pending(false);
+                    Ok(RuntimeReply::SettingsTransactionAborted)
+                } else {
+                    Err(ControlError::internal(
+                        "settings transaction abort token does not match",
+                    ))
+                }
+            }
+            #[cfg(unix)]
+            request => {
+                let identity = self.identity.as_ref().ok_or_else(|| {
+                    ControlError::instance_unavailable("runtime control is not enabled")
+                })?;
+                execute_control_request(identity, &mut self.app, self.settings_context, request)
+            }
+            #[cfg(not(unix))]
+            _ => Err(ControlError::new(
+                ControlErrorCode::UnsupportedPlatform,
+                "private runtime control is unsupported on this platform",
+                false,
+                serde_json::json!({}),
+            )),
+        }
+    }
+    async fn drain_pending_settings_transaction(&mut self) {
+        while self.pending_settings_transaction.is_some() {
+            let Some(receiver) = self.control_rx.as_mut() else {
+                break;
+            };
+            let Some(command) = receiver.recv().await else {
+                break;
+            };
+            let _ = self.process_control_command(command);
+        }
     }
 
-    #[cfg(unix)]
     fn process_control_command(&mut self, command: RuntimeCommand) -> bool {
         if command.cancelled.is_cancelled() {
             return false;
         }
-        let dirty = matches!(command.request, RuntimeRequest::SetRecordingEnabled { .. });
+        let dirty = matches!(
+            &command.request,
+            RuntimeRequest::SetRecordingEnabled { .. }
+                | RuntimeRequest::BeginSettingsTransaction { .. }
+                | RuntimeRequest::FinalizeSettingsTransaction { .. }
+                | RuntimeRequest::AbortSettingsTransaction { .. }
+        );
         let result = self.execute_control(command.request);
         let _ = command.reply.send(result);
         dirty
     }
 
-    #[cfg(unix)]
     fn close_control_ingress(&mut self) {
         let Some(receiver) = self.control_rx.as_mut() else {
             return;
@@ -485,7 +669,6 @@ impl AppRuntime {
     }
 }
 
-#[cfg(unix)]
 async fn receive_control_event(
     receiver: &mut Option<PlatformControlReceiver>,
 ) -> PlatformControlEvent {
@@ -498,18 +681,11 @@ async fn receive_control_event(
     }
 }
 
-#[cfg(not(unix))]
-async fn receive_control_event(
-    _receiver: &mut Option<PlatformControlReceiver>,
-) -> PlatformControlEvent {
-    std::future::pending().await
-}
-
 #[cfg(unix)]
 fn execute_control_request(
     identity: &InstanceIdentity,
     app: &mut App,
-    settings: &SettingsSession,
+    context: SettingsUiContext,
     request: RuntimeRequest,
 ) -> std::result::Result<RuntimeReply, ControlError> {
     match request {
@@ -519,7 +695,6 @@ fn execute_control_request(
                 retained_capture_count,
                 settings_revision,
             } = app.control_summary();
-            let context = settings.ui_context();
             Ok(RuntimeReply::Instance(InstanceRuntimeSnapshot {
                 instance: InstanceScope {
                     proxy_endpoint: identity.proxy_endpoint(),
@@ -655,6 +830,12 @@ fn execute_control_request(
         RuntimeRequest::UnsupportedForTest => Err(ControlError::invalid_argument(
             "unsupported runtime control operation",
         )),
+        RuntimeRequest::GetMappingSettings
+        | RuntimeRequest::BeginSettingsTransaction { .. }
+        | RuntimeRequest::FinalizeSettingsTransaction { .. }
+        | RuntimeRequest::AbortSettingsTransaction { .. } => Err(ControlError::internal(
+            "settings transaction request bypassed AppRuntime authority",
+        )),
     }
 }
 
@@ -720,11 +901,11 @@ pub(super) fn execute_control_request_for_test(
     settings: &SettingsSession,
     request: RuntimeRequest,
 ) -> std::result::Result<RuntimeReply, ControlError> {
-    execute_control_request(identity, app, settings, request)
+    execute_control_request(identity, app, settings.ui_context(), request)
 }
 
 fn is_fatal_service(kind: ServiceKind) -> bool {
-    !matches!(kind, ServiceKind::CertificateDownload | ServiceKind::Logger)
+    kind.is_fatal()
 }
 
 #[cfg(all(test, unix))]
@@ -741,7 +922,12 @@ impl ControlExecutionHarness {
         &mut self,
         request: RuntimeRequest,
     ) -> std::result::Result<RuntimeReply, ControlError> {
-        execute_control_request(&self.identity, &mut self.app, &self.settings, request)
+        execute_control_request(
+            &self.identity,
+            &mut self.app,
+            self.settings.ui_context(),
+            request,
+        )
     }
 
     async fn process_next_control_command(&mut self) -> Result<bool> {
@@ -753,7 +939,7 @@ impl ControlExecutionHarness {
         if command.cancelled.is_cancelled() {
             return Ok(false);
         }
-        let dirty = matches!(command.request, RuntimeRequest::SetRecordingEnabled { .. });
+        let dirty = matches!(&command.request, RuntimeRequest::SetRecordingEnabled { .. });
         let result = self.execute_control(command.request);
         let _ = command.reply.send(result);
         Ok(dirty)
@@ -963,7 +1149,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19011".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::new(true));
-        let (_client, control_rx) = super::super::control::RuntimeGateway::channel(4);
+        let (_client, control_rx) = super::super::gateway::RuntimeGateway::channel(4);
         let mut runtime =
             AppRuntime::test_with_control(identity.clone(), app, settings, control_rx);
 
@@ -980,7 +1166,10 @@ mod tests {
         assert_eq!(snapshot.persistence, PersistenceMode::Ephemeral);
         assert!(snapshot.recording_enabled);
         assert_eq!(snapshot.retained_capture_count, 0);
-        assert_eq!(snapshot.settings_revision, 0);
+        assert_eq!(
+            snapshot.settings_revision,
+            super::super::settings::SettingsRevision::INITIAL.get()
+        );
     }
 
     #[cfg(unix)]
@@ -999,7 +1188,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19012".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (_client, control_rx) = super::super::control::RuntimeGateway::channel(4);
+        let (_client, control_rx) = super::super::gateway::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
 
         let error = runtime
@@ -1027,7 +1216,7 @@ mod tests {
         let expected_run_id = identity.run_id().clone();
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (client, control_rx) = super::super::control::RuntimeGateway::channel(4);
+        let (client, control_rx) = super::super::gateway::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
         let request = tokio::spawn(async move {
             client
@@ -1065,7 +1254,7 @@ mod tests {
             InstanceIdentity::new("127.0.0.1:19014".parse().expect("endpoint")).expect("identity");
         let settings = SettingsSession::temporary(AppSettings::default());
         let app = App::with_recording(UiSettings::default(), RecordingState::default());
-        let (client, control_rx) = super::super::control::RuntimeGateway::channel(4);
+        let (client, control_rx) = super::super::gateway::RuntimeGateway::channel(4);
         let mut runtime = AppRuntime::test_with_control(identity, app, settings, control_rx);
 
         runtime.close_control_ingress();
@@ -1079,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn control_rpc_completion_is_fatal_to_the_proxy_instance() {
+    fn fatal_service_policy_matches_runtime_contract() {
         assert!(is_fatal_service(ServiceKind::ControlRpc));
         assert!(is_fatal_service(ServiceKind::Proxy));
         assert!(!is_fatal_service(ServiceKind::CertificateDownload));

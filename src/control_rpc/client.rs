@@ -1,22 +1,30 @@
 use crate::{
     control_rpc::{
-        framing::{REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, read_json_frame},
+        framing::{
+            ACTIVE_CALL_LIMIT, REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, encode_json_frame,
+            read_json_frame,
+        },
         protocol::{
             ControlError, ControlOperation, ControlResult, DeclaredClient, InstanceScope,
-            LocalTransportCause, RequestEnvelope, ResponseEnvelope,
+            LocalTransportCause, OutboundRequestEnvelope, ResponseEnvelope,
         },
     },
     instance_registry::InstanceDescriptor,
 };
 use std::{
     io,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
-use tokio::{io::AsyncWriteExt, net::UnixStream};
+use tokio::{io::AsyncWriteExt, net::UnixStream, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static REQUEST_SERIALIZATION_ADMISSION: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(ACTIVE_CALL_LIMIT)));
 
 pub(crate) struct ControlRpcClient;
 
@@ -32,35 +40,39 @@ impl ControlRpcClient {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let deadline_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
         let expected_kind = operation.kind();
-        let request = RequestEnvelope::new(
-            request_id.clone(),
-            descriptor.run_id().clone(),
-            deadline_ms,
-            client,
-            operation,
-        )?;
+        let request_run_id = descriptor.run_id().clone();
         let expected_scope = InstanceScope {
             proxy_endpoint: descriptor.proxy_endpoint(),
             run_id: descriptor.run_id().clone(),
         };
         let socket_path = descriptor.socket_path().to_path_buf();
         let call = async move {
-            let payload = serde_json::to_vec(&request).map_err(|error| {
-                ControlError::invalid_argument(format!(
-                    "failed to serialize private RPC request: {error}"
-                ))
-            })?;
-            if payload.len() > REQUEST_MAX_BYTES {
-                return Err(ControlError::frame_too_large(REQUEST_MAX_BYTES));
-            }
-            let length = u32::try_from(payload.len())
-                .map_err(|_| ControlError::frame_too_large(REQUEST_MAX_BYTES))?;
+            let serialization_permit = Arc::clone(&REQUEST_SERIALIZATION_ADMISSION)
+                .acquire_owned()
+                .await
+                .map_err(|_| {
+                    ControlError::service_unavailable(
+                        "private RPC request serialization admission is closed",
+                    )
+                })?;
+            let encoding_request_id = request_id.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let _serialization_permit = serialization_permit;
+                let request = OutboundRequestEnvelope::new(
+                    &encoding_request_id,
+                    &request_run_id,
+                    deadline_ms,
+                    &client,
+                    &operation,
+                );
+                encode_json_frame(&request, REQUEST_MAX_BYTES)
+            });
+            let payload = worker.await.map_err(|_| {
+                ControlError::service_unavailable("private RPC request serializer worker failed")
+            })??;
             let mut stream = UnixStream::connect(&socket_path)
                 .await
                 .map_err(connect_failure)?;
-            stream.write_all(&length.to_be_bytes()).await.map_err(|_| {
-                ControlError::instance_unavailable("private RPC request write failed")
-            })?;
             stream.write_all(&payload).await.map_err(|_| {
                 ControlError::instance_unavailable("private RPC request write failed")
             })?;

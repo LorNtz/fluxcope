@@ -48,7 +48,7 @@ pub(crate) struct ControlRpcServer<H> {
 }
 
 enum DispatchOutcome {
-    Response(Result<ControlResult, ControlError>),
+    Response(Box<Result<ControlResult, ControlError>>),
     Disconnected,
 }
 
@@ -157,6 +157,7 @@ where
         let DispatchOutcome::Response(outcome) = outcome else {
             return Ok(());
         };
+        let outcome = *outcome;
         let response = match outcome {
             Ok(result) => ResponseEnvelope::success(response_request_id, result),
             Err(error) => ResponseEnvelope::error(response_request_id, error),
@@ -191,7 +192,7 @@ where
         let deadline = tokio::time::Instant::from_std(request.deadline);
 
         tokio::select! {
-            result = &mut handler => DispatchOutcome::Response(result),
+            result = &mut handler => DispatchOutcome::Response(Box::new(result)),
             _read = reader.read(&mut disconnect_probe) => {
                 cancelled.cancel();
                 DispatchOutcome::Disconnected
@@ -199,9 +200,9 @@ where
             _ = cancelled.cancelled() => DispatchOutcome::Disconnected,
             _ = tokio::time::sleep_until(deadline) => {
                 cancelled.cancel();
-                DispatchOutcome::Response(Err(ControlError::instance_unavailable(
+                DispatchOutcome::Response(Box::new(Err(ControlError::instance_unavailable(
                     "private RPC operation deadline elapsed",
-                )))
+                ))))
             }
         }
     }

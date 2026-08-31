@@ -1,6 +1,8 @@
 use crate::settings::{ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings, ProxySettings};
 use http::Uri;
-use std::{collections::HashMap, env, path::PathBuf};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, env, fmt, path::PathBuf};
 use url::Url;
 
 #[derive(Clone, Debug, Default)]
@@ -115,7 +117,7 @@ pub(crate) struct MappingTrace {
     pub local_match: Option<MappingRuleLocation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MappingDiagnostic {
     pub severity: DiagnosticSeverity,
     pub code: MappingDiagnosticCode,
@@ -127,6 +129,14 @@ impl MappingDiagnostic {
     fn warning(code: MappingDiagnosticCode, message: impl Into<String>) -> Self {
         Self {
             severity: DiagnosticSeverity::Warning,
+            code,
+            location: None,
+            message: message.into(),
+        }
+    }
+    fn error(code: MappingDiagnosticCode, message: impl Into<String>) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Error,
             code,
             location: None,
             message: message.into(),
@@ -148,13 +158,15 @@ impl MappingDiagnostic {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
     Warning,
     Error,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MappingDiagnosticCode {
     #[allow(dead_code, reason = "consumed by Task 14 mapping explanation RPC")]
     InvalidRequestUrl,
@@ -166,19 +178,21 @@ pub enum MappingDiagnosticCode {
     DuplicatePresetName,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MappingTable {
     Remote,
     Local,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MappingField {
     From,
     To,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct MappingLocation {
     pub preset_index: usize,
     pub table: MappingTable,
@@ -499,21 +513,33 @@ fn rule_diagnostic(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagnostic> {
-    let mut diagnostics = Vec::new();
+    validate_proxy_settings_capped(proxy, usize::MAX).0
+}
+
+pub(crate) fn validate_proxy_settings_capped(
+    proxy: &ProxySettings,
+    limit: usize,
+) -> (Vec<MappingDiagnostic>, usize) {
+    let mut diagnostics = DiagnosticCollector::new(limit);
     let mut names = std::collections::HashSet::new();
     for (preset_index, preset) in proxy.presets.iter().enumerate() {
         let name = preset.name.trim();
         if name.is_empty() {
-            diagnostics.push(MappingDiagnostic::warning(
-                MappingDiagnosticCode::EmptyPresetName,
-                "proxy preset names cannot be empty",
-            ));
+            diagnostics.push(|| {
+                MappingDiagnostic::error(
+                    MappingDiagnosticCode::EmptyPresetName,
+                    "proxy preset names cannot be empty",
+                )
+            });
         } else if !names.insert(name) {
-            diagnostics.push(MappingDiagnostic::warning(
-                MappingDiagnosticCode::DuplicatePresetName,
-                format!("duplicate proxy preset name: {}", preset.name),
-            ));
+            diagnostics.push(|| {
+                MappingDiagnostic::error(
+                    MappingDiagnosticCode::DuplicatePresetName,
+                    format!("duplicate proxy preset name: {}", preset.name),
+                )
+            });
         }
         validate_rules(
             preset_index,
@@ -536,13 +562,38 @@ pub(crate) fn validate_proxy_settings(proxy: &ProxySettings) -> Vec<MappingDiagn
             &mut diagnostics,
         );
     }
-    if let Some(diagnostic) = active_preset_diagnostic(proxy) {
-        diagnostics.push(diagnostic);
-    }
-    for diagnostic in &mut diagnostics {
+    if let Some(mut diagnostic) = active_preset_diagnostic(proxy) {
         diagnostic.severity = DiagnosticSeverity::Error;
+        diagnostics.push(|| diagnostic);
     }
-    diagnostics
+    diagnostics.finish()
+}
+
+struct DiagnosticCollector {
+    diagnostics: Vec<MappingDiagnostic>,
+    total: usize,
+    limit: usize,
+}
+
+impl DiagnosticCollector {
+    fn new(limit: usize) -> Self {
+        Self {
+            diagnostics: Vec::with_capacity(limit.min(32)),
+            total: 0,
+            limit,
+        }
+    }
+
+    fn push(&mut self, diagnostic: impl FnOnce() -> MappingDiagnostic) {
+        self.total = self.total.saturating_add(1);
+        if self.diagnostics.len() < self.limit {
+            self.diagnostics.push(diagnostic());
+        }
+    }
+
+    fn finish(self) -> (Vec<MappingDiagnostic>, usize) {
+        (self.diagnostics, self.total)
+    }
 }
 
 pub(crate) fn validate_rule_values(
@@ -568,43 +619,75 @@ fn validate_rules<'a>(
     preset_index: usize,
     table: MappingTable,
     rules: impl Iterator<Item = (&'a String, &'a String)>,
-    diagnostics: &mut Vec<MappingDiagnostic>,
+    diagnostics: &mut DiagnosticCollector,
 ) {
     for (rule_index, (from, to)) in rules.enumerate() {
-        for (field, message) in validate_rule_values(table, from, to) {
-            let code = match field {
-                MappingField::From => MappingDiagnosticCode::InvalidRuleSource,
-                MappingField::To => MappingDiagnosticCode::InvalidRuleTarget,
-            };
-            diagnostics.push(rule_diagnostic(
-                DiagnosticSeverity::Error,
-                code,
-                preset_index,
-                table,
-                rule_index,
-                field,
-                message,
-            ));
+        if let Err(error) = parse_rule_url(from) {
+            diagnostics.push(|| {
+                rule_diagnostic(
+                    DiagnosticSeverity::Error,
+                    MappingDiagnosticCode::InvalidRuleSource,
+                    preset_index,
+                    table,
+                    rule_index,
+                    MappingField::From,
+                    format!("mapping source {error}"),
+                )
+            });
+        }
+        let target = match table {
+            MappingTable::Remote => parse_remote_target(to).map(|_| ()),
+            MappingTable::Local => expand_home_path(to.trim()).map(|_| ()),
+        };
+        if let Err(error) = target {
+            diagnostics.push(|| {
+                rule_diagnostic(
+                    DiagnosticSeverity::Error,
+                    MappingDiagnosticCode::InvalidRuleTarget,
+                    preset_index,
+                    table,
+                    rule_index,
+                    MappingField::To,
+                    format!("mapping target {error}"),
+                )
+            });
         }
     }
 }
 
-fn parse_rule_url(raw: &str) -> Result<RulePattern, String> {
+#[derive(Debug)]
+enum MappingValueError {
+    Static(&'static str),
+    Url(url::ParseError),
+    Owned(String),
+}
+
+impl fmt::Display for MappingValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(message) => formatter.write_str(message),
+            Self::Url(error) => error.fmt(formatter),
+            Self::Owned(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn parse_rule_url(raw: &str) -> Result<RulePattern, MappingValueError> {
     let raw = raw.trim();
     let url = parse_http_url(raw)?;
 
     Ok(RulePattern {
-        origin: OriginKey::from_url(&url)?,
+        origin: OriginKey::from_url(&url).map_err(MappingValueError::Owned)?,
         path: explicit_path(raw).map(|_| url.path().to_string()),
     })
 }
 
-fn parse_remote_target(raw: &str) -> Result<RemoteTarget, String> {
+fn parse_remote_target(raw: &str) -> Result<RemoteTarget, MappingValueError> {
     let raw = raw.trim();
     let url = parse_http_url(raw)?;
     let host = url
         .host_str()
-        .ok_or_else(|| "missing host".to_string())?
+        .ok_or(MappingValueError::Static("missing host"))?
         .to_string();
 
     Ok(RemoteTarget {
@@ -615,26 +698,30 @@ fn parse_remote_target(raw: &str) -> Result<RemoteTarget, String> {
     })
 }
 
-fn parse_http_url(raw: &str) -> Result<Url, String> {
+fn parse_http_url(raw: &str) -> Result<Url, MappingValueError> {
     if raw.is_empty() {
-        return Err("value is empty".to_string());
+        return Err(MappingValueError::Static("value is empty"));
     }
 
-    let url = Url::parse(raw).map_err(|error| error.to_string())?;
+    let url = Url::parse(raw).map_err(MappingValueError::Url)?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("scheme must be http or https".to_string());
+        return Err(MappingValueError::Static("scheme must be http or https"));
     }
     if !url.has_host() {
-        return Err("missing host".to_string());
+        return Err(MappingValueError::Static("missing host"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("userinfo is not supported".to_string());
+        return Err(MappingValueError::Static("userinfo is not supported"));
     }
     if url.query().is_some() {
-        return Err("query is not supported in mapping rules".to_string());
+        return Err(MappingValueError::Static(
+            "query is not supported in mapping rules",
+        ));
     }
     if url.fragment().is_some() {
-        return Err("fragment is not supported in mapping rules".to_string());
+        return Err(MappingValueError::Static(
+            "fragment is not supported in mapping rules",
+        ));
     }
 
     Ok(url)
@@ -645,9 +732,9 @@ fn explicit_path(raw: &str) -> Option<()> {
     after_scheme.find('/').map(|_| ())
 }
 
-fn expand_home_path(path: &str) -> Result<PathBuf, String> {
+fn expand_home_path(path: &str) -> Result<PathBuf, MappingValueError> {
     if path.is_empty() {
-        return Err("path is empty".to_string());
+        return Err(MappingValueError::Static("path is empty"));
     }
 
     if path == "~" {
@@ -661,10 +748,12 @@ fn expand_home_path(path: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
-fn home_dir() -> Result<PathBuf, String> {
+fn home_dir() -> Result<PathBuf, MappingValueError> {
     env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| "HOME environment variable is not set".to_string())
+        .ok_or(MappingValueError::Static(
+            "HOME environment variable is not set",
+        ))
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ mod tests;
 
 #[cfg(unix)]
 use crate::control::AppControlSummary;
+use crate::runtime::settings::{SettingsRevision, SettingsTransactionOrigin};
 pub(crate) use crate::settings::SettingsUiContext;
 #[cfg(test)]
 use crate::settings::UiSettings;
@@ -45,7 +46,7 @@ pub use settings_popup::{
 pub(crate) use settings_popup::{
     PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PrefilterPatternEditState, ProxyRuleTable, ProxyWidget,
     RULE_EDITOR_KEY_HINTS, RecordingWidget, RuleEditField, RuleEditorState, SelectTarget,
-    SettingsKeyHint, SettingsScrollRequest, SettingsSelectId,
+    SettingsKeyHint, SettingsScrollRequest, SettingsSelectId, validate_settings,
 };
 
 pub(crate) fn benchmark_request_tree(captures: Vec<crate::capture::CapturedExchange>) -> usize {
@@ -84,9 +85,10 @@ pub struct App {
     pub log_panel: LogPanel,
     pub certificate_popup: CertificatePopup,
     pub settings_popup: SettingsPopup,
-    settings: AppSettings,
-    pending_settings_save: Option<AppSettings>,
-    settings_revision: u64,
+    settings: Arc<AppSettings>,
+    pending_settings_save: Option<Arc<AppSettings>>,
+    settings_revision: SettingsRevision,
+    settings_transaction_pending: bool,
     decode_client: Option<DecodeClient>,
     request_tree: Arc<RequestTreeModel>,
     request_tree_revision: u64,
@@ -120,7 +122,7 @@ impl App {
         log_retention: LogRetentionPolicy,
     ) -> Self {
         Self::with_policies(
-            settings,
+            Arc::new(settings),
             recording,
             log_retention,
             CaptureRetentionPolicy::default(),
@@ -129,14 +131,14 @@ impl App {
     }
 
     pub(crate) fn with_runtime_policies(
-        settings: AppSettings,
+        settings: impl Into<Arc<AppSettings>>,
         recording: RecordingState,
         log_retention: LogRetentionPolicy,
         capture_retention: CaptureRetentionPolicy,
         settings_context: SettingsUiContext,
     ) -> Self {
         Self::with_policies(
-            settings,
+            settings.into(),
             recording,
             log_retention,
             capture_retention,
@@ -145,7 +147,7 @@ impl App {
     }
 
     fn with_policies(
-        settings: AppSettings,
+        settings: Arc<AppSettings>,
         recording: RecordingState,
         log_retention: LogRetentionPolicy,
         capture_retention: CaptureRetentionPolicy,
@@ -163,7 +165,8 @@ impl App {
             settings_popup: SettingsPopup::with_context(settings_context),
             settings,
             pending_settings_save: None,
-            settings_revision: 0,
+            settings_revision: SettingsRevision::INITIAL,
+            settings_transaction_pending: false,
             decode_client: None,
             request_tree: Arc::new(RequestTreeModel::default()),
             request_tree_revision: 0,
@@ -196,16 +199,22 @@ impl App {
         self.focus.popup() == Some(popup)
     }
 
-    pub fn take_settings_save_request(&mut self) -> Option<AppSettings> {
+    pub fn take_settings_save_request(&mut self) -> Option<Arc<AppSettings>> {
         self.pending_settings_save.take()
     }
 
-    pub fn finish_settings_save(&mut self, saved: AppSettings) {
+    pub fn finish_settings_save(
+        &mut self,
+        saved: impl Into<Arc<AppSettings>>,
+        revision: SettingsRevision,
+    ) {
+        let saved = saved.into();
         self.settings_popup.mark_saved();
         self.close_popup_focus();
         self.request_list.auto_expand = saved.ui.request_list.auto_expand;
         self.settings = saved;
-        self.settings_revision = self.settings_revision.saturating_add(1);
+        self.settings_revision = revision;
+        self.settings_transaction_pending = false;
     }
 
     #[cfg(unix)]
@@ -213,13 +222,64 @@ impl App {
         AppControlSummary {
             recording_enabled: self.is_recording(),
             retained_capture_count: self.capture_count(),
-            settings_revision: self.settings_revision,
+            settings_revision: self.settings_revision.get(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings_revision(&self) -> SettingsRevision {
+        self.settings_revision
+    }
+
+    pub(crate) fn set_settings_transaction_pending(&mut self, pending: bool) {
+        self.settings_transaction_pending = pending;
+    }
+
+    pub(crate) fn settings_transaction_pending(&self) -> bool {
+        self.settings_transaction_pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_settings_transaction_commit(
+        &mut self,
+        settings: Arc<AppSettings>,
+        revision: SettingsRevision,
+    ) -> Result<(), crate::control_rpc::protocol::ControlError> {
+        self.apply_settings_transaction_commit_from_origin(
+            settings,
+            revision,
+            SettingsTransactionOrigin::Mcp,
+        )
+    }
+
+    pub(crate) fn apply_settings_transaction_commit_from_origin(
+        &mut self,
+        settings: Arc<AppSettings>,
+        revision: SettingsRevision,
+        origin: SettingsTransactionOrigin,
+    ) -> Result<(), crate::control_rpc::protocol::ControlError> {
+        if origin == SettingsTransactionOrigin::Mcp && self.settings_popup.is_dirty() {
+            return Err(crate::control_rpc::protocol::ControlError::new(
+                crate::control_rpc::protocol::ControlErrorCode::TuiDraftConflict,
+                "mapping settings conflict with an unsaved TUI draft",
+                false,
+                serde_json::json!({"current_revision": self.settings_revision}),
+            ));
+        }
+        self.settings = Arc::clone(&settings);
+        self.request_list.auto_expand = settings.ui.request_list.auto_expand;
+        self.settings_revision = revision;
+        self.settings_transaction_pending = false;
+        if self.settings_popup.visible && !self.settings_popup.is_dirty() {
+            self.settings_popup.open(settings);
+        }
+        Ok(())
     }
 
     pub fn fail_settings_save(&mut self, message: String) {
         log::error!("Failed to save settings: {message}");
         self.settings_popup.mark_save_failed(message);
+        self.settings_transaction_pending = false;
         self.focus.open_popup(PopupFocus::Settings);
     }
 

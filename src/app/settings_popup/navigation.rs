@@ -80,6 +80,49 @@ impl SettingsPopup {
         action
     }
 
+    pub fn handle_key_while_transaction_pending(&mut self, key: KeyEvent) -> SettingsPopupAction {
+        let mut action = match key.code {
+            KeyCode::Esc => self.handle_escape(),
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.focus = SettingsPaneFocus::Topics;
+                SettingsPopupAction::None
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.focus = SettingsPaneFocus::Content;
+                self.request_selected_visible();
+                SettingsPopupAction::None
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.select_next();
+                SettingsPopupAction::None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.select_previous();
+                SettingsPopupAction::None
+            }
+            KeyCode::PageDown => {
+                self.scroll.scroll_page_down();
+                SettingsPopupAction::None
+            }
+            KeyCode::PageUp => {
+                self.scroll.scroll_page_up();
+                SettingsPopupAction::None
+            }
+            _ => {
+                self.draft
+                    .set_error("settings transaction is pending; wait for it to finish");
+                SettingsPopupAction::None
+            }
+        };
+        if action == SettingsPopupAction::Close {
+            self.draft
+                .set_error("settings transaction is pending; wait for it to finish");
+            action = SettingsPopupAction::None;
+        }
+        self.bump_presentation_revision();
+        action
+    }
+
     fn handle_browse_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
         match key.code {
             KeyCode::Esc => self.handle_escape(),

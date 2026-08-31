@@ -1,6 +1,7 @@
 pub(crate) mod mapping_ops;
 
 use anyhow::Context;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs, io,
@@ -197,7 +198,7 @@ pub struct RequestListSettings {
     pub auto_expand: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxySettings {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -218,7 +219,7 @@ impl Default for ProxySettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxyPresetSettings {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -229,7 +230,7 @@ pub struct ProxyPresetSettings {
     pub map_local: ProxyMapLocalSettings,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxyMapRemoteSettings {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -253,7 +254,7 @@ impl Default for ProxyMapRemoteSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxyMapLocalSettings {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -277,7 +278,7 @@ impl Default for ProxyMapLocalSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxyMapRemoteRule {
     pub from: String,
@@ -296,7 +297,7 @@ impl Default for ProxyMapRemoteRule {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ProxyMapLocalRule {
     pub from: String,
@@ -315,7 +316,7 @@ impl Default for ProxyMapLocalRule {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConfigMode {
     DefaultOwned,
@@ -323,7 +324,7 @@ pub(crate) enum ConfigMode {
     Temporary,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PersistenceMode {
     Persistent,
@@ -419,6 +420,7 @@ impl SettingsSession {
         Arc::clone(&self.settings)
     }
 
+    #[cfg(test)]
     pub(crate) fn commit(&mut self, candidate: AppSettings) -> io::Result<PersistenceMode> {
         if self.persistence == PersistenceMode::Persistent {
             let path = self.source_path.as_deref().ok_or_else(|| {
@@ -448,6 +450,27 @@ impl SettingsSession {
         }
     }
 
+    pub(crate) fn into_runtime_parts(
+        self,
+    ) -> (
+        Arc<AppSettings>,
+        SettingsUiContext,
+        SettingsCommitter,
+        Option<DefaultConfigLease>,
+    ) {
+        let context = SettingsUiContext {
+            config_mode: self.mode,
+            persistence: self.persistence,
+        };
+        let committer = SettingsCommitter {
+            persistence: self.persistence,
+            source_path: self.source_path,
+            #[cfg(test)]
+            observer: None,
+        };
+        (self.settings, context, committer, self.default_lease)
+    }
+
     pub(crate) fn take_load_diagnostics(&mut self) -> Vec<SettingsLoadDiagnostic> {
         std::mem::take(&mut self.load_diagnostics)
     }
@@ -463,6 +486,178 @@ impl SettingsSession {
     pub(crate) fn recording_settings(&self) -> &RecordingSettings {
         &self.settings.recording
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct SettingsCommitter {
+    persistence: PersistenceMode,
+    source_path: Option<PathBuf>,
+    #[cfg(test)]
+    observer: Option<Arc<dyn SettingsCommitObserver>>,
+}
+
+#[cfg(test)]
+pub(crate) trait SettingsCommitObserver: Send + Sync {
+    fn prepare(&self) -> io::Result<()>;
+    fn prepared(&self);
+    fn rename(&self) -> io::Result<()>;
+    fn committed(&self);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SettingsCommitPhase {
+    PreCommit,
+    Committing,
+    Committed,
+}
+
+pub(crate) struct PreparedSettingsCommit {
+    phase: SettingsCommitPhase,
+    persistence: PersistenceMode,
+    settings: Arc<AppSettings>,
+    source_path: Option<PathBuf>,
+    temporary: Option<NamedTempFile>,
+    #[cfg(test)]
+    observer: Option<Arc<dyn SettingsCommitObserver>>,
+}
+
+pub(crate) struct CommittedSettings {
+    pub(crate) settings: Arc<AppSettings>,
+    pub(crate) persistence: PersistenceMode,
+    #[cfg(test)]
+    pub(crate) persisted_path: Option<PathBuf>,
+}
+
+impl SettingsCommitter {
+    #[cfg(test)]
+    pub(crate) fn persistence(&self) -> PersistenceMode {
+        self.persistence
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        persistence: PersistenceMode,
+        source_path: Option<PathBuf>,
+        observer: Arc<dyn SettingsCommitObserver>,
+    ) -> Self {
+        Self {
+            persistence,
+            source_path,
+            observer: Some(observer),
+        }
+    }
+
+    pub(crate) fn prepare(&self, settings: Arc<AppSettings>) -> io::Result<PreparedSettingsCommit> {
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.prepare()?;
+        }
+        let temporary = if self.persistence == PersistenceMode::Persistent {
+            let path = self.source_path.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "persistent settings committer has no source path",
+                )
+            })?;
+            Some(prepare_settings_temporary(path, &settings)?)
+        } else {
+            None
+        };
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.prepared();
+        }
+        Ok(PreparedSettingsCommit {
+            phase: SettingsCommitPhase::PreCommit,
+            persistence: self.persistence,
+            settings,
+            source_path: self.source_path.clone(),
+            temporary,
+            #[cfg(test)]
+            observer: self.observer.clone(),
+        })
+    }
+}
+
+impl PreparedSettingsCommit {
+    #[cfg(test)]
+    pub(crate) fn phase(&self) -> SettingsCommitPhase {
+        self.phase
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persistence(&self) -> PersistenceMode {
+        self.persistence
+    }
+
+    pub(crate) fn begin_commit(&mut self) -> io::Result<()> {
+        if self.phase != SettingsCommitPhase::PreCommit {
+            return Err(io::Error::other("settings commit has already started"));
+        }
+        self.phase = SettingsCommitPhase::Committing;
+        Ok(())
+    }
+
+    pub(crate) fn commit_to_completion(&mut self) -> io::Result<CommittedSettings> {
+        if self.phase != SettingsCommitPhase::Committing {
+            return Err(io::Error::other("settings commit has not started"));
+        }
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.rename()?;
+        }
+        if let Some(temporary) = self.temporary.take() {
+            let path = self.source_path.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "prepared persistent commit has no destination",
+                )
+            })?;
+            temporary.persist(path).map_err(|error| error.error)?;
+        }
+        self.phase = SettingsCommitPhase::Committed;
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.committed();
+        }
+        Ok(CommittedSettings {
+            settings: Arc::clone(&self.settings),
+            persistence: self.persistence,
+            #[cfg(test)]
+            persisted_path: self.source_path.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit(&mut self) -> io::Result<CommittedSettings> {
+        self.begin_commit()?;
+        self.commit_to_completion()
+    }
+}
+
+fn prepare_settings_temporary(path: &Path, settings: &AppSettings) -> io::Result<NamedTempFile> {
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(directory)?;
+    let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
+    if let Some(mut previous) = read_yaml_value(path)? {
+        let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
+        preserve_semantic_noop_entries(&mut value, &previous, settings)?;
+    }
+    let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
+    let mut temporary = NamedTempFile::new_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(content.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    Ok(temporary)
 }
 
 pub struct SettingsManager {

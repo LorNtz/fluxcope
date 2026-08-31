@@ -3,6 +3,8 @@ mod body;
 pub(crate) mod broker;
 #[cfg(unix)]
 mod capture;
+#[cfg(unix)]
+mod mapping;
 mod schema;
 mod telemetry;
 

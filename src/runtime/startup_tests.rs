@@ -4,8 +4,9 @@ use super::{
     bind_proxy_listener,
     control::{
         ControlServiceFactory, ExistingDescriptorProbe, FailingControlServiceFactory,
-        PrivateControlStartup, PrivateControlStartupError, RuntimeControlHandler, RuntimeGateway,
+        PrivateControlStartup, PrivateControlStartupError, RuntimeControlHandler,
     },
+    gateway::RuntimeGateway,
 };
 use crate::{
     control_rpc::{
@@ -89,7 +90,7 @@ fn settings() -> SettingsSession {
 
 fn runtime_handler() -> (
     RuntimeControlHandler,
-    super::control::RuntimeControlReceiver,
+    super::gateway::RuntimeControlReceiver,
 ) {
     let (client, receiver) = RuntimeGateway::channel(64);
     (RuntimeControlHandler::new(client), receiver)

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 pub(crate) use crate::settings::mapping_ops::ProxyRuleTable;
 use crate::{
     select::SelectState,
@@ -15,7 +17,7 @@ mod field_editor;
 mod navigation;
 mod proxy;
 mod validation;
-use validation::validate_settings;
+pub(crate) use validation::validate_settings;
 
 pub(crate) const PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS: usize = 6;
 
@@ -285,7 +287,7 @@ pub struct ActionDialog {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingsPopupAction {
     None,
-    Save(AppSettings),
+    Save(Arc<AppSettings>),
     Close,
 }
 
@@ -634,7 +636,7 @@ impl SettingsPopup {
         }
     }
 
-    pub fn open(&mut self, settings: AppSettings) {
+    pub fn open(&mut self, settings: impl Into<Arc<AppSettings>>) {
         self.bump_presentation_revision();
         self.visible = true;
         self.focus = SettingsPaneFocus::Topics;

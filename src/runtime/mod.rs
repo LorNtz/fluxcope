@@ -1,8 +1,10 @@
 #[cfg(unix)]
 mod control;
 mod event_loop;
+mod gateway;
 mod policy;
 mod services;
+pub(crate) mod settings;
 #[cfg(test)]
 mod startup_tests;
 
@@ -50,11 +52,12 @@ use crate::{
 #[cfg(unix)]
 use control::{
     ControlRpcDescriptorProbe, ControlServiceContext, PrivateControlStartup, RuntimeControlHandler,
-    RuntimeGateway,
 };
 use event_loop::{AppRuntime, Tui};
+use gateway::RuntimeGateway;
 use policy::RuntimePolicy;
 use services::{ServiceKind, ServiceSupervisor};
+use settings::start_settings_transaction_service;
 
 fn proxy_bind_addr(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
@@ -86,7 +89,6 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let prepared_control =
         PrivateControlStartup::prepare(mcp_enabled, &wirelens_home, identity.clone(), &settings)
             .map_err(anyhow::Error::new)?;
-    let settings_context = settings.ui_context();
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
     let certificate_store_dir = settings
@@ -125,6 +127,8 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     log_request_policy_diagnostics(&compiled_policy.diagnostics);
     let request_policy_store = RequestPolicyStore::new(compiled_policy.policy);
     let recording = RecordingState::new(settings.recording_settings().start_record_on_launch);
+    let (settings_snapshot, settings_context, settings_committer, default_config_lease) =
+        settings.into_runtime_parts();
     let (capture_tx, capture_rx) =
         mpsc::channel::<std::sync::Arc<CaptureRecord>>(policy.capture.queue_capacity);
     let capture_publisher = CapturePublisher::new(capture_tx, policy.capture.clone());
@@ -161,7 +165,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     };
 
     let mut app = App::with_runtime_policies(
-        settings_snapshot.as_ref().clone(),
+        std::sync::Arc::clone(&settings_snapshot),
         recording.clone(),
         log_retention,
         CaptureRetentionPolicy {
@@ -191,18 +195,25 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     services.track_result(ServiceKind::Decoder, decode.task);
     services.track_result(ServiceKind::RequestSearch, request_search.task);
 
+    let (runtime_client, control_rx) = RuntimeGateway::channel(64);
+    let (settings_transactions, settings_transaction_task) = start_settings_transaction_service(
+        runtime_client.clone(),
+        settings_committer,
+        shutdown.child_token(),
+    );
+    services.track_result(ServiceKind::SettingsTransactions, settings_transaction_task);
     #[cfg(unix)]
-    let (control_rx, mut running_control) = if let Some(prepared) = prepared_control {
-        let (client, receiver) = RuntimeGateway::channel(64);
+    let mut running_control = if let Some(prepared) = prepared_control {
         match prepared.start(
             RuntimeControlHandler::new(ControlServiceContext {
-                runtime: client,
+                runtime: runtime_client,
                 capture_changes,
                 body_work: std::sync::Arc::clone(&body_work),
-            }),
+            })
+            .with_settings_transactions(settings_transactions.clone()),
             shutdown.child_token(),
         ) {
-            Ok(running) => (Some(receiver), Some(running)),
+            Ok(running) => Some(running),
             Err(error) => {
                 shutdown.cancel();
                 services.shutdown(policy.render.shutdown_grace).await;
@@ -210,7 +221,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
             }
         }
     } else {
-        (None, None)
+        None
     };
 
     let proxy_listener = match proxy_listener_lease
@@ -324,15 +335,20 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         request_search.client,
         request_search.results,
         tui,
-        settings,
+        settings_snapshot,
+        settings_context,
+        settings_transactions,
+        control_rx,
         request_policy_store,
         policy.render,
         services,
         shutdown,
     );
     #[cfg(unix)]
-    let runtime = runtime.with_control(identity, control_rx, control_publisher);
-    runtime.run().await
+    let runtime = runtime.with_control(identity, control_publisher);
+    let result = runtime.run().await;
+    drop(default_config_lease);
+    result
 }
 
 struct BoundProxyListener {
@@ -520,6 +536,7 @@ fn effective_mcp_enabled(mcp_override: McpOverride, settings: &AppSettings) -> b
     }
 }
 
+#[cfg(test)]
 fn save_settings_draft(
     settings: &mut SettingsSession,
     request_policy_store: &RequestPolicyStore,

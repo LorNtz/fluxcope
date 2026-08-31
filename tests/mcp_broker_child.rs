@@ -37,7 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task14_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -78,25 +78,62 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> 
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>(),
         vec![
+            "create_mapping_rule",
+            "create_preset",
+            "delete_mapping_rule",
+            "delete_preset",
+            "explain_mapping",
             "extract_capture_body",
             "find_json_pointers",
             "get_broker_status",
             "get_capture",
+            "get_mapping_settings",
             "get_status",
             "list_instances",
+            "move_mapping_rule",
             "probe_json_pointer_pattern",
+            "rename_preset",
             "search_capture_body",
             "search_captures",
+            "set_active_preset",
+            "set_mapping_gate",
+            "set_mapping_rule_enabled",
             "set_recording_enabled",
+            "update_mapping_rule",
+            "validate_mapping_settings",
             "wait_for_capture",
         ]
     );
     for tool in &tools {
         let annotations = tool.annotations.as_ref().expect("tool annotations");
-        let expected_read_only = tool.name != "set_recording_enabled";
+        let expected_read_only = matches!(
+            tool.name.as_ref(),
+            "list_instances"
+                | "get_broker_status"
+                | "get_status"
+                | "search_captures"
+                | "get_capture"
+                | "search_capture_body"
+                | "extract_capture_body"
+                | "find_json_pointers"
+                | "probe_json_pointer_pattern"
+                | "wait_for_capture"
+                | "get_mapping_settings"
+                | "validate_mapping_settings"
+                | "explain_mapping"
+        );
         assert_eq!(annotations.read_only_hint, Some(expected_read_only));
-        assert_eq!(annotations.destructive_hint, Some(false));
-        let expected_idempotent = tool.name != "wait_for_capture";
+        let expected_destructive =
+            matches!(tool.name.as_ref(), "delete_preset" | "delete_mapping_rule");
+        assert_eq!(annotations.destructive_hint, Some(expected_destructive));
+        let expected_idempotent = expected_read_only && tool.name != "wait_for_capture"
+            || matches!(
+                tool.name.as_ref(),
+                "set_recording_enabled"
+                    | "set_active_preset"
+                    | "set_mapping_gate"
+                    | "set_mapping_rule_enabled"
+            );
         assert_eq!(annotations.idempotent_hint, Some(expected_idempotent));
         assert_eq!(annotations.open_world_hint, Some(false));
         assert_eq!(tool.input_schema.get("type"), Some(&json!("object")));
@@ -116,6 +153,115 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> 
         .expect("set_recording_enabled schema");
     assert!(set_recording.input_schema["properties"]["instance"].is_object());
     assert!(set_recording.input_schema["properties"]["enabled"].is_object());
+    for name in [
+        "get_mapping_settings",
+        "validate_mapping_settings",
+        "explain_mapping",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("mapping read schema");
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !required.contains(&json!("instance")),
+            "{name} is a snapshot read"
+        );
+        let instance = resolve_local_schema(
+            tool.input_schema.as_ref(),
+            &tool.input_schema["properties"]["instance"],
+        );
+        assert!(instance.get("required").is_none(), "{name}");
+    }
+    let validate_mapping = tools
+        .iter()
+        .find(|tool| tool.name == "validate_mapping_settings")
+        .expect("validate mapping schema");
+    assert!(
+        validate_mapping.input_schema["required"]
+            .as_array()
+            .expect("validate required fields")
+            .contains(&json!("proxy"))
+    );
+    let explain_mapping = tools
+        .iter()
+        .find(|tool| tool.name == "explain_mapping")
+        .expect("explain mapping schema");
+    assert!(
+        explain_mapping.input_schema["required"]
+            .as_array()
+            .expect("explain required fields")
+            .contains(&json!("url"))
+    );
+    for name in [
+        "create_preset",
+        "rename_preset",
+        "delete_preset",
+        "set_active_preset",
+        "set_mapping_gate",
+        "create_mapping_rule",
+        "update_mapping_rule",
+        "delete_mapping_rule",
+        "move_mapping_rule",
+        "set_mapping_rule_enabled",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("mapping mutation schema");
+        let required = tool.input_schema["required"]
+            .as_array()
+            .expect("mapping mutation required fields");
+        assert!(required.contains(&json!("instance")), "{name}");
+        assert!(
+            required.contains(&json!("expected_settings_revision")),
+            "{name}"
+        );
+        let instance = resolve_local_schema(
+            tool.input_schema.as_ref(),
+            &tool.input_schema["properties"]["instance"],
+        );
+        assert_eq!(
+            instance["required"],
+            json!(["proxy_endpoint", "run_id"]),
+            "{name}"
+        );
+    }
+    let create_preset = tools
+        .iter()
+        .find(|tool| tool.name == "create_preset")
+        .expect("create preset schema");
+    assert!(
+        !create_preset.input_schema["required"]
+            .as_array()
+            .expect("create preset required fields")
+            .contains(&json!("initial"))
+    );
+    let set_active = tools
+        .iter()
+        .find(|tool| tool.name == "set_active_preset")
+        .expect("set active schema");
+    assert!(
+        set_active.input_schema["required"]
+            .as_array()
+            .expect("set active required fields")
+            .contains(&json!("name"))
+    );
+    let create_rule = tools
+        .iter()
+        .find(|tool| tool.name == "create_mapping_rule")
+        .expect("create rule schema");
+    assert!(
+        !create_rule.input_schema["required"]
+            .as_array()
+            .expect("create rule required fields")
+            .contains(&json!("index"))
+    );
     let search = tools
         .iter()
         .find(|tool| tool.name == "search_captures")
@@ -375,6 +521,45 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task12_contract() -> 
             }
         })
     );
+
+    for (name, arguments) in [
+        (
+            "get_mapping_settings",
+            json!({
+                "instance": {
+                    "proxy_endpoint": "127.0.0.1:19899",
+                    "run_id": "AAAAAAAAAAAAAAAAAAAAAA"
+                }
+            }),
+        ),
+        (
+            "create_preset",
+            json!({
+                "instance": {
+                    "proxy_endpoint": "127.0.0.1:19899",
+                    "run_id": "AAAAAAAAAAAAAAAAAAAAAA"
+                },
+                "expected_settings_revision": 1,
+                "name": "dev"
+            }),
+        ),
+    ] {
+        let error = client
+            .call_tool(
+                CallToolRequestParams::new(name)
+                    .with_arguments(arguments.as_object().expect("mapping arguments").clone()),
+            )
+            .await
+            .expect_err("selected missing instance");
+        let ServiceError::McpError(error) = error else {
+            panic!("expected typed mapping dispatch error");
+        };
+        assert_eq!(
+            error.data.expect("typed mapping error data")["code"],
+            json!("instance_not_found"),
+            "{name}"
+        );
+    }
 
     let zero_timeout = client
         .call_tool(

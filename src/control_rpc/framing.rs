@@ -210,6 +210,41 @@ where
 
 type SerializationWorkerOutput = (Vec<u8>, OwnedSemaphorePermit, usize);
 
+pub(crate) fn encode_json_frame<T>(
+    value: &T,
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>, ControlError>
+where
+    T: Serialize,
+{
+    let mut writer = CappedFrameWriter::new(max_payload_bytes)?;
+    let serialization = serde_json::to_writer(&mut writer, value);
+    if writer.overflowed {
+        return Err(ControlError::frame_too_large(max_payload_bytes));
+    }
+    serialization.map_err(|error| ControlError::invalid_argument(error.to_string()))?;
+    writer.finish().map(|(bytes, _)| bytes)
+}
+
+pub(crate) fn ensure_json_payload_within_limit<T>(
+    value: &T,
+    max_payload_bytes: usize,
+) -> Result<(), ControlError>
+where
+    T: Serialize,
+{
+    let mut writer = CappedCountingWriter {
+        payload_bytes: 0,
+        max_payload_bytes,
+        overflowed: false,
+    };
+    let serialization = serde_json::to_writer(&mut writer, value);
+    if writer.overflowed {
+        return Err(ControlError::frame_too_large(max_payload_bytes));
+    }
+    serialization.map_err(|error| ControlError::invalid_argument(error.to_string()))
+}
+
 #[cfg(test)]
 pub(crate) async fn serialize_json_frame<T>(
     value: T,
@@ -319,6 +354,31 @@ fn finish_serialized_frame(
     })
 }
 
+struct CappedCountingWriter {
+    payload_bytes: usize,
+    max_payload_bytes: usize,
+    overflowed: bool,
+}
+
+impl Write for CappedCountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let Some(next_payload_bytes) = self.payload_bytes.checked_add(buffer.len()) else {
+            self.overflowed = true;
+            return Err(io::Error::new(io::ErrorKind::WriteZero, FrameLimitExceeded));
+        };
+        if next_payload_bytes > self.max_payload_bytes {
+            self.overflowed = true;
+            return Err(io::Error::new(io::ErrorKind::WriteZero, FrameLimitExceeded));
+        }
+        self.payload_bytes = next_payload_bytes;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 struct CappedFrameWriter {
     bytes: Vec<u8>,
     max_payload_bytes: usize,
@@ -330,7 +390,7 @@ impl CappedFrameWriter {
     fn new(max_payload_bytes: usize) -> Result<Self, ControlError> {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(4).map_err(|_| {
-            ControlError::instance_unavailable("private RPC response allocation failed")
+            ControlError::instance_unavailable("private RPC frame allocation failed")
         })?;
         bytes.extend_from_slice(&[0_u8; 4]);
         Ok(Self {
@@ -371,7 +431,7 @@ impl CappedFrameWriter {
         }
         self.bytes
             .try_reserve_exact(target.saturating_sub(self.bytes.len()))
-            .map_err(|_| io::Error::other("private RPC response allocation failed"))?;
+            .map_err(|_| io::Error::other("private RPC frame allocation failed"))?;
         self.allocation_growth_count = self.allocation_growth_count.saturating_add(1);
         Ok(())
     }

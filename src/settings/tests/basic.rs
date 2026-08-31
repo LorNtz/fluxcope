@@ -346,3 +346,83 @@ fn failed_atomic_update_preserves_file_and_memory() -> io::Result<()> {
     assert_eq!(fs::read_to_string(&path)?, previous_file);
     Ok(())
 }
+
+#[test]
+fn settings_session_splits_live_settings_from_commit_authority() {
+    let session = SettingsSession::temporary(AppSettings::default());
+    let original = session.snapshot();
+
+    let (settings, context, committer, lease) = session.into_runtime_parts();
+
+    assert!(Arc::ptr_eq(&settings, &original));
+    assert_eq!(context.config_mode, ConfigMode::Temporary);
+    assert_eq!(context.persistence, PersistenceMode::Ephemeral);
+    assert_eq!(committer.persistence(), PersistenceMode::Ephemeral);
+    assert!(lease.is_none());
+}
+
+#[test]
+fn ephemeral_prepared_commit_never_writes_and_has_explicit_phases() -> io::Result<()> {
+    let session = SettingsSession::temporary(AppSettings::default());
+    let (_settings, _context, committer, _lease) = session.into_runtime_parts();
+    let mut candidate = AppSettings::default();
+    candidate.server.port = 9191;
+
+    let mut prepared = committer.prepare(Arc::new(candidate.clone()))?;
+    assert_eq!(prepared.phase(), SettingsCommitPhase::PreCommit);
+    assert_eq!(prepared.persistence(), PersistenceMode::Ephemeral);
+
+    let committed = prepared.commit()?;
+    assert_eq!(prepared.phase(), SettingsCommitPhase::Committed);
+    assert_eq!(committed.settings.as_ref(), &candidate);
+    assert_eq!(committed.persistence, PersistenceMode::Ephemeral);
+    assert!(committed.persisted_path.is_none());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_prepare_does_not_replace_target_before_commit() -> io::Result<()> {
+    const CHILD_MARKER: &str = "WIRELENS_PREPARED_SETTINGS_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let session = SettingsSession::load(&ConfigSelection::DefaultOwned)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let path = session
+            .source_path()
+            .expect("default-owned source path")
+            .to_path_buf();
+        let original = fs::read_to_string(&path)?;
+        let (_settings, _context, committer, _lease) = session.into_runtime_parts();
+        let mut candidate = AppSettings::default();
+        candidate.server.port = 9192;
+
+        let mut prepared = committer.prepare(Arc::new(candidate))?;
+        assert_eq!(prepared.phase(), SettingsCommitPhase::PreCommit);
+        assert_eq!(fs::read_to_string(&path)?, original);
+        assert_eq!(prepared.phase(), SettingsCommitPhase::PreCommit);
+
+        prepared.commit()?;
+        assert_eq!(prepared.phase(), SettingsCommitPhase::Committed);
+        let saved: AppSettings =
+            serde_yaml::from_str(&fs::read_to_string(path)?).map_err(yaml_error)?;
+        assert_eq!(saved.server.port, 9192);
+        return Ok(());
+    }
+
+    let home = tempfile::tempdir()?;
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "settings::tests::basic::persistent_prepare_does_not_replace_target_before_commit",
+            "--nocapture",
+        ])
+        .env("HOME", home.path())
+        .env(CHILD_MARKER, "1")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "prepared settings child failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}

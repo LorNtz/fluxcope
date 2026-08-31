@@ -32,3 +32,4 @@ Task 12: fix round 1/5 implemented (six findings addressed — query-bounded str
 Task 12: fix round 2/5 implemented (design re-review PASS; capped form writer now grows geometrically rather than per JSON fragment; focused Task12 30, full 732; strict Clippy/format pass; performance re-review pending)
 Task 12: complete (commits fcb961d..5e2161b; targeted Unicode body search, exact JSON/form extraction, selection resources, strict runtime/RPC/MCP/child integration; focused Task12 30, full 732; design PASS, performance PASS, review clean)
 Task 13: complete (atomic typed mapping mutations, shared validation/explanation, TUI proxy mutation migration; focused mapping-domain 15 + mapping-engine 9, full 750; design PASS, performance PASS, review clean)
+Task 14: complete (bounded revision-safe mapping reads/mutations and shared TUI/MCP transaction service; focused Task14 47, full 805; strict Clippy/format pass; design PASS, performance PASS, review clean)

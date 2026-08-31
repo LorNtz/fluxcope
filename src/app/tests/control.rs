@@ -11,7 +11,10 @@ fn control_summary_reads_authoritative_recording_capture_and_settings_state() {
 
     assert!(summary.recording_enabled);
     assert_eq!(summary.retained_capture_count, 2);
-    assert_eq!(summary.settings_revision, 0);
+    assert_eq!(
+        summary.settings_revision,
+        crate::runtime::settings::SettingsRevision::INITIAL.get()
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 pub(crate) mod body;
 pub(crate) mod capture_query;
 pub(crate) mod json_walk;
+pub(crate) mod settings;
 
 use crate::{
     capture::{BodyStreamState, CaptureSequence, CaptureSnapshot},
@@ -110,7 +111,7 @@ pub(crate) fn normalize_wait_timeout_ms(timeout_ms: Option<u64>) -> Result<u64, 
     Ok(timeout_ms.min(MAX_WAIT_TIMEOUT_MS))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum RuntimeRequest {
     DescribeInstance,
     GetStatus,
@@ -134,6 +135,18 @@ pub(crate) enum RuntimeRequest {
         expected_revision: u64,
         side: crate::capture::BodySide,
     },
+    GetMappingSettings,
+    BeginSettingsTransaction {
+        expected_revision: Option<crate::runtime::settings::SettingsRevision>,
+        origin: crate::runtime::settings::SettingsTransactionOrigin,
+    },
+    FinalizeSettingsTransaction {
+        token: crate::runtime::settings::SettingsTransactionToken,
+        commit: Box<settings::FinalizedSettingsTransaction>,
+    },
+    AbortSettingsTransaction {
+        token: crate::runtime::settings::SettingsTransactionToken,
+    },
     #[cfg(test)]
     UnsupportedForTest,
 }
@@ -146,6 +159,10 @@ pub(crate) enum RuntimeReply {
     CaptureSnapshot(Box<CaptureSnapshotReply>),
     CaptureBodyMetadata(Box<body::CaptureBodyMetadataReply>),
     CaptureBodySnapshot(Box<body::CaptureBodySnapshotReply>),
+    MappingSettings(settings::MappingSettingsSnapshot),
+    SettingsTransactionBegun(settings::BeginSettingsTransactionReply),
+    SettingsTransactionFinalized(crate::runtime::settings::SettingsTransactionOutcome),
+    SettingsTransactionAborted,
 }
 
 #[cfg(test)]
@@ -157,7 +174,11 @@ impl RuntimeReply {
             | Self::CaptureSearchBatch(_)
             | Self::CaptureSnapshot(_)
             | Self::CaptureBodyMetadata(_)
-            | Self::CaptureBodySnapshot(_) => {
+            | Self::CaptureBodySnapshot(_)
+            | Self::MappingSettings(_)
+            | Self::SettingsTransactionBegun(_)
+            | Self::SettingsTransactionFinalized(_)
+            | Self::SettingsTransactionAborted => {
                 panic!("runtime reply does not contain an instance snapshot")
             }
         }

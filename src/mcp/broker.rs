@@ -29,7 +29,7 @@ use rmcp::{
     transport::{IntoTransport, Transport},
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -43,6 +43,7 @@ use crate::{
     },
     control_rpc::{
         client::ControlRpcClient,
+        framing::{REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, ensure_json_payload_within_limit},
         protocol::{
             ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
             RPC_VERSION,
@@ -66,6 +67,15 @@ use super::{
         SetRecordingEnabledResult, WaitForCaptureInput, WaitForCaptureResult, recording_result,
         search_result, wait_result,
     },
+    mapping::{
+        CreateMappingRuleInput, CreatePresetInput, DeleteMappingRuleInput, DeletePresetInput,
+        ExplainMappingInput, ExplainMappingResult, GetMappingSettingsInput,
+        GetMappingSettingsResult, MappingMutationOutput, MappingToolInput, MoveMappingRuleInput,
+        RenamePresetInput, SetActivePresetInput, SetMappingGateInput, SetMappingRuleEnabledInput,
+        UpdateMappingRuleInput, ValidateMappingSettingsInput, ValidateMappingSettingsResult,
+        explain_mapping_result, get_mapping_result, mapping_mutation_result,
+        validate_mapping_result,
+    },
     schema::{
         BrokerLimits, BrokerStatusResult, BrokerVersions, DiscoverySummary, GetStatusInput,
         GetStatusResult, InstanceSelector, InstanceSummary, ListInstancesResult, RegistryStatus,
@@ -76,6 +86,7 @@ use super::{
 
 const PUBLIC_CALL_LIMIT: usize = 32;
 const BLOCKING_SCAN_LIMIT: usize = 32;
+const MAPPING_CONVERSION_LIMIT: usize = 2;
 const LIVENESS_PROBE_LIMIT: usize = 16;
 const AMBIGUOUS_INSTANCE_LIMIT: usize = 16;
 const ORDINARY_DEADLINE: Duration = Duration::from_secs(30);
@@ -363,6 +374,7 @@ pub(crate) struct Broker {
     call_admission: Arc<Semaphore>,
     probe_admission: Arc<Semaphore>,
     scan_admission: Arc<Semaphore>,
+    mapping_conversion_admission: Arc<Semaphore>,
     telemetry: Arc<BrokerTelemetry>,
 }
 
@@ -432,6 +444,7 @@ impl Broker {
             call_admission: Arc::new(Semaphore::new(PUBLIC_CALL_LIMIT)),
             probe_admission: Arc::new(Semaphore::new(LIVENESS_PROBE_LIMIT)),
             scan_admission: Arc::new(Semaphore::new(BLOCKING_SCAN_LIMIT)),
+            mapping_conversion_admission: Arc::new(Semaphore::new(MAPPING_CONVERSION_LIMIT)),
             telemetry: Arc::new(BrokerTelemetry::default()),
         }
     }
@@ -907,6 +920,202 @@ impl Broker {
             )
             .await?;
         recording_result(result)
+    }
+    async fn mapping_call(
+        &self,
+        instance: InstanceSelector,
+        operation: ControlOperation,
+        requirement: SelectorRequirement,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        let resolved = self
+            .resolve_with_client(
+                instance,
+                requirement,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        self.probe
+            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .await
+    }
+
+    async fn run_mapping_worker<T, F>(
+        &self,
+        deadline: Instant,
+        cancelled: CancellationToken,
+        work: F,
+    ) -> Result<T, ControlError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, ControlError> + Send + 'static,
+    {
+        let admission = Arc::clone(&self.mapping_conversion_admission);
+        let permit = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                return Err(ControlError::cancelled("mapping conversion was cancelled"));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(ControlError::deadline_exceeded(
+                    "mapping conversion deadline elapsed",
+                ));
+            }
+            permit = admission.acquire_owned() => permit.map_err(|_| {
+                ControlError::service_unavailable("mapping conversion admission is closed")
+            })?,
+        };
+        let worker = tokio::task::spawn_blocking(move || (permit, work()));
+        tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => {
+                Err(ControlError::cancelled("mapping conversion was cancelled"))
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                Err(ControlError::deadline_exceeded(
+                    "mapping conversion deadline elapsed",
+                ))
+            }
+            result = worker => {
+                let (_permit, result) = result.map_err(|_| {
+                    ControlError::internal("mapping conversion worker failed")
+                })?;
+                result
+            }
+        }
+    }
+
+    async fn prepare_mapping_operation<I, F>(
+        &self,
+        input: I,
+        deadline: Instant,
+        cancelled: CancellationToken,
+        prepare: F,
+    ) -> Result<(InstanceSelector, ControlOperation), ControlError>
+    where
+        I: Serialize + Send + 'static,
+        F: FnOnce(I) -> (InstanceSelector, ControlOperation) + Send + 'static,
+    {
+        self.run_mapping_worker(deadline, cancelled, move || {
+            ensure_json_payload_within_limit(&input, REQUEST_MAX_BYTES)?;
+            Ok(prepare(input))
+        })
+        .await
+    }
+
+    async fn mapping_mutation_impl<T>(
+        &self,
+        input: T,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<MappingMutationOutput, ControlError>
+    where
+        T: MappingToolInput + Serialize + Send + 'static,
+    {
+        let (instance, operation) = self
+            .prepare_mapping_operation(input, deadline, cancelled.clone(), |input| {
+                let instance = input.instance().clone().selector();
+                let operation = input.into_operation();
+                (instance, operation)
+            })
+            .await?;
+        let result = self
+            .mapping_call(
+                instance,
+                operation,
+                SelectorRequirement::Mutation,
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        mapping_mutation_result(result)
+    }
+
+    async fn get_mapping_settings_impl(
+        &self,
+        input: GetMappingSettingsInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<GetMappingSettingsResult, ControlError> {
+        let instance = input.instance.clone();
+        let operation = input.into_operation();
+        let result = self
+            .mapping_call(
+                instance,
+                operation,
+                SelectorRequirement::SnapshotRead,
+                client,
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        self.run_mapping_worker(deadline, cancelled, move || {
+            let result = get_mapping_result(result)?;
+            ensure_json_payload_within_limit(&result, RESPONSE_MAX_BYTES)?;
+            Ok(result)
+        })
+        .await
+    }
+
+    async fn validate_mapping_settings_impl(
+        &self,
+        input: ValidateMappingSettingsInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ValidateMappingSettingsResult, ControlError> {
+        let (instance, operation) = self
+            .prepare_mapping_operation(input, deadline, cancelled.clone(), |input| {
+                let instance = input.instance.clone();
+                let operation = input.into_operation();
+                (instance, operation)
+            })
+            .await?;
+        let result = self
+            .mapping_call(
+                instance,
+                operation,
+                SelectorRequirement::SnapshotRead,
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        validate_mapping_result(result)
+    }
+
+    async fn explain_mapping_impl(
+        &self,
+        input: ExplainMappingInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ExplainMappingResult, ControlError> {
+        let (instance, operation) = self
+            .prepare_mapping_operation(input, deadline, cancelled.clone(), |input| {
+                let instance = input.instance.clone();
+                let operation = input.into_operation();
+                (instance, operation)
+            })
+            .await?;
+        let result = self
+            .mapping_call(
+                instance,
+                operation,
+                SelectorRequirement::SnapshotRead,
+                client,
+                deadline,
+                cancelled,
+            )
+            .await?;
+        explain_mapping_result(result)
     }
 
     pub(crate) async fn search_captures_impl(
@@ -1504,6 +1713,370 @@ impl Broker {
     }
 
     #[tool(
+        name = "get_mapping_settings",
+        description = "Get revisioned proxy mapping settings",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_mapping_settings(
+        &self,
+        Parameters(input): Parameters<GetMappingSettingsInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<GetMappingSettingsResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.get_mapping_settings_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "validate_mapping_settings",
+        description = "Validate complete proposed proxy mapping settings without mutation",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn validate_mapping_settings(
+        &self,
+        Parameters(input): Parameters<ValidateMappingSettingsInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<ValidateMappingSettingsResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.validate_mapping_settings_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "explain_mapping",
+        description = "Explain a current or proposed proxy mapping decision without traffic or file reads",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn explain_mapping(
+        &self,
+        Parameters(input): Parameters<ExplainMappingInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<ExplainMappingResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.explain_mapping_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "create_preset",
+        description = "Create a mapping preset without activating it",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_preset(
+        &self,
+        Parameters(input): Parameters<CreatePresetInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "rename_preset",
+        description = "Rename a mapping preset",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn rename_preset(
+        &self,
+        Parameters(input): Parameters<RenamePresetInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "delete_preset",
+        description = "Delete a mapping preset",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_preset(
+        &self,
+        Parameters(input): Parameters<DeletePresetInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "set_active_preset",
+        description = "Explicitly set or clear the active mapping preset",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_active_preset(
+        &self,
+        Parameters(input): Parameters<SetActivePresetInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "set_mapping_gate",
+        description = "Explicitly enable or disable a mapping gate",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_mapping_gate(
+        &self,
+        Parameters(input): Parameters<SetMappingGateInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "create_mapping_rule",
+        description = "Create a remote or local mapping rule",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_mapping_rule(
+        &self,
+        Parameters(input): Parameters<CreateMappingRuleInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "update_mapping_rule",
+        description = "Update a mapping rule source and target",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn update_mapping_rule(
+        &self,
+        Parameters(input): Parameters<UpdateMappingRuleInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "delete_mapping_rule",
+        description = "Delete a mapping rule",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_mapping_rule(
+        &self,
+        Parameters(input): Parameters<DeleteMappingRuleInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "move_mapping_rule",
+        description = "Move a mapping rule to a final post-move index",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn move_mapping_rule(
+        &self,
+        Parameters(input): Parameters<MoveMappingRuleInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "set_mapping_rule_enabled",
+        description = "Explicitly enable or disable one mapping rule",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_mapping_rule_enabled(
+        &self,
+        Parameters(input): Parameters<SetMappingRuleEnabledInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<MappingMutationOutput>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.mapping_mutation_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
         name = "search_captures",
         description = "Search retained capture metadata newest-first with a stable sequence cursor",
         annotations(
@@ -1961,6 +2534,7 @@ mod tests {
         },
         object,
     };
+    use serde_json::json;
     use tokio::time::Instant;
     use tokio::{
         io::duplex,
@@ -1981,7 +2555,10 @@ mod tests {
         },
         instance::RunId,
         instance_registry::{DiscoveryDiagnostic, InstanceDescriptor, RegistryScan},
-        mcp::{capture::SearchCapturesInput, schema::InstanceSelector},
+        mcp::{
+            capture::SearchCapturesInput, mapping::ValidateMappingSettingsInput,
+            schema::InstanceSelector,
+        },
         settings::{ConfigMode, PersistenceMode},
     };
 
@@ -1991,7 +2568,7 @@ mod tests {
 
     #[derive(Clone)]
     enum ProbePlan {
-        Live(ControlResult),
+        Live(Box<ControlResult>),
         Unavailable,
         StaleConnect,
     }
@@ -2018,10 +2595,10 @@ mod tests {
                 .map(|descriptor| {
                     (
                         descriptor.proxy_endpoint(),
-                        ProbePlan::Live(describe(
+                        ProbePlan::Live(Box::new(describe(
                             descriptor,
                             descriptor.proxy_endpoint().port() as usize,
-                        )),
+                        ))),
                     )
                 })
                 .collect();
@@ -2118,7 +2695,7 @@ mod tests {
                         .get(&descriptor.proxy_endpoint())
                         .cloned()
                     {
-                        Some(ProbePlan::Live(result)) => Ok(result),
+                        Some(ProbePlan::Live(result)) => Ok(*result),
                         Some(ProbePlan::StaleConnect) => {
                             Err(connect_failure(io::Error::from(io::ErrorKind::NotFound)))
                         }
@@ -3437,6 +4014,57 @@ mod tests {
                 server.await.expect("server task");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn task14_oversized_public_mapping_is_rejected_before_instance_resolution() {
+        let registry = FakeRegistry::new(Vec::new());
+        let broker = broker(Arc::clone(&registry), FakeProbe::live(&[]));
+        let rules = (0..10_000)
+            .map(|index| {
+                json!({
+                    "from": format!("https://source-{index}.example.com/{}", "x".repeat(40)),
+                    "to": format!("https://target-{index}.example.com/{}", "y".repeat(40)),
+                    "enabled": true
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = serde_json::from_value::<ValidateMappingSettingsInput>(json!({
+            "proxy": {
+                "enabled": true,
+                "active_preset": "large",
+                "presets": [{
+                    "name": "large",
+                    "map_remote": {
+                        "enabled": true,
+                        "rules": rules
+                    },
+                    "map_local": {
+                        "enabled": true,
+                        "rules": []
+                    }
+                }]
+            }
+        }))
+        .expect("large public mapping input");
+
+        let error = broker
+            .validate_mapping_settings_impl(
+                input,
+                client(),
+                Instant::now() + Duration::from_secs(5),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("oversized public mapping must fail before resolution");
+
+        assert_eq!(error.code(), ControlErrorCode::RpcFrameTooLarge);
+        assert_eq!(registry.scan_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.endpoint_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            broker.mapping_conversion_admission.available_permits(),
+            super::MAPPING_CONVERSION_LIMIT
+        );
     }
 
     mod task10_tests;

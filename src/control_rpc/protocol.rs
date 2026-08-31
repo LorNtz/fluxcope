@@ -14,14 +14,26 @@ use crate::{
         },
     },
     instance::RunId,
-    settings::{ConfigMode, PersistenceMode},
+    runtime::settings::{SettingsRevision, SettingsTransactionOutcome},
+    settings::{
+        AppSettings, ConfigMode, PersistenceMode, ProxyMapLocalRule, ProxyMapLocalSettings,
+        ProxyMapRemoteRule, ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
+        mapping_ops::{
+            MappingExplanation, MappingMutation, MappingObjectRef, MappingValidationResult,
+            ProxyRuleTable,
+        },
+    },
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
+};
 use serde_json::{Value, value::RawValue};
 use std::{
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::OwnedSemaphorePermit;
 
 pub(crate) const RPC_VERSION: u16 = 1;
 const MAX_IDENTIFIER_BYTES: usize = 128;
@@ -50,6 +62,10 @@ pub(crate) enum ControlOperationKind {
     ReadSelectedBody,
     FindJsonPointers,
     ProbeJsonPointerPattern,
+    GetMappingSettings,
+    ValidateMappingSettings,
+    ExplainMapping,
+    MutateMapping,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -64,7 +80,7 @@ pub(crate) struct RequestEnvelope {
     pub(crate) arguments: Box<RawValue>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ControlRequest {
     pub(crate) request_id: String,
     pub(crate) run_id: RunId,
@@ -73,7 +89,7 @@ pub(crate) struct ControlRequest {
     pub(crate) operation: ControlOperation,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ControlOperation {
     DescribeInstance,
     GetStatus,
@@ -96,6 +112,18 @@ pub(crate) enum ControlOperation {
     ReadSelectedBody(Box<SelectionContentRequest>),
     FindJsonPointers(Box<FindJsonPointersRequest>),
     ProbeJsonPointerPattern(Box<ProbeJsonPointerPatternRequest>),
+    GetMappingSettings,
+    ValidateMappingSettings {
+        proxy: Box<ProxySettings>,
+    },
+    ExplainMapping {
+        url: String,
+        proposed_proxy: Option<Box<ProxySettings>>,
+    },
+    MutateMapping {
+        expected_revision: SettingsRevision,
+        mutation: Box<MappingMutation>,
+    },
 }
 
 impl ControlOperation {
@@ -113,6 +141,111 @@ impl ControlOperation {
             Self::ReadSelectedBody(_) => ControlOperationKind::ReadSelectedBody,
             Self::FindJsonPointers(_) => ControlOperationKind::FindJsonPointers,
             Self::ProbeJsonPointerPattern(_) => ControlOperationKind::ProbeJsonPointerPattern,
+            Self::GetMappingSettings => ControlOperationKind::GetMappingSettings,
+            Self::ValidateMappingSettings { .. } => ControlOperationKind::ValidateMappingSettings,
+            Self::ExplainMapping { .. } => ControlOperationKind::ExplainMapping,
+            Self::MutateMapping { .. } => ControlOperationKind::MutateMapping,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct OutboundRequestEnvelope<'a> {
+    protocol_version: u16,
+    request_id: &'a str,
+    run_id: &'a RunId,
+    deadline_ms: u64,
+    client: &'a DeclaredClient,
+    operation: ControlOperationKind,
+    arguments: ControlOperationArguments<'a>,
+}
+
+impl<'a> OutboundRequestEnvelope<'a> {
+    pub(crate) fn new(
+        request_id: &'a str,
+        run_id: &'a RunId,
+        deadline_ms: u64,
+        client: &'a DeclaredClient,
+        operation: &'a ControlOperation,
+    ) -> Self {
+        Self {
+            protocol_version: RPC_VERSION,
+            request_id,
+            run_id,
+            deadline_ms,
+            client,
+            operation: operation.kind(),
+            arguments: ControlOperationArguments(operation),
+        }
+    }
+}
+
+struct ControlOperationArguments<'a>(&'a ControlOperation);
+
+impl Serialize for ControlOperationArguments<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            ControlOperation::DescribeInstance
+            | ControlOperation::GetStatus
+            | ControlOperation::GetMappingSettings => serializer.serialize_map(Some(0))?.end(),
+            ControlOperation::SetRecordingEnabled { enabled } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("enabled", enabled)?;
+                map.end()
+            }
+            ControlOperation::SearchCaptures {
+                query,
+                cursor,
+                limit,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("query", query)?;
+                map.serialize_entry("cursor", cursor)?;
+                map.serialize_entry("limit", limit)?;
+                map.end()
+            }
+            ControlOperation::GetCapture {
+                capture_id,
+                expected_revision,
+            } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("capture_id", capture_id)?;
+                map.serialize_entry("expected_revision", expected_revision)?;
+                map.end()
+            }
+            ControlOperation::WaitForCapture(request) => request.serialize(serializer),
+            ControlOperation::ReadCaptureBody(request) => request.serialize(serializer),
+            ControlOperation::SearchCaptureBody(request) => request.serialize(serializer),
+            ControlOperation::ExtractCaptureBody(request) => request.serialize(serializer),
+            ControlOperation::ReadSelectedBody(request) => request.serialize(serializer),
+            ControlOperation::FindJsonPointers(request) => request.serialize(serializer),
+            ControlOperation::ProbeJsonPointerPattern(request) => request.serialize(serializer),
+            ControlOperation::ValidateMappingSettings { proxy } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("proxy", proxy)?;
+                map.end()
+            }
+            ControlOperation::ExplainMapping {
+                url,
+                proposed_proxy,
+            } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("url", url)?;
+                map.serialize_entry("proposed_proxy", proposed_proxy)?;
+                map.end()
+            }
+            ControlOperation::MutateMapping {
+                expected_revision,
+                mutation,
+            } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("expected_revision", expected_revision)?;
+                map.serialize_entry("mutation", mutation)?;
+                map.end()
+            }
         }
     }
 }
@@ -149,6 +282,476 @@ struct GetCaptureArguments {
     expected_revision: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GetMappingSettingsArguments {}
+
+fn mapping_default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StrictMappingRule {
+    from: String,
+    to: String,
+    #[serde(default = "mapping_default_enabled")]
+    enable: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StrictMappingRuleTable {
+    #[serde(default = "mapping_default_enabled")]
+    enable: bool,
+    rules: Vec<StrictMappingRule>,
+}
+
+impl Default for StrictMappingRuleTable {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StrictProxyPresetSettings {
+    name: String,
+    map_remote: StrictMappingRuleTable,
+    map_local: StrictMappingRuleTable,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StrictProxySettings {
+    #[serde(default = "mapping_default_enabled")]
+    enable: bool,
+    active_preset: Option<String>,
+    presets: Vec<StrictProxyPresetSettings>,
+}
+
+impl Default for StrictProxySettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            active_preset: None,
+            presets: Vec::new(),
+        }
+    }
+}
+
+impl From<ProxyMapRemoteRule> for StrictMappingRule {
+    fn from(rule: ProxyMapRemoteRule) -> Self {
+        Self {
+            from: rule.from,
+            to: rule.to,
+            enable: rule.enable,
+        }
+    }
+}
+
+impl From<ProxyMapLocalRule> for StrictMappingRule {
+    fn from(rule: ProxyMapLocalRule) -> Self {
+        Self {
+            from: rule.from,
+            to: rule.to,
+            enable: rule.enable,
+        }
+    }
+}
+
+impl From<StrictMappingRule> for ProxyMapRemoteRule {
+    fn from(rule: StrictMappingRule) -> Self {
+        Self {
+            from: rule.from,
+            to: rule.to,
+            enable: rule.enable,
+        }
+    }
+}
+
+impl From<StrictMappingRule> for ProxyMapLocalRule {
+    fn from(rule: StrictMappingRule) -> Self {
+        Self {
+            from: rule.from,
+            to: rule.to,
+            enable: rule.enable,
+        }
+    }
+}
+
+impl From<ProxyPresetSettings> for StrictProxyPresetSettings {
+    fn from(preset: ProxyPresetSettings) -> Self {
+        Self {
+            name: preset.name,
+            map_remote: StrictMappingRuleTable {
+                enable: preset.map_remote.enable,
+                rules: preset
+                    .map_remote
+                    .rules
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            },
+            map_local: StrictMappingRuleTable {
+                enable: preset.map_local.enable,
+                rules: preset.map_local.rules.into_iter().map(Into::into).collect(),
+            },
+        }
+    }
+}
+
+impl From<StrictProxyPresetSettings> for ProxyPresetSettings {
+    fn from(preset: StrictProxyPresetSettings) -> Self {
+        Self {
+            name: preset.name,
+            map_remote: ProxyMapRemoteSettings {
+                enable: preset.map_remote.enable,
+                rules: preset
+                    .map_remote
+                    .rules
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            },
+            map_local: ProxyMapLocalSettings {
+                enable: preset.map_local.enable,
+                rules: preset.map_local.rules.into_iter().map(Into::into).collect(),
+            },
+        }
+    }
+}
+
+impl From<ProxySettings> for StrictProxySettings {
+    fn from(proxy: ProxySettings) -> Self {
+        Self {
+            enable: proxy.enable,
+            active_preset: proxy.active_preset,
+            presets: proxy.presets.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<StrictProxySettings> for ProxySettings {
+    fn from(proxy: StrictProxySettings) -> Self {
+        Self {
+            enable: proxy.enable,
+            active_preset: proxy.active_preset,
+            presets: proxy.presets.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictMappingMutation {
+    CreatePreset {
+        name: String,
+        #[serde(default)]
+        initial: Option<StrictProxyPresetSettings>,
+    },
+    RenamePreset {
+        name: String,
+        new_name: String,
+    },
+    DeletePreset {
+        name: String,
+    },
+    SetActivePreset {
+        name: Option<String>,
+    },
+    SetGlobalEnabled {
+        enabled: bool,
+    },
+    SetTableEnabled {
+        preset: String,
+        table: ProxyRuleTable,
+        enabled: bool,
+    },
+    AppendRemoteRule {
+        preset: String,
+        rule: StrictMappingRule,
+    },
+    InsertRemoteRule {
+        preset: String,
+        index: usize,
+        rule: StrictMappingRule,
+    },
+    UpdateRemoteRule {
+        preset: String,
+        index: usize,
+        from: String,
+        to: String,
+    },
+    AppendLocalRule {
+        preset: String,
+        rule: StrictMappingRule,
+    },
+    InsertLocalRule {
+        preset: String,
+        index: usize,
+        rule: StrictMappingRule,
+    },
+    UpdateLocalRule {
+        preset: String,
+        index: usize,
+        from: String,
+        to: String,
+    },
+    DeleteRule {
+        preset: String,
+        table: ProxyRuleTable,
+        index: usize,
+    },
+    MoveRule {
+        preset: String,
+        table: ProxyRuleTable,
+        from: usize,
+        to: usize,
+    },
+    SetRuleEnabled {
+        preset: String,
+        table: ProxyRuleTable,
+        index: usize,
+        enabled: bool,
+    },
+}
+impl From<MappingMutation> for StrictMappingMutation {
+    fn from(mutation: MappingMutation) -> Self {
+        match mutation {
+            MappingMutation::CreatePreset { name, initial } => Self::CreatePreset {
+                name,
+                initial: initial.map(Into::into),
+            },
+            MappingMutation::RenamePreset { name, new_name } => {
+                Self::RenamePreset { name, new_name }
+            }
+            MappingMutation::DeletePreset { name } => Self::DeletePreset { name },
+            MappingMutation::SetActivePreset { name } => Self::SetActivePreset { name },
+            MappingMutation::SetGlobalEnabled { enabled } => Self::SetGlobalEnabled { enabled },
+            MappingMutation::SetTableEnabled {
+                preset,
+                table,
+                enabled,
+            } => Self::SetTableEnabled {
+                preset,
+                table,
+                enabled,
+            },
+            MappingMutation::AppendRemoteRule { preset, rule } => Self::AppendRemoteRule {
+                preset,
+                rule: rule.into(),
+            },
+            MappingMutation::InsertRemoteRule {
+                preset,
+                index,
+                rule,
+            } => Self::InsertRemoteRule {
+                preset,
+                index,
+                rule: rule.into(),
+            },
+            MappingMutation::UpdateRemoteRule {
+                preset,
+                index,
+                from,
+                to,
+            } => Self::UpdateRemoteRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+            MappingMutation::AppendLocalRule { preset, rule } => Self::AppendLocalRule {
+                preset,
+                rule: rule.into(),
+            },
+            MappingMutation::InsertLocalRule {
+                preset,
+                index,
+                rule,
+            } => Self::InsertLocalRule {
+                preset,
+                index,
+                rule: rule.into(),
+            },
+            MappingMutation::UpdateLocalRule {
+                preset,
+                index,
+                from,
+                to,
+            } => Self::UpdateLocalRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+            MappingMutation::DeleteRule {
+                preset,
+                table,
+                index,
+            } => Self::DeleteRule {
+                preset,
+                table,
+                index,
+            },
+            MappingMutation::MoveRule {
+                preset,
+                table,
+                from,
+                to,
+            } => Self::MoveRule {
+                preset,
+                table,
+                from,
+                to,
+            },
+            MappingMutation::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                enabled,
+            } => Self::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                enabled,
+            },
+        }
+    }
+}
+
+impl From<StrictMappingMutation> for MappingMutation {
+    fn from(mutation: StrictMappingMutation) -> Self {
+        match mutation {
+            StrictMappingMutation::CreatePreset { name, initial } => Self::CreatePreset {
+                name,
+                initial: initial.map(Into::into),
+            },
+            StrictMappingMutation::RenamePreset { name, new_name } => {
+                Self::RenamePreset { name, new_name }
+            }
+            StrictMappingMutation::DeletePreset { name } => Self::DeletePreset { name },
+            StrictMappingMutation::SetActivePreset { name } => Self::SetActivePreset { name },
+            StrictMappingMutation::SetGlobalEnabled { enabled } => {
+                Self::SetGlobalEnabled { enabled }
+            }
+            StrictMappingMutation::SetTableEnabled {
+                preset,
+                table,
+                enabled,
+            } => Self::SetTableEnabled {
+                preset,
+                table,
+                enabled,
+            },
+            StrictMappingMutation::AppendRemoteRule { preset, rule } => Self::AppendRemoteRule {
+                preset,
+                rule: rule.into(),
+            },
+            StrictMappingMutation::InsertRemoteRule {
+                preset,
+                index,
+                rule,
+            } => Self::InsertRemoteRule {
+                preset,
+                index,
+                rule: rule.into(),
+            },
+            StrictMappingMutation::UpdateRemoteRule {
+                preset,
+                index,
+                from,
+                to,
+            } => Self::UpdateRemoteRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+            StrictMappingMutation::AppendLocalRule { preset, rule } => Self::AppendLocalRule {
+                preset,
+                rule: rule.into(),
+            },
+            StrictMappingMutation::InsertLocalRule {
+                preset,
+                index,
+                rule,
+            } => Self::InsertLocalRule {
+                preset,
+                index,
+                rule: rule.into(),
+            },
+            StrictMappingMutation::UpdateLocalRule {
+                preset,
+                index,
+                from,
+                to,
+            } => Self::UpdateLocalRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+            StrictMappingMutation::DeleteRule {
+                preset,
+                table,
+                index,
+            } => Self::DeleteRule {
+                preset,
+                table,
+                index,
+            },
+            StrictMappingMutation::MoveRule {
+                preset,
+                table,
+                from,
+                to,
+            } => Self::MoveRule {
+                preset,
+                table,
+                from,
+                to,
+            },
+            StrictMappingMutation::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                enabled,
+            } => Self::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                enabled,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ValidateMappingSettingsArguments {
+    proxy: StrictProxySettings,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExplainMappingArguments {
+    url: String,
+    #[serde(default)]
+    proposed_proxy: Option<StrictProxySettings>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MutateMappingArguments {
+    expected_revision: SettingsRevision,
+    mutation: StrictMappingMutation,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InstanceScope {
@@ -156,7 +759,77 @@ pub(crate) struct InstanceScope {
     pub(crate) run_id: RunId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug)]
+pub(crate) struct MappingSettingsPayload {
+    settings: Arc<AppSettings>,
+    _worker_permit: Option<Arc<OwnedSemaphorePermit>>,
+}
+
+impl MappingSettingsPayload {
+    pub(crate) fn from_snapshot(
+        settings: Arc<AppSettings>,
+        worker_permit: Arc<OwnedSemaphorePermit>,
+    ) -> Self {
+        Self {
+            settings,
+            _worker_permit: Some(worker_permit),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_proxy(proxy: ProxySettings) -> Self {
+        Self {
+            settings: Arc::new(AppSettings {
+                proxy: Some(proxy),
+                ..AppSettings::default()
+            }),
+            _worker_permit: None,
+        }
+    }
+
+    pub(crate) fn into_proxy(self) -> ProxySettings {
+        Arc::try_unwrap(self.settings)
+            .unwrap_or_else(|settings| settings.as_ref().clone())
+            .proxy
+            .unwrap_or_default()
+    }
+}
+
+impl PartialEq for MappingSettingsPayload {
+    fn eq(&self, other: &Self) -> bool {
+        self.settings.proxy == other.settings.proxy
+    }
+}
+
+impl Serialize for MappingSettingsPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.settings.proxy.as_ref() {
+            Some(proxy) => proxy.serialize(serializer),
+            None => ProxySettings::default().serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MappingSettingsPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let proxy = ProxySettings::deserialize(deserializer)?;
+        Ok(Self {
+            settings: Arc::new(AppSettings {
+                proxy: Some(proxy),
+                ..AppSettings::default()
+            }),
+            _worker_permit: None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ControlResult {
     DescribeInstance {
@@ -222,6 +895,35 @@ pub(crate) enum ControlResult {
         #[serde(flatten)]
         result: Box<ProbeJsonPointerPatternResult>,
     },
+    GetMappingSettings {
+        instance: InstanceScope,
+        settings_revision: SettingsRevision,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        proxy: MappingSettingsPayload,
+    },
+    ValidateMappingSettings {
+        instance: InstanceScope,
+        settings_revision: SettingsRevision,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        validation: Box<MappingValidationResult>,
+    },
+    ExplainMapping {
+        instance: InstanceScope,
+        settings_revision: SettingsRevision,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        explanation: Box<MappingExplanation>,
+    },
+    MutateMapping {
+        instance: InstanceScope,
+        settings_revision: SettingsRevision,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        outcome: SettingsTransactionOutcome,
+        affected: MappingObjectRef,
+    },
 }
 
 impl ControlResult {
@@ -238,7 +940,11 @@ impl ControlResult {
             | Self::ExtractCaptureBody { instance, .. }
             | Self::ReadSelectedBody { instance, .. }
             | Self::FindJsonPointers { instance, .. }
-            | Self::ProbeJsonPointerPattern { instance, .. } => instance,
+            | Self::ProbeJsonPointerPattern { instance, .. }
+            | Self::GetMappingSettings { instance, .. }
+            | Self::ValidateMappingSettings { instance, .. }
+            | Self::ExplainMapping { instance, .. }
+            | Self::MutateMapping { instance, .. } => instance,
         }
     }
 
@@ -256,6 +962,10 @@ impl ControlResult {
             Self::ReadSelectedBody { .. } => ControlOperationKind::ReadSelectedBody,
             Self::FindJsonPointers { .. } => ControlOperationKind::FindJsonPointers,
             Self::ProbeJsonPointerPattern { .. } => ControlOperationKind::ProbeJsonPointerPattern,
+            Self::GetMappingSettings { .. } => ControlOperationKind::GetMappingSettings,
+            Self::ValidateMappingSettings { .. } => ControlOperationKind::ValidateMappingSettings,
+            Self::ExplainMapping { .. } => ControlOperationKind::ExplainMapping,
+            Self::MutateMapping { .. } => ControlOperationKind::MutateMapping,
         }
     }
 }
@@ -274,6 +984,9 @@ pub(crate) enum ControlErrorCode {
     ResourceLimit,
     CaptureNotFound,
     CaptureRevisionConflict,
+    SettingsRevisionConflict,
+    MappingValidationFailed,
+    TuiDraftConflict,
     ServiceUnavailable,
     UnsupportedBodyEncoding,
     DeadlineExceeded,
@@ -318,6 +1031,9 @@ impl ControlErrorCode {
             Self::CaptureNotFound => "capture_not_found",
             Self::CaptureRevisionConflict => "capture_revision_conflict",
             Self::ServiceUnavailable => "service_unavailable",
+            Self::SettingsRevisionConflict => "settings_revision_conflict",
+            Self::MappingValidationFailed => "mapping_validation_failed",
+            Self::TuiDraftConflict => "tui_draft_conflict",
             Self::UnsupportedBodyEncoding => "unsupported_body_encoding",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
@@ -468,6 +1184,7 @@ pub(crate) struct ResponseEnvelope {
 }
 
 impl RequestEnvelope {
+    #[cfg(test)]
     pub(crate) fn new(
         request_id: String,
         run_id: RunId,
@@ -475,70 +1192,8 @@ impl RequestEnvelope {
         client: DeclaredClient,
         operation: ControlOperation,
     ) -> Result<Self, ControlError> {
-        let (operation, arguments) = match operation {
-            ControlOperation::DescribeInstance => (
-                ControlOperationKind::DescribeInstance,
-                serialize_arguments(&DescribeInstanceArguments {})?,
-            ),
-            ControlOperation::GetStatus => (
-                ControlOperationKind::GetStatus,
-                serialize_arguments(&GetStatusArguments {})?,
-            ),
-            ControlOperation::SetRecordingEnabled { enabled } => (
-                ControlOperationKind::SetRecordingEnabled,
-                serialize_arguments(&SetRecordingEnabledArguments { enabled })?,
-            ),
-            ControlOperation::SearchCaptures {
-                query,
-                cursor,
-                limit,
-            } => (
-                ControlOperationKind::SearchCaptures,
-                serialize_arguments(&SearchCapturesArguments {
-                    query: *query,
-                    cursor,
-                    limit,
-                })?,
-            ),
-            ControlOperation::GetCapture {
-                capture_id,
-                expected_revision,
-            } => (
-                ControlOperationKind::GetCapture,
-                serialize_arguments(&GetCaptureArguments {
-                    capture_id,
-                    expected_revision,
-                })?,
-            ),
-            ControlOperation::WaitForCapture(request) => (
-                ControlOperationKind::WaitForCapture,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::ReadCaptureBody(request) => (
-                ControlOperationKind::ReadCaptureBody,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::SearchCaptureBody(request) => (
-                ControlOperationKind::SearchCaptureBody,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::ExtractCaptureBody(request) => (
-                ControlOperationKind::ExtractCaptureBody,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::ReadSelectedBody(request) => (
-                ControlOperationKind::ReadSelectedBody,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::FindJsonPointers(request) => (
-                ControlOperationKind::FindJsonPointers,
-                serialize_arguments(&*request)?,
-            ),
-            ControlOperation::ProbeJsonPointerPattern(request) => (
-                ControlOperationKind::ProbeJsonPointerPattern,
-                serialize_arguments(&*request)?,
-            ),
-        };
+        let arguments = serialize_arguments(&ControlOperationArguments(&operation))?;
+        let operation = operation.kind();
         Ok(Self {
             protocol_version: RPC_VERSION,
             request_id,
@@ -563,7 +1218,11 @@ impl RequestEnvelope {
             | ControlOperationKind::ExtractCaptureBody
             | ControlOperationKind::ReadSelectedBody
             | ControlOperationKind::FindJsonPointers
-            | ControlOperationKind::ProbeJsonPointerPattern => ORDINARY_MAX_DEADLINE,
+            | ControlOperationKind::ProbeJsonPointerPattern
+            | ControlOperationKind::GetMappingSettings
+            | ControlOperationKind::ValidateMappingSettings
+            | ControlOperationKind::ExplainMapping
+            | ControlOperationKind::MutateMapping => ORDINARY_MAX_DEADLINE,
         };
         received_at + Duration::from_millis(self.deadline_ms).min(maximum)
     }
@@ -649,6 +1308,31 @@ impl RequestEnvelope {
                 let request = parse_arguments::<ProbeJsonPointerPatternRequest>(&self.arguments)?;
                 request.validate()?;
                 ControlOperation::ProbeJsonPointerPattern(Box::new(request))
+            }
+            ControlOperationKind::GetMappingSettings => {
+                parse_arguments::<GetMappingSettingsArguments>(&self.arguments)?;
+                ControlOperation::GetMappingSettings
+            }
+            ControlOperationKind::ValidateMappingSettings => {
+                let arguments =
+                    parse_arguments::<ValidateMappingSettingsArguments>(&self.arguments)?;
+                ControlOperation::ValidateMappingSettings {
+                    proxy: Box::new(arguments.proxy.into()),
+                }
+            }
+            ControlOperationKind::ExplainMapping => {
+                let arguments = parse_arguments::<ExplainMappingArguments>(&self.arguments)?;
+                ControlOperation::ExplainMapping {
+                    url: arguments.url,
+                    proposed_proxy: arguments.proposed_proxy.map(|proxy| Box::new(proxy.into())),
+                }
+            }
+            ControlOperationKind::MutateMapping => {
+                let arguments = parse_arguments::<MutateMappingArguments>(&self.arguments)?;
+                ControlOperation::MutateMapping {
+                    expected_revision: arguments.expected_revision,
+                    mutation: Box::new(arguments.mutation.into()),
+                }
             }
         };
         let deadline = self.clamped_deadline(received_at);
@@ -774,6 +1458,7 @@ where
     Ok(value)
 }
 
+#[cfg(test)]
 fn serialize_arguments<T>(arguments: &T) -> Result<Box<RawValue>, ControlError>
 where
     T: Serialize,
@@ -812,3 +1497,5 @@ mod task9_tests;
 mod task10_tests;
 #[cfg(test)]
 mod task12_tests;
+#[cfg(test)]
+mod task14_tests;

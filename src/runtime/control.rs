@@ -12,11 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::gateway::RuntimeControlClient;
+#[cfg(test)]
+pub(super) use super::gateway::{RuntimeControlReceiver, RuntimeGateway};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use tokio::{
     net::UnixListener,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::{JoinHandle, JoinSet},
     time,
 };
@@ -56,96 +59,15 @@ use crate::{
         client::ControlRpcClient,
         protocol::{
             ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
-            InstanceScope,
+            InstanceScope, MappingSettingsPayload,
         },
         server::{ControlCallContext, ControlRpcHandler, ControlRpcServer},
     },
     instance::{InstanceIdentity, RunId},
     instance_registry::{InstanceDescriptor, RegistryPublisher, RegistryScanner},
+    runtime::settings::SettingsTransactionClient,
     settings::SettingsSession,
 };
-
-pub(super) struct RuntimeCommand {
-    pub(super) request: RuntimeRequest,
-    pub(super) cancelled: CancellationToken,
-    pub(super) reply: oneshot::Sender<Result<RuntimeReply, ControlError>>,
-}
-
-#[derive(Clone)]
-pub(super) struct RuntimeControlClient {
-    commands: mpsc::Sender<RuntimeCommand>,
-}
-
-pub(super) struct RuntimeControlReceiver {
-    commands: mpsc::Receiver<RuntimeCommand>,
-}
-
-pub(super) struct RuntimeGateway;
-
-impl RuntimeGateway {
-    pub(super) fn channel(capacity: usize) -> (RuntimeControlClient, RuntimeControlReceiver) {
-        let (commands, receiver) = mpsc::channel(capacity);
-        (
-            RuntimeControlClient { commands },
-            RuntimeControlReceiver { commands: receiver },
-        )
-    }
-}
-
-impl RuntimeControlClient {
-    pub(super) async fn request(
-        &self,
-        request: RuntimeRequest,
-        cancelled: CancellationToken,
-    ) -> Result<RuntimeReply, ControlError> {
-        let permit = tokio::select! {
-            permit = self.commands.reserve() => permit.map_err(|_| {
-                ControlError::instance_unavailable("runtime command gateway is closed")
-            })?,
-            _ = cancelled.cancelled() => {
-                return Err(ControlError::instance_unavailable(
-                    "runtime command was cancelled before admission",
-                ));
-            }
-        };
-        let (reply, response) = oneshot::channel();
-        permit.send(RuntimeCommand {
-            request,
-            cancelled: cancelled.clone(),
-            reply,
-        });
-        tokio::select! {
-            result = response => result.unwrap_or_else(|_| {
-                Err(ControlError::instance_unavailable(
-                    "runtime stopped before replying",
-                ))
-            }),
-            _ = cancelled.cancelled() => Err(ControlError::instance_unavailable(
-                "runtime command was cancelled",
-            )),
-        }
-    }
-}
-
-impl RuntimeControlReceiver {
-    pub(super) async fn recv(&mut self) -> Option<RuntimeCommand> {
-        self.commands.recv().await
-    }
-
-    pub(super) fn try_recv(
-        &mut self,
-    ) -> std::result::Result<RuntimeCommand, mpsc::error::TryRecvError> {
-        self.commands.try_recv()
-    }
-
-    pub(super) fn close(&mut self) {
-        self.commands.close();
-    }
-    #[cfg(test)]
-    pub(super) fn is_closed(&self) -> bool {
-        self.commands.is_closed()
-    }
-}
 
 pub(super) struct CaptureSearchAdmission {
     permits: Arc<Semaphore>,
@@ -1722,6 +1644,7 @@ impl From<RuntimeControlClient> for ControlServiceContext {
 #[derive(Clone)]
 pub(super) struct RuntimeControlHandler {
     runtime: RuntimeControlClient,
+    settings_transactions: Option<SettingsTransactionClient>,
     capture_changes: CaptureChangeFeed,
     capture_searches: Arc<CaptureSearchAdmission>,
     capture_details: Arc<DetailMaterializationAdmission>,
@@ -1738,11 +1661,20 @@ impl RuntimeControlHandler {
         );
         Self {
             runtime: context.runtime,
+            settings_transactions: None,
             capture_changes: context.capture_changes,
             capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
             capture_details: Arc::new(DetailMaterializationAdmission::new(4)),
             body_jobs,
         }
+    }
+
+    pub(super) fn with_settings_transactions(
+        mut self,
+        settings_transactions: SettingsTransactionClient,
+    ) -> Self {
+        self.settings_transactions = Some(settings_transactions);
+        self
     }
 
     async fn instance_snapshot(
@@ -2043,6 +1975,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
         let capture_details = Arc::clone(&self.capture_details);
         let capture_changes = self.capture_changes.clone();
         let body_jobs = self.body_jobs.clone();
+        let settings_transactions = self.settings_transactions.clone();
         async move {
             match operation {
                 ControlOperation::DescribeInstance => {
@@ -2175,6 +2108,97 @@ impl ControlRpcHandler for RuntimeControlHandler {
                     body_jobs
                         .probe_json_pointer_pattern(*request, _context.deadline, cancelled)
                         .await
+                }
+                ControlOperation::GetMappingSettings => {
+                    let client = settings_transactions.as_ref().ok_or_else(|| {
+                        ControlError::service_unavailable(
+                            "settings transaction service is unavailable",
+                        )
+                    })?;
+                    let identity = Self::instance_snapshot(&runtime, &cancelled)
+                        .await?
+                        .instance;
+                    let result = client.get_mapping_settings(cancelled).await?;
+                    Ok(ControlResult::GetMappingSettings {
+                        instance: identity,
+                        settings_revision: result.revision,
+                        config_mode: result.config_mode,
+                        persistence: result.persistence,
+                        proxy: MappingSettingsPayload::from_snapshot(
+                            result.settings,
+                            result.worker_permit,
+                        ),
+                    })
+                }
+                ControlOperation::ValidateMappingSettings { proxy } => {
+                    let client = settings_transactions.as_ref().ok_or_else(|| {
+                        ControlError::service_unavailable(
+                            "settings transaction service is unavailable",
+                        )
+                    })?;
+                    let identity = Self::instance_snapshot(&runtime, &cancelled)
+                        .await?
+                        .instance;
+                    let result = client.validate_mapping_settings(*proxy, cancelled).await?;
+                    Ok(ControlResult::ValidateMappingSettings {
+                        instance: identity,
+                        settings_revision: result.revision,
+                        config_mode: result.config_mode,
+                        persistence: result.persistence,
+                        validation: Box::new(result.validation),
+                    })
+                }
+                ControlOperation::ExplainMapping {
+                    url,
+                    proposed_proxy,
+                } => {
+                    let client = settings_transactions.as_ref().ok_or_else(|| {
+                        ControlError::service_unavailable(
+                            "settings transaction service is unavailable",
+                        )
+                    })?;
+                    let identity = Self::instance_snapshot(&runtime, &cancelled)
+                        .await?
+                        .instance;
+                    let result = client
+                        .explain_mapping(url, proposed_proxy.map(|proxy| *proxy), cancelled)
+                        .await?;
+                    Ok(ControlResult::ExplainMapping {
+                        instance: identity,
+                        settings_revision: result.revision,
+                        config_mode: result.config_mode,
+                        persistence: result.persistence,
+                        explanation: Box::new(result.explanation),
+                    })
+                }
+                ControlOperation::MutateMapping {
+                    expected_revision,
+                    mutation,
+                } => {
+                    let client = settings_transactions.as_ref().ok_or_else(|| {
+                        ControlError::service_unavailable(
+                            "settings transaction service is unavailable",
+                        )
+                    })?;
+                    let identity = Self::instance_snapshot(&runtime, &cancelled)
+                        .await?
+                        .instance;
+                    let result = client
+                        .mutate_mapping(
+                            *mutation,
+                            expected_revision,
+                            crate::runtime::settings::SettingsTransactionOrigin::Mcp,
+                            cancelled,
+                        )
+                        .await?;
+                    Ok(ControlResult::MutateMapping {
+                        instance: identity,
+                        settings_revision: result.revision,
+                        config_mode: result.config_mode,
+                        persistence: result.persistence,
+                        outcome: result.outcome,
+                        affected: result.affected,
+                    })
                 }
                 ControlOperation::WaitForCapture(request) => {
                     Self::wait_for_capture(

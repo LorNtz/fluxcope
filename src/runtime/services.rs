@@ -11,6 +11,13 @@ pub(super) enum ServiceKind {
     BodyPumps,
     Decoder,
     RequestSearch,
+    SettingsTransactions,
+}
+
+impl ServiceKind {
+    pub(super) const fn is_fatal(self) -> bool {
+        !matches!(self, Self::CertificateDownload | Self::Logger)
+    }
 }
 
 #[derive(Debug)]

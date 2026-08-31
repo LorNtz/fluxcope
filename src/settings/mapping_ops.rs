@@ -1,16 +1,21 @@
 use crate::{
     mapping::{
         DiagnosticSeverity, MappingDiagnostic, MappingDiagnosticCode, MappingEngine, MappingField,
-        MappingRuleLocation, MappingTable, validate_proxy_settings, validate_rule_values,
+        MappingRuleLocation, MappingTable, validate_proxy_settings_capped, validate_rule_values,
     },
     settings::{
         AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings, ProxySettings,
     },
 };
 use http::Uri;
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{error::Error, fmt, path::PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) const MAX_MAPPING_DIAGNOSTICS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ProxyRuleTable {
     Remote,
     Local,
@@ -34,7 +39,8 @@ impl From<MappingTable> for ProxyRuleTable {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MappingRuleField {
     From,
     To,
@@ -49,7 +55,8 @@ impl From<MappingField> for MappingRuleField {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum MappingMutation {
     #[allow(dead_code, reason = "consumed by Task 14 MCP preset creation")]
     CreatePreset {
@@ -126,13 +133,15 @@ pub(crate) enum MappingMutation {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MutationEffect {
     Changed,
     Unchanged,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum MappingObjectRef {
     Proxy,
     ActivePreset,
@@ -159,7 +168,7 @@ pub(crate) enum MappingObjectRef {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub(crate) struct MappingMutationResult {
     pub affected: MappingObjectRef,
     pub effect: MutationEffect,
@@ -189,7 +198,7 @@ impl fmt::Display for MappingMutationError {
 
 impl Error for MappingMutationError {}
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub(crate) struct MappingGateState {
     pub proxy_present: bool,
     pub global_enabled: bool,
@@ -198,16 +207,18 @@ pub(crate) struct MappingGateState {
     pub local_enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub(crate) struct MappingPresetRef {
     pub name: String,
     pub index: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 pub(crate) struct MappingValidationResult {
     pub gates: MappingGateState,
     pub diagnostics: Vec<MappingDiagnostic>,
+    pub diagnostics_total: usize,
+    pub diagnostics_omitted: usize,
 }
 
 #[cfg(test)]
@@ -220,7 +231,7 @@ impl MappingValidationResult {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[allow(dead_code, reason = "consumed by Task 14 mapping explanation RPC")]
 pub(crate) struct MappingRuleMatch {
     pub preset: String,
@@ -229,15 +240,46 @@ pub(crate) struct MappingRuleMatch {
     pub index: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[allow(dead_code, reason = "consumed by Task 14 mapping explanation RPC")]
 pub(crate) struct MappingExplanation {
+    #[schemars(with = "Option<String>")]
+    #[serde(
+        serialize_with = "serialize_optional_uri",
+        deserialize_with = "deserialize_optional_uri"
+    )]
     pub original_url: Option<Uri>,
+    #[schemars(with = "Option<String>")]
+    #[serde(
+        serialize_with = "serialize_optional_uri",
+        deserialize_with = "deserialize_optional_uri"
+    )]
     pub effective_url: Option<Uri>,
     pub local_path: Option<PathBuf>,
     pub matches: Vec<MappingRuleMatch>,
     pub gates: MappingGateState,
     pub diagnostics: Vec<MappingDiagnostic>,
+    pub diagnostics_total: usize,
+    pub diagnostics_omitted: usize,
+}
+
+fn serialize_optional_uri<S>(value: &Option<Uri>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .as_ref()
+        .map(ToString::to_string)
+        .serialize(serializer)
+}
+
+fn deserialize_optional_uri<'de, D>(deserializer: D) -> Result<Option<Uri>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| value.parse().map_err(D::Error::custom))
+        .transpose()
 }
 
 pub(crate) fn apply_mapping_mutation(
@@ -245,20 +287,36 @@ pub(crate) fn apply_mapping_mutation(
     mutation: MappingMutation,
 ) -> Result<MappingMutationResult, MappingMutationError> {
     let mut candidate = settings.clone();
-    let affected = apply_to_candidate(&mut candidate, mutation)?;
-    let effect = if candidate == *settings {
-        MutationEffect::Unchanged
-    } else {
+    let result = apply_to_candidate(&mut candidate, mutation)?;
+    if result.effect == MutationEffect::Changed {
         *settings = candidate;
-        MutationEffect::Changed
-    };
-    Ok(MappingMutationResult { affected, effect })
+    }
+    Ok(result)
+}
+
+pub(crate) fn apply_mapping_mutation_owned(
+    mut settings: AppSettings,
+    mutation: MappingMutation,
+) -> Result<(AppSettings, MappingMutationResult), MappingMutationError> {
+    let result = apply_to_candidate(&mut settings, mutation)?;
+    Ok((settings, result))
+}
+
+fn mutation_result(affected: MappingObjectRef, changed: bool) -> MappingMutationResult {
+    MappingMutationResult {
+        affected,
+        effect: if changed {
+            MutationEffect::Changed
+        } else {
+            MutationEffect::Unchanged
+        },
+    }
 }
 
 fn apply_to_candidate(
     settings: &mut AppSettings,
     mutation: MappingMutation,
-) -> Result<MappingObjectRef, MappingMutationError> {
+) -> Result<MappingMutationResult, MappingMutationError> {
     match mutation {
         MappingMutation::CreatePreset { name, initial } => {
             let name = normalized_name(&name)?;
@@ -277,7 +335,7 @@ fn apply_to_candidate(
                 .get_or_insert_with(ProxySettings::default)
                 .presets
                 .push(preset);
-            Ok(MappingObjectRef::Preset { name })
+            Ok(mutation_result(MappingObjectRef::Preset { name }, true))
         }
         MappingMutation::RenamePreset { name, new_name } => {
             let name = normalized_name(&name)?;
@@ -291,11 +349,18 @@ fn apply_to_candidate(
             {
                 return Err(duplicate_name_error(new_name));
             }
+            let active_matches =
+                proxy.active_preset.as_deref().map(str::trim) == Some(name.as_str());
+            let changed = proxy.presets[index].name != new_name
+                || (active_matches && proxy.active_preset.as_deref() != Some(new_name.as_str()));
             proxy.presets[index].name.clone_from(&new_name);
-            if proxy.active_preset.as_deref().map(str::trim) == Some(name.as_str()) {
+            if active_matches {
                 proxy.active_preset = Some(new_name.clone());
             }
-            Ok(MappingObjectRef::PresetName { name: new_name })
+            Ok(mutation_result(
+                MappingObjectRef::PresetName { name: new_name },
+                changed,
+            ))
         }
         MappingMutation::DeletePreset { name } => {
             let name = normalized_name(&name)?;
@@ -305,12 +370,12 @@ fn apply_to_candidate(
             if proxy.active_preset.as_deref().map(str::trim) == Some(name.as_str()) {
                 proxy.active_preset = None;
             }
-            Ok(MappingObjectRef::Preset { name })
+            Ok(mutation_result(MappingObjectRef::Preset { name }, true))
         }
         MappingMutation::SetActivePreset { name } => {
             let location = MappingObjectRef::ActivePreset;
             let proxy = require_proxy(settings, location.clone())?;
-            proxy.active_preset = match name {
+            let next = match name {
                 Some(name) => {
                     let name = normalized_name(&name)?;
                     require_preset_index(proxy, &name)?;
@@ -318,12 +383,16 @@ fn apply_to_candidate(
                 }
                 None => None,
             };
-            Ok(location)
+            let changed = proxy.active_preset != next;
+            proxy.active_preset = next;
+            Ok(mutation_result(location, changed))
         }
         MappingMutation::SetGlobalEnabled { enabled } => {
             let location = MappingObjectRef::Proxy;
-            require_proxy(settings, location.clone())?.enable = enabled;
-            Ok(location)
+            let proxy = require_proxy(settings, location.clone())?;
+            let changed = proxy.enable != enabled;
+            proxy.enable = enabled;
+            Ok(mutation_result(location, changed))
         }
         MappingMutation::SetTableEnabled {
             preset,
@@ -339,28 +408,43 @@ fn apply_to_candidate(
                 },
             )?;
             let index = require_preset_index(proxy, &preset)?;
-            match table {
-                ProxyRuleTable::Remote => proxy.presets[index].map_remote.enable = enabled,
-                ProxyRuleTable::Local => proxy.presets[index].map_local.enable = enabled,
-            }
-            Ok(MappingObjectRef::Table { preset, table })
+            let changed = match table {
+                ProxyRuleTable::Remote => {
+                    let changed = proxy.presets[index].map_remote.enable != enabled;
+                    proxy.presets[index].map_remote.enable = enabled;
+                    changed
+                }
+                ProxyRuleTable::Local => {
+                    let changed = proxy.presets[index].map_local.enable != enabled;
+                    proxy.presets[index].map_local.enable = enabled;
+                    changed
+                }
+            };
+            Ok(mutation_result(
+                MappingObjectRef::Table { preset, table },
+                changed,
+            ))
         }
         MappingMutation::AppendRemoteRule { preset, rule } => {
             insert_remote_rule(settings, preset, None, rule)
+                .map(|affected| mutation_result(affected, true))
         }
         MappingMutation::InsertRemoteRule {
             preset,
             index,
             rule,
-        } => insert_remote_rule(settings, preset, Some(index), rule),
+        } => insert_remote_rule(settings, preset, Some(index), rule)
+            .map(|affected| mutation_result(affected, true)),
         MappingMutation::AppendLocalRule { preset, rule } => {
             insert_local_rule(settings, preset, None, rule)
+                .map(|affected| mutation_result(affected, true))
         }
         MappingMutation::InsertLocalRule {
             preset,
             index,
             rule,
-        } => insert_local_rule(settings, preset, Some(index), rule),
+        } => insert_local_rule(settings, preset, Some(index), rule)
+            .map(|affected| mutation_result(affected, true)),
         MappingMutation::UpdateRemoteRule {
             preset,
             index,
@@ -377,7 +461,8 @@ fn apply_to_candidate(
             preset,
             table,
             index,
-        } => delete_rule(settings, preset, table, index),
+        } => delete_rule(settings, preset, table, index)
+            .map(|affected| mutation_result(affected, true)),
         MappingMutation::MoveRule {
             preset,
             table,
@@ -441,7 +526,7 @@ fn update_remote_rule(
     index: usize,
     from: String,
     to: String,
-) -> Result<MappingObjectRef, MappingMutationError> {
+) -> Result<MappingMutationResult, MappingMutationError> {
     let preset = normalized_name(&preset)?;
     validate_rule_fields(&preset, ProxyRuleTable::Remote, index, &from, &to)?;
     let proxy = require_proxy(settings, rule_ref(&preset, ProxyRuleTable::Remote, index))?;
@@ -451,9 +536,13 @@ fn update_remote_rule(
         .rules
         .get_mut(index)
         .ok_or_else(|| rule_not_found(&preset, ProxyRuleTable::Remote, index))?;
+    let changed = rule.from != from || rule.to != to;
     rule.from = from;
     rule.to = to;
-    Ok(rule_ref(&preset, ProxyRuleTable::Remote, index))
+    Ok(mutation_result(
+        rule_ref(&preset, ProxyRuleTable::Remote, index),
+        changed,
+    ))
 }
 
 fn update_local_rule(
@@ -462,7 +551,7 @@ fn update_local_rule(
     index: usize,
     from: String,
     to: String,
-) -> Result<MappingObjectRef, MappingMutationError> {
+) -> Result<MappingMutationResult, MappingMutationError> {
     let preset = normalized_name(&preset)?;
     validate_rule_fields(&preset, ProxyRuleTable::Local, index, &from, &to)?;
     let proxy = require_proxy(settings, rule_ref(&preset, ProxyRuleTable::Local, index))?;
@@ -472,9 +561,13 @@ fn update_local_rule(
         .rules
         .get_mut(index)
         .ok_or_else(|| rule_not_found(&preset, ProxyRuleTable::Local, index))?;
+    let changed = rule.from != from || rule.to != to;
     rule.from = from;
     rule.to = to;
-    Ok(rule_ref(&preset, ProxyRuleTable::Local, index))
+    Ok(mutation_result(
+        rule_ref(&preset, ProxyRuleTable::Local, index),
+        changed,
+    ))
 }
 
 fn delete_rule(
@@ -509,7 +602,7 @@ fn move_rule(
     table: ProxyRuleTable,
     from: usize,
     to: usize,
-) -> Result<MappingObjectRef, MappingMutationError> {
+) -> Result<MappingMutationResult, MappingMutationError> {
     let preset = normalized_name(&preset)?;
     let proxy = require_proxy(settings, rule_ref(&preset, table, from))?;
     let preset_index = require_preset_index(proxy, &preset)?;
@@ -529,7 +622,7 @@ fn move_rule(
             to,
         )?,
     }
-    Ok(rule_ref(&preset, table, to))
+    Ok(mutation_result(rule_ref(&preset, table, to), from != to))
 }
 
 fn move_item<T>(
@@ -558,29 +651,33 @@ fn set_rule_enabled(
     table: ProxyRuleTable,
     index: usize,
     enabled: bool,
-) -> Result<MappingObjectRef, MappingMutationError> {
+) -> Result<MappingMutationResult, MappingMutationError> {
     let preset = normalized_name(&preset)?;
     let proxy = require_proxy(settings, rule_ref(&preset, table, index))?;
     let preset_index = require_preset_index(proxy, &preset)?;
-    match table {
+    let changed = match table {
         ProxyRuleTable::Remote => {
-            proxy.presets[preset_index]
+            let rule = proxy.presets[preset_index]
                 .map_remote
                 .rules
                 .get_mut(index)
-                .ok_or_else(|| rule_not_found(&preset, table, index))?
-                .enable = enabled;
+                .ok_or_else(|| rule_not_found(&preset, table, index))?;
+            let changed = rule.enable != enabled;
+            rule.enable = enabled;
+            changed
         }
         ProxyRuleTable::Local => {
-            proxy.presets[preset_index]
+            let rule = proxy.presets[preset_index]
                 .map_local
                 .rules
                 .get_mut(index)
-                .ok_or_else(|| rule_not_found(&preset, table, index))?
-                .enable = enabled;
+                .ok_or_else(|| rule_not_found(&preset, table, index))?;
+            let changed = rule.enable != enabled;
+            rule.enable = enabled;
+            changed
         }
-    }
-    Ok(rule_ref(&preset, table, index))
+    };
+    Ok(mutation_result(rule_ref(&preset, table, index), changed))
 }
 
 fn normalized_name(name: &str) -> Result<String, MappingMutationError> {
@@ -686,7 +783,11 @@ fn validate_initial_preset(preset: &ProxyPresetSettings) -> Result<(), MappingMu
         presets: vec![preset.clone()],
         ..ProxySettings::default()
     };
-    if let Some(diagnostic) = validate_proxy_settings(&proxy).into_iter().next() {
+    if let Some(diagnostic) = validate_proxy_settings_capped(&proxy, 1)
+        .0
+        .into_iter()
+        .next()
+    {
         let location = diagnostic.location.map_or_else(
             || MappingObjectRef::PresetName {
                 name: preset.name.clone(),
@@ -708,9 +809,15 @@ fn validate_initial_preset(preset: &ProxyPresetSettings) -> Result<(), MappingMu
 }
 
 pub(crate) fn validate_mapping_candidate(proxy: Option<&ProxySettings>) -> MappingValidationResult {
+    let (diagnostics, diagnostics_total) = proxy.map_or_else(
+        || (Vec::new(), 0),
+        |proxy| validate_proxy_settings_capped(proxy, MAX_MAPPING_DIAGNOSTICS),
+    );
     MappingValidationResult {
         gates: mapping_gates(proxy),
-        diagnostics: proxy.map_or_else(Vec::new, validate_proxy_settings),
+        diagnostics,
+        diagnostics_total,
+        diagnostics_omitted: diagnostics_total.saturating_sub(MAX_MAPPING_DIAGNOSTICS),
     }
 }
 
@@ -721,16 +828,20 @@ pub(crate) fn explain_mapping_candidate(
 ) -> MappingExplanation {
     let validation = validate_mapping_candidate(proxy);
     let mut diagnostics = validation.diagnostics;
+    let mut diagnostics_total = validation.diagnostics_total;
     let parsed = url.parse::<Uri>().ok().filter(|uri| {
         matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
     });
     let Some(uri) = parsed else {
-        diagnostics.push(MappingDiagnostic {
-            severity: DiagnosticSeverity::Error,
-            code: MappingDiagnosticCode::InvalidRequestUrl,
-            location: None,
-            message: "request URL must be an absolute http or https URL".to_string(),
-        });
+        diagnostics_total = diagnostics_total.saturating_add(1);
+        if diagnostics.len() < MAX_MAPPING_DIAGNOSTICS {
+            diagnostics.push(MappingDiagnostic {
+                severity: DiagnosticSeverity::Error,
+                code: MappingDiagnosticCode::InvalidRequestUrl,
+                location: None,
+                message: "request URL must be an absolute http or https URL".to_string(),
+            });
+        }
         return MappingExplanation {
             original_url: None,
             effective_url: None,
@@ -738,6 +849,8 @@ pub(crate) fn explain_mapping_candidate(
             matches: Vec::new(),
             gates: validation.gates,
             diagnostics,
+            diagnostics_total,
+            diagnostics_omitted: diagnostics_total.saturating_sub(MAX_MAPPING_DIAGNOSTICS),
         };
     };
 
@@ -758,6 +871,8 @@ pub(crate) fn explain_mapping_candidate(
         matches,
         gates: validation.gates,
         diagnostics,
+        diagnostics_total,
+        diagnostics_omitted: diagnostics_total.saturating_sub(MAX_MAPPING_DIAGNOSTICS),
     }
 }
 
