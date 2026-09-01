@@ -798,7 +798,7 @@ async fn a_blocked_real_header_matcher_does_not_block_an_unrelated_runtime_statu
 
     let (identity, _, _) = runtime_fixture(1);
     let expected_run_id = identity.run_id().clone();
-    let status_reply = RuntimeReply::Instance(InstanceRuntimeSnapshot {
+    let status_reply = RuntimeReply::Instance(Box::new(InstanceRuntimeSnapshot {
         instance: InstanceScope {
             proxy_endpoint: identity.proxy_endpoint(),
             run_id: expected_run_id.clone(),
@@ -808,7 +808,10 @@ async fn a_blocked_real_header_matcher_does_not_block_an_unrelated_runtime_statu
         recording_enabled: false,
         retained_capture_count: 0,
         settings_revision: 0,
-    });
+        mapping: Default::default(),
+        capture_store: Default::default(),
+        metrics: Default::default(),
+    }));
     let (client, mut receiver) = RuntimeGateway::channel(1);
     let status = tokio::spawn(async move {
         client
@@ -843,14 +846,17 @@ async fn real_search_handler_admits_only_four_calls_and_cancels_the_fifth_before
         proxy_endpoint: identity.proxy_endpoint(),
         run_id: identity.run_id().clone(),
     };
-    let status = RuntimeReply::Instance(InstanceRuntimeSnapshot {
+    let status = RuntimeReply::Instance(Box::new(InstanceRuntimeSnapshot {
         instance: scope,
         config_mode: ConfigMode::Temporary,
         persistence: PersistenceMode::Ephemeral,
         recording_enabled: false,
         retained_capture_count: 0,
         settings_revision: 0,
-    });
+        mapping: Default::default(),
+        capture_store: Default::default(),
+        metrics: Default::default(),
+    }));
     let (client, mut receiver) = RuntimeGateway::channel(32);
     let handler = RuntimeControlHandler::new(client);
     let mut calls = Vec::new();

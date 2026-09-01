@@ -450,12 +450,24 @@ fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
 #[test]
 fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
     let status = ControlResult::GetStatus {
+        local_proxy_url: format!("http://{ENDPOINT}"),
+        wirelens_version: "0.1.0-test".to_owned(),
+        rpc_version: 1,
+        config_source: None,
         instance: instance_scope(),
         config_mode: ConfigMode::Temporary,
         persistence: PersistenceMode::Ephemeral,
         recording_enabled: true,
         retained_capture_count: 4,
         settings_revision: 9,
+        mapping: Default::default(),
+        capture_store: Default::default(),
+        capture_change_epoch: 0,
+        metrics: Default::default(),
+        private_rpc: Default::default(),
+        body_work: Default::default(),
+        search_work: Default::default(),
+        audit: Default::default(),
     };
     let recording = ControlResult::SetRecordingEnabled {
         instance: instance_scope(),
@@ -473,10 +485,72 @@ fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
         json!({
             "operation": "get_status",
             "instance": scope_value(ENDPOINT, RUN_ID),
+            "local_proxy_url": format!("http://{ENDPOINT}"),
+            "wirelens_version": "0.1.0-test",
+            "rpc_version": 1,
+            "config_source": null,
             "config_mode": "temporary",
             "persistence": "ephemeral",
             "recording_enabled": true,
             "retained_capture_count": 4,
+            "mapping": {
+                "configured": false,
+                "enabled": false,
+                "active_preset": null,
+                "map_remote_enabled": null,
+                "map_local_enabled": null
+            },
+            "capture_store": {
+                "revision": 0,
+                "retained_bytes": 0,
+                "maximum_retained_bytes": 0,
+                "maximum_retained_records": 0
+            },
+            "capture_change_epoch": 0,
+            "metrics": {
+                "capture": {
+                    "exchanges_not_admitted": 0,
+                    "memory_pressure": 0,
+                    "previews_per_body_limited": 0,
+                    "previews_memory_limited": 0,
+                    "metadata_truncated": 0
+                },
+                "decode": {
+                    "rejected": 0,
+                    "superseded": 0,
+                    "output_limited": 0,
+                    "failed": 0
+                },
+                "logging": {
+                    "producer_dropped": 0,
+                    "tui_dropped": 0,
+                    "records_truncated": 0
+                }
+            },
+            "private_rpc": {
+                "active": 0,
+                "maximum_active": 0
+            },
+            "body_work": {
+                "active": 0,
+                "queued": 0,
+                "queued_bytes": 0,
+                "maximum_active": 0,
+                "maximum_queued": 0,
+                "maximum_queued_bytes": 0,
+                "rejected": 0
+            },
+            "search_work": {
+                "capture_searches_active": 0,
+                "maximum_capture_searches": 0,
+                "detail_materializations_active": 0,
+                "maximum_detail_materializations": 0
+            },
+            "audit": {
+                "reads": [],
+                "mutations": [],
+                "response_delivery_failures": 0
+            },
             "settings_revision": 9
         })
     );

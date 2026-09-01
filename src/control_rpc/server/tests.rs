@@ -1,6 +1,6 @@
 use super::{
-    ControlCallContext, ControlRpcHandler, ControlRpcServer, validate_peer_identity,
-    validate_peer_uid,
+    ControlCallAudit, ControlCallContext, ControlCallOutcome, ControlRpcHandler, ControlRpcServer,
+    ResponseEnvelope, mutation_audit, validate_peer_identity, validate_peer_uid,
 };
 use crate::{
     control_rpc::{
@@ -14,13 +14,17 @@ use crate::{
         test_support::{OTHER_RUN_ID, endpoint, read_payload, request_json, write_payload},
     },
     instance::InstanceIdentity,
-    settings::{ConfigMode, PersistenceMode},
+    runtime::settings::SettingsRevision,
+    settings::{
+        ConfigMode, PersistenceMode,
+        mapping_ops::{MappingMutation, MappingObjectRef, ProxyRuleTable},
+    },
 };
 use serde_json::Value;
 use std::{
     future::Future,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -40,6 +44,9 @@ enum HandlerMode {
         started: Arc<Notify>,
         observed: Arc<Notify>,
     },
+    CompleteAfterCancellation {
+        started: Arc<Notify>,
+    },
     Hold {
         started: mpsc::Sender<()>,
         release: watch::Receiver<bool>,
@@ -51,6 +58,7 @@ enum HandlerMode {
 struct TestHandler {
     scope: InstanceScope,
     calls: Arc<AtomicUsize>,
+    audits: Arc<Mutex<Vec<ControlCallAudit>>>,
     mode: HandlerMode,
 }
 
@@ -80,6 +88,10 @@ impl ControlRpcHandler for TestHandler {
                     started.notify_one();
                     std::future::pending::<()>().await;
                     unreachable!("pending handler only exits by cancellation");
+                }
+                HandlerMode::CompleteAfterCancellation { started } => {
+                    started.notify_one();
+                    cancelled.cancelled().await;
                 }
                 HandlerMode::Hold {
                     started,
@@ -113,6 +125,10 @@ impl ControlRpcHandler for TestHandler {
             })
         }
     }
+
+    fn record_call(&self, call: ControlCallAudit) {
+        self.audits.lock().expect("audit records").push(call);
+    }
 }
 
 fn handler(identity: &InstanceIdentity, mode: HandlerMode) -> TestHandler {
@@ -122,6 +138,7 @@ fn handler(identity: &InstanceIdentity, mode: HandlerMode) -> TestHandler {
             run_id: identity.run_id().clone(),
         },
         calls: Arc::new(AtomicUsize::new(0)),
+        audits: Arc::new(Mutex::new(Vec::new())),
         mode,
     }
 }
@@ -362,6 +379,19 @@ async fn stale_run_id_is_rejected_before_handler_dispatch() {
         .expect("server task")
         .expect("serve rejected request");
     assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
+    let audits = handler.audits.lock().expect("audit records");
+    assert_eq!(audits.len(), 1);
+    assert_eq!(
+        audits[0].operation,
+        crate::control_rpc::protocol::ControlOperationKind::DescribeInstance
+    );
+    assert!(matches!(
+        audits[0].outcome,
+        ControlCallOutcome::Error {
+            code: ControlErrorCode::InstanceGenerationConflict,
+            retryable: false,
+        }
+    ));
 }
 
 #[tokio::test]
@@ -396,4 +426,160 @@ async fn broker_disconnect_cancels_the_dispatched_operation() {
     tokio::time::timeout(Duration::from_secs(1), observed.notified())
         .await
         .expect("handler observes cancellation token");
+}
+
+#[tokio::test]
+async fn response_disconnect_is_reported_as_cancellation() {
+    let identity = InstanceIdentity::new(endpoint()).expect("instance identity");
+    let server = ControlRpcServer::new(identity.clone(), handler(&identity, HandlerMode::Success));
+    let (server_stream, client_stream) = UnixStream::pair().expect("Unix stream pair");
+    let (mut reader, mut writer) = server_stream.into_split();
+    drop(client_stream);
+
+    let error = server
+        .write_response(
+            &mut reader,
+            &mut writer,
+            ResponseEnvelope::success(
+                "request-1".to_owned(),
+                ControlResult::DescribeInstance {
+                    instance: InstanceScope {
+                        proxy_endpoint: identity.proxy_endpoint(),
+                        run_id: identity.run_id().clone(),
+                    },
+                    config_mode: ConfigMode::Temporary,
+                    persistence: PersistenceMode::Ephemeral,
+                    recording_enabled: false,
+                    retained_capture_count: 0,
+                    settings_revision: 0,
+                },
+            ),
+            server.admission.acquire().await.expect("call lease"),
+            Instant::now() + Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("disconnect must not look like a successful zero-byte response");
+
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
+}
+#[tokio::test]
+async fn mutation_dispatch_awaits_terminal_result_after_disconnect() {
+    let identity = InstanceIdentity::new(endpoint()).expect("instance identity");
+    let started = Arc::new(Notify::new());
+    let server = ControlRpcServer::new(
+        identity.clone(),
+        handler(
+            &identity,
+            HandlerMode::CompleteAfterCancellation {
+                started: Arc::clone(&started),
+            },
+        ),
+    );
+    let (server_stream, client_stream) = UnixStream::pair().expect("Unix stream pair");
+    let (mut reader, _writer) = server_stream.into_split();
+    let dispatch = tokio::spawn(async move {
+        server
+            .dispatch(
+                &mut reader,
+                ControlCallContext {
+                    request_id: "request-1".to_owned(),
+                    declared_client: crate::control_rpc::protocol::DeclaredClient {
+                        name: "test".to_owned(),
+                        version: "1".to_owned(),
+                    },
+                    deadline: Instant::now() + Duration::from_secs(1),
+                },
+                ControlOperation::DescribeInstance,
+                CancellationToken::new(),
+                true,
+            )
+            .await
+    });
+    started.notified().await;
+    drop(client_stream);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(1), dispatch)
+        .await
+        .expect("terminal mutation result")
+        .expect("dispatch task");
+    assert!(matches!(
+        outcome,
+        super::DispatchOutcome::Response(result) if result.is_ok()
+    ));
+}
+
+#[test]
+fn committed_mutation_outcome_survives_response_delivery_failure() {
+    let domain = super::ControlCallOutcome::Success {
+        instance: None,
+        config_mode: None,
+        persistence: None,
+        settings_revision: Some(9),
+        affected: None,
+    };
+    let delivery = Err(ControlError::cancelled("client disconnected"));
+
+    let (bytes, outcome) = super::audit_outcome_after_delivery(domain, true, &delivery);
+
+    assert_eq!(bytes, 0);
+    assert!(matches!(
+        outcome,
+        super::ControlCallOutcome::Success {
+            settings_revision: Some(9),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn failed_mapping_calls_have_value_free_declared_audit_targets() {
+    let operation = ControlOperation::MutateMapping {
+        expected_revision: SettingsRevision::new(12),
+        mutation: Box::new(MappingMutation::UpdateRemoteRule {
+            preset: "dev".to_owned(),
+            index: 3,
+            from: "https://secret.example/source".to_owned(),
+            to: "https://secret.example/target".to_owned(),
+        }),
+    };
+
+    let audit = mutation_audit(&operation).expect("mutation audit");
+    assert_eq!(audit.prior_settings_revision, Some(12));
+    assert_eq!(
+        audit.operation,
+        super::MutationAuditOperationKind::UpdateMappingRule
+    );
+    let target = audit.target.expect("bounded audit target");
+    assert_eq!(
+        target.target,
+        MappingObjectRef::Rule {
+            preset: "dev".to_owned(),
+            table: ProxyRuleTable::Remote,
+            index: 3,
+        }
+    );
+    assert!(!target.truncated);
+    let encoded = serde_json::to_string(&target.target).expect("target JSON");
+    assert!(!encoded.contains("secret.example"));
+}
+
+#[test]
+fn mapping_audit_bounds_target_names_before_dispatch_retention() {
+    let operation = ControlOperation::MutateMapping {
+        expected_revision: SettingsRevision::new(12),
+        mutation: Box::new(MappingMutation::CreatePreset {
+            name: "界".repeat(32 * 1024),
+            initial: None,
+        }),
+    };
+
+    let audit = mutation_audit(&operation).expect("mutation audit");
+    let target = audit.target.expect("bounded audit target");
+    let MappingObjectRef::Preset { name } = target.target else {
+        panic!("expected preset target");
+    };
+    assert!(target.truncated);
+    assert!(name.len() <= crate::control::audit::MAX_AUDIT_TARGET_NAME_BYTES);
+    assert!(name.is_char_boundary(name.len()));
 }

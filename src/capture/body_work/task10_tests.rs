@@ -226,9 +226,10 @@ async fn aborting_the_awaiter_does_not_release_active_capacity_before_blocking_w
         let exited = Arc::clone(&exited);
         let gate = Arc::clone(&gate);
         move || {
-            let _active = active;
+            let active = active;
             started.notify_one();
             gate.wait();
+            drop(active);
             exited.notify_one();
         }
     });

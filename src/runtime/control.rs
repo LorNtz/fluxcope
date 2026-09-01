@@ -5,6 +5,7 @@ use std::{
     fmt,
     future::Future,
     io,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -12,9 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::gateway::RuntimeControlClient;
 #[cfg(test)]
 pub(super) use super::gateway::{RuntimeControlReceiver, RuntimeGateway};
+use super::{CAPTURE_SEARCH_LIMIT, DETAIL_MATERIALIZATION_LIMIT, gateway::RuntimeControlClient};
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use tokio::{
@@ -29,14 +30,17 @@ use tokio_util::sync::CancellationToken;
 use crate::capture::{DecodePolicy, DecodeService, start_decode_service_with_admission};
 use crate::{
     capture::{
-        ActiveBodyWorkLease, BodySide, BodyStatus, BodyStreamState, BodyWorkAdmission,
-        CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind,
+        ACTIVE_BODY_WORK_LIMIT, ActiveBodyWorkLease, BodySide, BodyStatus, BodyStreamState,
+        BodyWorkAdmission, CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind,
         CaptureChangeSubscription, CaptureSequence, CaptureSnapshot, CapturedBodyPreview,
-        CapturedHeaders, ContentDecodePolicy, DecodedBytes, decode_content_bytes,
+        CapturedHeaders, ContentDecodePolicy, DecodedBytes, QUEUED_BODY_INPUT_LIMIT_BYTES,
+        QUEUED_BODY_WORK_LIMIT, decode_content_bytes,
     },
     control::{
-        CaptureMilestone, InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
-        WaitForCaptureRequest, WaitForCaptureResult,
+        BodyWorkRuntimeStatus, CaptureMilestone, ControlRpcRuntimeStatus, InstanceRuntimeSnapshot,
+        RuntimeReply, RuntimeRequest, SearchWorkRuntimeStatus, WaitForCaptureRequest,
+        WaitForCaptureResult,
+        audit::InstanceAudit,
         body::{
             BodyContentRequest, BodyPage, BodyPageSource, BodyRange, BodyRepresentation,
             CaptureBodyMetadataReply, CaptureBodySnapshotReply, ExtractCaptureBodyRequest,
@@ -59,9 +63,9 @@ use crate::{
         client::ControlRpcClient,
         protocol::{
             ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
-            InstanceScope, MappingSettingsPayload,
+            InstanceScope, MappingSettingsPayload, RPC_VERSION,
         },
-        server::{ControlCallContext, ControlRpcHandler, ControlRpcServer},
+        server::{ControlCallAudit, ControlCallContext, ControlRpcHandler, ControlRpcServer},
     },
     instance::{InstanceIdentity, RunId},
     instance_registry::{InstanceDescriptor, RegistryPublisher, RegistryScanner},
@@ -71,6 +75,7 @@ use crate::{
 
 pub(super) struct CaptureSearchAdmission {
     permits: Arc<Semaphore>,
+    limit: usize,
 }
 
 pub(super) struct ActiveCaptureSearch {
@@ -80,12 +85,14 @@ pub(super) struct ActiveCaptureSearch {
 
 pub(super) struct DetailMaterializationAdmission {
     permits: Arc<Semaphore>,
+    limit: usize,
 }
 
 impl CaptureSearchAdmission {
     pub(super) fn new(limit: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
+            limit,
         }
     }
 
@@ -138,6 +145,10 @@ impl CaptureSearchAdmission {
         })
     }
 
+    fn active(&self) -> usize {
+        self.limit.saturating_sub(self.permits.available_permits())
+    }
+
     #[cfg(test)]
     pub(super) fn available_permits_for_test(&self) -> usize {
         self.permits.available_permits()
@@ -184,7 +195,12 @@ impl DetailMaterializationAdmission {
     pub(super) fn new(limit: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
+            limit,
         }
+    }
+
+    fn active(&self) -> usize {
+        self.limit.saturating_sub(self.permits.available_permits())
     }
 
     pub(super) async fn run_blocking<T, F>(
@@ -672,6 +688,8 @@ impl RuntimeBodyServices {
             runtime,
             capture_changes,
             body_work: Arc::clone(&self.admission),
+            audit: InstanceAudit::default(),
+            config_source: None,
         }
     }
 }
@@ -1628,6 +1646,8 @@ pub(super) struct ControlServiceContext {
     pub(super) runtime: RuntimeControlClient,
     pub(super) capture_changes: CaptureChangeFeed,
     pub(super) body_work: Arc<BodyWorkAdmission>,
+    pub(super) audit: InstanceAudit,
+    pub(super) config_source: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -1637,6 +1657,8 @@ impl From<RuntimeControlClient> for ControlServiceContext {
             runtime,
             capture_changes: CaptureChangeFeed::new(),
             body_work: Arc::new(BodyWorkAdmission::default()),
+            audit: InstanceAudit::default(),
+            config_source: None,
         }
     }
 }
@@ -1649,6 +1671,8 @@ pub(super) struct RuntimeControlHandler {
     capture_searches: Arc<CaptureSearchAdmission>,
     capture_details: Arc<DetailMaterializationAdmission>,
     body_jobs: BodyJobScheduler,
+    audit: InstanceAudit,
+    config_source: Option<PathBuf>,
 }
 
 impl RuntimeControlHandler {
@@ -1659,13 +1683,19 @@ impl RuntimeControlHandler {
             context.capture_changes.clone(),
             context.body_work,
         );
+        let audit = context.audit;
+        let config_source = context.config_source;
         Self {
             runtime: context.runtime,
             settings_transactions: None,
             capture_changes: context.capture_changes,
-            capture_searches: Arc::new(CaptureSearchAdmission::new(4)),
-            capture_details: Arc::new(DetailMaterializationAdmission::new(4)),
+            capture_searches: Arc::new(CaptureSearchAdmission::new(CAPTURE_SEARCH_LIMIT)),
+            capture_details: Arc::new(DetailMaterializationAdmission::new(
+                DETAIL_MATERIALIZATION_LIMIT,
+            )),
             body_jobs,
+            audit,
+            config_source,
         }
     }
 
@@ -1685,7 +1715,7 @@ impl RuntimeControlHandler {
             .request(RuntimeRequest::GetStatus, cancelled.clone())
             .await?
         {
-            RuntimeReply::Instance(snapshot) => Ok(snapshot),
+            RuntimeReply::Instance(snapshot) => Ok(*snapshot),
             _ => Err(ControlError::internal(
                 "runtime returned an unexpected status reply",
             )),
@@ -1976,6 +2006,8 @@ impl ControlRpcHandler for RuntimeControlHandler {
         let capture_changes = self.capture_changes.clone();
         let body_jobs = self.body_jobs.clone();
         let settings_transactions = self.settings_transactions.clone();
+        let audit = self.audit.clone();
+        let config_source = self.config_source.clone();
         async move {
             match operation {
                 ControlOperation::DescribeInstance => {
@@ -2001,13 +2033,42 @@ impl ControlRpcHandler for RuntimeControlHandler {
                 }
                 ControlOperation::GetStatus => {
                     let snapshot = Self::instance_snapshot(&runtime, &cancelled).await?;
+                    let body_snapshot = body_jobs.admission.snapshot();
+                    let local_proxy_url =
+                        crate::instance::local_proxy_url(snapshot.instance.proxy_endpoint);
+                    let search_work = SearchWorkRuntimeStatus {
+                        capture_searches_active: capture_searches.active(),
+                        maximum_capture_searches: CAPTURE_SEARCH_LIMIT,
+                        detail_materializations_active: capture_details.active(),
+                        maximum_detail_materializations: DETAIL_MATERIALIZATION_LIMIT,
+                    };
                     Ok(ControlResult::GetStatus {
                         instance: snapshot.instance,
+                        local_proxy_url,
+                        wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        rpc_version: RPC_VERSION,
+                        config_source,
                         config_mode: snapshot.config_mode,
                         persistence: snapshot.persistence,
                         recording_enabled: snapshot.recording_enabled,
                         retained_capture_count: snapshot.retained_capture_count,
                         settings_revision: snapshot.settings_revision,
+                        mapping: snapshot.mapping,
+                        capture_store: snapshot.capture_store,
+                        capture_change_epoch: capture_changes.epoch(),
+                        metrics: Box::new(snapshot.metrics),
+                        private_rpc: ControlRpcRuntimeStatus::default(),
+                        body_work: Box::new(BodyWorkRuntimeStatus {
+                            active: body_snapshot.active,
+                            queued: body_snapshot.queued,
+                            queued_bytes: body_snapshot.queued_bytes,
+                            maximum_active: ACTIVE_BODY_WORK_LIMIT,
+                            maximum_queued: QUEUED_BODY_WORK_LIMIT,
+                            maximum_queued_bytes: QUEUED_BODY_INPUT_LIMIT_BYTES,
+                            rejected: body_snapshot.rejected,
+                        }),
+                        search_work,
+                        audit: Box::new(audit.snapshot_now()),
                     })
                 }
                 ControlOperation::SetRecordingEnabled { enabled } => {
@@ -2212,6 +2273,10 @@ impl ControlRpcHandler for RuntimeControlHandler {
                 }
             }
         }
+    }
+
+    fn record_call(&self, call: ControlCallAudit) {
+        self.audit.record(call);
     }
 }
 
@@ -2754,6 +2819,9 @@ mod tests {
             recording_enabled: false,
             retained_capture_count: 0,
             settings_revision: 0,
+            mapping: Default::default(),
+            capture_store: Default::default(),
+            metrics: Default::default(),
         }
     }
 
@@ -2800,7 +2868,7 @@ mod tests {
         assert!(!command.cancelled.is_cancelled());
         command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("waiting runtime client");
 
         let actual = client_task
@@ -2837,12 +2905,12 @@ mod tests {
         let first_command = receiver.recv().await.expect("first command");
         first_command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("first reply receiver");
         let second_command = receiver.recv().await.expect("second command was retained");
         second_command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("second reply receiver");
 
         assert_eq!(
@@ -2932,10 +3000,10 @@ mod tests {
         assert!(
             command
                 .reply
-                .send(Ok(RuntimeReply::Instance(snapshot(
+                .send(Ok(RuntimeReply::Instance(Box::new(snapshot(
                     &InstanceIdentity::new("127.0.0.1:19008".parse().expect("endpoint"))
-                        .expect("identity")
-                ))))
+                        .expect("identity"),
+                )))))
                 .is_err(),
             "cancelled client must drop its reply receiver"
         );
@@ -2963,7 +3031,7 @@ mod tests {
         assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
         command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("admitted reply remains deliverable");
         assert_eq!(
             admitted
@@ -3014,7 +3082,7 @@ mod tests {
         assert_eq!(command.request, RuntimeRequest::DescribeInstance);
         command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("handler awaits reply");
 
         let result = handle_task
@@ -3094,7 +3162,7 @@ mod tests {
         let command = receiver.recv().await.expect("runtime command");
         command
             .reply
-            .send(Ok(RuntimeReply::Instance(expected.clone())))
+            .send(Ok(RuntimeReply::Instance(Box::new(expected.clone()))))
             .expect("server awaits runtime reply");
         let response: Value =
             serde_json::from_slice(&read_payload(&mut client_stream).await).expect("response JSON");

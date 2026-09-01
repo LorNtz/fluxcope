@@ -8,6 +8,10 @@ pub(crate) mod settings;
 #[cfg(test)]
 mod startup_tests;
 
+pub(crate) const RUNTIME_COMMAND_CHANNEL_CAPACITY: usize = 64;
+pub(crate) const CAPTURE_SEARCH_LIMIT: usize = 4;
+pub(crate) const DETAIL_MATERIALIZATION_LIMIT: usize = 4;
+
 #[cfg(test)]
 use std::path::PathBuf;
 use std::{
@@ -115,10 +119,14 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
         Some(path) => log::info!("Loaded settings from {}", path.display()),
         None => log::info!("Loaded temporary settings"),
     }
+    let config_source = settings.source_path().map(std::path::Path::to_path_buf);
     log::info!(
         "Embedded MCP server {}",
         if mcp_enabled { "enabled" } else { "disabled" }
     );
+    if mcp_enabled {
+        log::warn!("{}", crate::control::MCP_LOCAL_ACCESS_WARNING);
+    }
     for diagnostic in settings.take_load_diagnostics() {
         log::error!("{}", diagnostic.message);
     }
@@ -195,7 +203,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     services.track_result(ServiceKind::Decoder, decode.task);
     services.track_result(ServiceKind::RequestSearch, request_search.task);
 
-    let (runtime_client, control_rx) = RuntimeGateway::channel(64);
+    let (runtime_client, control_rx) = RuntimeGateway::channel(RUNTIME_COMMAND_CHANNEL_CAPACITY);
     let (settings_transactions, settings_transaction_task) = start_settings_transaction_service(
         runtime_client.clone(),
         settings_committer,
@@ -209,6 +217,15 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
                 runtime: runtime_client,
                 capture_changes,
                 body_work: std::sync::Arc::clone(&body_work),
+                audit: crate::control::audit::InstanceAudit::new(
+                    crate::control_rpc::protocol::InstanceScope {
+                        proxy_endpoint: identity.proxy_endpoint(),
+                        run_id: identity.run_id().clone(),
+                    },
+                    settings_context.config_mode,
+                    settings_context.persistence,
+                ),
+                config_source,
             })
             .with_settings_transactions(settings_transactions.clone()),
             shutdown.child_token(),

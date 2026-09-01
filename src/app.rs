@@ -13,7 +13,7 @@ mod single_line_input;
 mod tests;
 
 #[cfg(unix)]
-use crate::control::AppControlSummary;
+use crate::control::{AppControlSummary, CaptureStoreRuntimeStatus, MappingRuntimeStatus};
 use crate::runtime::settings::{SettingsRevision, SettingsTransactionOrigin};
 pub(crate) use crate::settings::SettingsUiContext;
 #[cfg(test)]
@@ -88,6 +88,8 @@ pub struct App {
     settings: Arc<AppSettings>,
     pending_settings_save: Option<Arc<AppSettings>>,
     settings_revision: SettingsRevision,
+    #[cfg(unix)]
+    mapping_status: MappingRuntimeStatus,
     settings_transaction_pending: bool,
     decode_client: Option<DecodeClient>,
     request_tree: Arc<RequestTreeModel>,
@@ -153,6 +155,8 @@ impl App {
         capture_retention: CaptureRetentionPolicy,
         settings_context: SettingsUiContext,
     ) -> Self {
+        #[cfg(unix)]
+        let mapping_status = mapping_runtime_status(&settings);
         let ui_settings = settings.ui.clone();
         Self {
             captures: CaptureStore::new(capture_retention),
@@ -168,6 +172,8 @@ impl App {
             settings_revision: SettingsRevision::INITIAL,
             settings_transaction_pending: false,
             decode_client: None,
+            #[cfg(unix)]
+            mapping_status,
             request_tree: Arc::new(RequestTreeModel::default()),
             request_tree_revision: 0,
             request_search: RequestListSearch::default(),
@@ -212,6 +218,10 @@ impl App {
         self.settings_popup.mark_saved();
         self.close_popup_focus();
         self.request_list.auto_expand = saved.ui.request_list.auto_expand;
+        #[cfg(unix)]
+        {
+            self.mapping_status = mapping_runtime_status(&saved);
+        }
         self.settings = saved;
         self.settings_revision = revision;
         self.settings_transaction_pending = false;
@@ -219,10 +229,18 @@ impl App {
 
     #[cfg(unix)]
     pub(crate) fn control_summary(&self) -> AppControlSummary {
+        let retention = self.captures.retention_policy();
         AppControlSummary {
             recording_enabled: self.is_recording(),
             retained_capture_count: self.capture_count(),
             settings_revision: self.settings_revision.get(),
+            mapping: self.mapping_status.clone(),
+            capture_store: CaptureStoreRuntimeStatus {
+                revision: self.captures.revision(),
+                retained_bytes: self.captures.retained_bytes(),
+                maximum_retained_bytes: retention.max_bytes,
+                maximum_retained_records: retention.max_records,
+            },
         }
     }
 
@@ -265,6 +283,10 @@ impl App {
                 false,
                 serde_json::json!({"current_revision": self.settings_revision}),
             ));
+        }
+        #[cfg(unix)]
+        {
+            self.mapping_status = mapping_runtime_status(&settings);
         }
         self.settings = Arc::clone(&settings);
         self.request_list.auto_expand = settings.ui.request_list.auto_expand;
@@ -316,4 +338,24 @@ impl App {
             self.focus_panel(PanelFocus::Detail);
         }
     }
+}
+
+#[cfg(unix)]
+fn mapping_runtime_status(settings: &AppSettings) -> MappingRuntimeStatus {
+    settings
+        .proxy
+        .as_ref()
+        .map_or_else(MappingRuntimeStatus::default, |proxy| {
+            let active = proxy
+                .active_preset
+                .as_deref()
+                .and_then(|name| proxy.presets.iter().find(|preset| preset.name == name));
+            MappingRuntimeStatus {
+                configured: true,
+                enabled: proxy.enable,
+                active_preset: proxy.active_preset.clone(),
+                map_remote_enabled: active.map(|preset| preset.map_remote.enable),
+                map_local_enabled: active.map(|preset| preset.map_local.enable),
+            }
+        })
 }

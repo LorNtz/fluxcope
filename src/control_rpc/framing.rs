@@ -23,6 +23,7 @@ pub(crate) const ACTIVE_CALL_LIMIT: usize = 32;
 #[derive(Clone, Debug)]
 pub(crate) struct CallAdmission {
     permits: Arc<Semaphore>,
+    limit: usize,
 }
 
 #[derive(Debug)]
@@ -34,6 +35,7 @@ impl CallAdmission {
     pub(crate) fn new(limit: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(limit)),
+            limit,
         }
     }
 
@@ -43,6 +45,13 @@ impl CallAdmission {
             .await
             .map_err(|_| ControlError::instance_unavailable("private RPC admission is closed"))?;
         Ok(Arc::new(CallLease { _permit: permit }))
+    }
+
+    pub(crate) fn snapshot(&self) -> (usize, usize) {
+        (
+            self.limit.saturating_sub(self.permits.available_permits()),
+            self.limit,
+        )
     }
 
     #[cfg(test)]
@@ -279,13 +288,13 @@ where
     let pessimistic_lease = tokio::select! {
         biased;
         _ = cancelled.cancelled() => {
-            return Err(ControlError::instance_unavailable(
+            return Err(ControlError::cancelled(
                 "private RPC response serialization was cancelled",
             ));
         }
         _ = tokio::time::sleep_until(deadline) => {
-            return Err(ControlError::instance_unavailable(
-                "private RPC operation deadline elapsed",
+            return Err(ControlError::deadline_exceeded(
+                "private RPC response deadline elapsed",
             ));
         }
         lease = budget.acquire(max_bytes) => lease?,
@@ -295,13 +304,13 @@ where
     let output = tokio::select! {
         biased;
         _ = cancelled.cancelled() => {
-            return Err(ControlError::instance_unavailable(
+            return Err(ControlError::cancelled(
                 "private RPC response serialization was cancelled",
             ));
         }
         _ = tokio::time::sleep_until(deadline) => {
-            return Err(ControlError::instance_unavailable(
-                "private RPC operation deadline elapsed",
+            return Err(ControlError::deadline_exceeded(
+                "private RPC response deadline elapsed",
             ));
         }
         output = &mut worker => {

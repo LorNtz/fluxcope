@@ -78,9 +78,12 @@ impl CaptureStore {
         self.revision
     }
 
-    #[cfg(test)]
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    pub(crate) fn retention_policy(&self) -> CaptureRetentionPolicy {
+        self.policy
     }
 
     pub fn remove_sequences(

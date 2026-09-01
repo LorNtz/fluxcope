@@ -125,6 +125,8 @@ fn handler(
         runtime,
         capture_changes: feed,
         body_work: Arc::new(BodyWorkAdmission::default()),
+        audit: crate::control::audit::InstanceAudit::default(),
+        config_source: None,
     });
     let admission = Arc::clone(&handler.capture_searches);
     (handler, receiver, admission)
@@ -144,14 +146,17 @@ fn spawn_wait(
 }
 
 fn status_reply(instance: &InstanceScope, retained_capture_count: usize) -> RuntimeReply {
-    RuntimeReply::Instance(InstanceRuntimeSnapshot {
+    RuntimeReply::Instance(Box::new(InstanceRuntimeSnapshot {
         instance: instance.clone(),
         config_mode: ConfigMode::Temporary,
         persistence: PersistenceMode::Ephemeral,
         recording_enabled: true,
         retained_capture_count,
         settings_revision: 7,
-    })
+        mapping: Default::default(),
+        capture_store: Default::default(),
+        metrics: Default::default(),
+    }))
 }
 
 async fn reply_initial_search(

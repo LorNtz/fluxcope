@@ -5,6 +5,8 @@ pub(crate) mod broker;
 mod capture;
 #[cfg(unix)]
 mod mapping;
+#[cfg(unix)]
+mod prompts;
 mod schema;
 mod telemetry;
 

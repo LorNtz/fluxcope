@@ -24,8 +24,8 @@ use crate::{
 
 const DESCRIPTOR_SCHEMA_VERSION: u16 = 1;
 const DESCRIPTOR_RPC_VERSION: u16 = 1;
-const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
-const MAX_SCAN_FILES: usize = 256;
+pub(crate) const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_SCAN_FILES: usize = 256;
 const MAX_RECONCILE_DIRECTORY_ENTRIES: usize = MAX_SCAN_FILES + 2;
 const SOCKET_HASH_HEX_BYTES: usize = 24;
 const REGISTRY_INDEX_VERSION: u16 = 1;

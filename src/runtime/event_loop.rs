@@ -43,7 +43,8 @@ use crate::{
 use crate::{
     capture::{BodySide, CaptureSequence, CaptureSnapshotMode, CapturedHeaders},
     control::{
-        AppControlSummary, CaptureSnapshotReply, InstanceRuntimeSnapshot, RecordingUpdate,
+        AppControlSummary, CaptureRuntimeMetrics, CaptureSnapshotReply, DecodeRuntimeMetrics,
+        InstanceRuntimeMetrics, InstanceRuntimeSnapshot, LoggingRuntimeMetrics, RecordingUpdate,
         body::{CaptureBodyMetadataReply, CaptureBodySnapshotReply},
         capture_query::{CAPTURE_SEARCH_BATCH_SIZE, CaptureSearchBatch, cursor_before},
     },
@@ -617,7 +618,19 @@ impl AppRuntime {
                 let identity = self.identity.as_ref().ok_or_else(|| {
                     ControlError::instance_unavailable("runtime control is not enabled")
                 })?;
-                execute_control_request(identity, &mut self.app, self.settings_context, request)
+                let metrics =
+                    matches!(&request, RuntimeRequest::GetStatus).then(|| InstanceRuntimeMetrics {
+                        capture: capture_runtime_metrics(self.capture_metrics.snapshot()),
+                        decode: decode_runtime_metrics(self.decode_metrics.snapshot()),
+                        logging: logging_runtime_metrics(self.logging_metrics.snapshot()),
+                    });
+                execute_control_request(
+                    identity,
+                    &mut self.app,
+                    self.settings_context,
+                    metrics,
+                    request,
+                )
             }
             #[cfg(not(unix))]
             _ => Err(ControlError::new(
@@ -686,6 +699,7 @@ fn execute_control_request(
     identity: &InstanceIdentity,
     app: &mut App,
     context: SettingsUiContext,
+    metrics: Option<InstanceRuntimeMetrics>,
     request: RuntimeRequest,
 ) -> std::result::Result<RuntimeReply, ControlError> {
     match request {
@@ -694,8 +708,10 @@ fn execute_control_request(
                 recording_enabled,
                 retained_capture_count,
                 settings_revision,
+                mapping,
+                capture_store,
             } = app.control_summary();
-            Ok(RuntimeReply::Instance(InstanceRuntimeSnapshot {
+            Ok(RuntimeReply::Instance(Box::new(InstanceRuntimeSnapshot {
                 instance: InstanceScope {
                     proxy_endpoint: identity.proxy_endpoint(),
                     run_id: identity.run_id().clone(),
@@ -705,7 +721,10 @@ fn execute_control_request(
                 recording_enabled,
                 retained_capture_count,
                 settings_revision,
-            }))
+                mapping,
+                capture_store,
+                metrics: metrics.unwrap_or_default(),
+            })))
         }
         RuntimeRequest::SetRecordingEnabled { enabled } => {
             let previous = app.set_recording_enabled(enabled);
@@ -901,7 +920,40 @@ pub(super) fn execute_control_request_for_test(
     settings: &SettingsSession,
     request: RuntimeRequest,
 ) -> std::result::Result<RuntimeReply, ControlError> {
-    execute_control_request(identity, app, settings.ui_context(), request)
+    execute_control_request(
+        identity,
+        app,
+        settings.ui_context(),
+        Some(InstanceRuntimeMetrics::default()),
+        request,
+    )
+}
+
+fn capture_runtime_metrics(snapshot: CaptureMetricsSnapshot) -> CaptureRuntimeMetrics {
+    CaptureRuntimeMetrics {
+        exchanges_not_admitted: snapshot.exchanges_not_admitted,
+        memory_pressure: snapshot.memory_pressure,
+        previews_per_body_limited: snapshot.previews_per_body_limited,
+        previews_memory_limited: snapshot.previews_memory_limited,
+        metadata_truncated: snapshot.metadata_truncated,
+    }
+}
+
+fn decode_runtime_metrics(snapshot: DecodeMetricsSnapshot) -> DecodeRuntimeMetrics {
+    DecodeRuntimeMetrics {
+        rejected: snapshot.rejected,
+        superseded: snapshot.superseded,
+        output_limited: snapshot.output_limited,
+        failed: snapshot.failed,
+    }
+}
+
+fn logging_runtime_metrics(snapshot: LoggingMetricsSnapshot) -> LoggingRuntimeMetrics {
+    LoggingRuntimeMetrics {
+        producer_dropped: snapshot.producer_dropped,
+        tui_dropped: snapshot.tui_dropped,
+        records_truncated: snapshot.records_truncated,
+    }
 }
 
 fn is_fatal_service(kind: ServiceKind) -> bool {
@@ -926,6 +978,7 @@ impl ControlExecutionHarness {
             &self.identity,
             &mut self.app,
             self.settings.ui_context(),
+            Some(InstanceRuntimeMetrics::default()),
             request,
         )
     }

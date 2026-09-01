@@ -561,6 +561,8 @@ fn handler(
             runtime,
             capture_changes: feed,
             body_work: admission,
+            audit: crate::control::audit::InstanceAudit::default(),
+            config_source: None,
         }),
         receiver,
     )

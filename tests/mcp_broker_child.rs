@@ -6,8 +6,8 @@ use anyhow::{Context, Result, anyhow};
 use rmcp::{
     ServiceError, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
-        ReadResourceRequestParams,
+        CallToolRequestParams, ClientCapabilities, ClientInfo, GetPromptRequestParams,
+        Implementation, ProtocolVersion, ReadResourceRequestParams,
     },
     transport::TokioChildProcess,
 };
@@ -37,7 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task14_contract() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
@@ -64,12 +64,54 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task14_contract() -> 
         .expect("resources capability");
     assert_eq!(resources_capability.subscribe, None);
     assert_eq!(resources_capability.list_changed, None);
-    assert!(server_info.capabilities.prompts.is_none());
+    assert!(server_info.capabilities.prompts.is_some());
     assert!(server_info.capabilities.logging.is_none());
     assert!(server_info.capabilities.completions.is_none());
     assert!(server_info.capabilities.experimental.is_none());
     assert!(server_info.capabilities.extensions.is_none());
 
+    let mut prompts = client.list_all_prompts().await?;
+    prompts.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|prompt| prompt.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["configure_mapping", "debug_http_flow"]
+    );
+    let debug_prompt = client
+        .get_prompt(GetPromptRequestParams::new("debug_http_flow"))
+        .await?;
+    let debug_text = debug_prompt.messages[0]
+        .content
+        .as_text()
+        .expect("debug prompt text")
+        .text
+        .as_str();
+    assert!(debug_text.contains("list_instances"));
+    assert!(debug_text.contains("search_captures"));
+    assert!(debug_text.contains("wait_for_capture"));
+    assert!(debug_text.contains("get_capture"));
+    let mapping_prompt = client
+        .get_prompt(GetPromptRequestParams::new("configure_mapping"))
+        .await?;
+    let mapping_text = mapping_prompt.messages[0]
+        .content
+        .as_text()
+        .expect("mapping prompt text")
+        .text
+        .as_str();
+    assert!(mapping_text.contains("validate_mapping_settings"));
+    assert!(mapping_text.contains("explain_mapping"));
+    assert!(mapping_text.contains("expected_settings_revision"));
+    let configured = client
+        .get_prompt(GetPromptRequestParams::new("configure_mapping"))
+        .await
+        .map_err(|error| anyhow!("get configure_mapping prompt failed: {error}"))?;
+    let configured_text =
+        serde_json::to_string(&configured).context("serialize configure_mapping prompt")?;
+    assert!(configured_text.contains("expected_settings_revision"));
+    assert!(configured_text.contains("validate_mapping_settings"));
     let mut tools = client.list_all_tools().await?;
     tools.sort_by(|left, right| left.name.cmp(&right.name));
     assert_eq!(
@@ -142,6 +184,13 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task14_contract() -> 
             Some(&json!(false))
         );
     }
+    let broker_status = client
+        .call_tool(CallToolRequestParams::new("get_broker_status"))
+        .await
+        .map_err(|error| anyhow!("get_broker_status failed: {error}"))?;
+    let broker_status_text =
+        serde_json::to_string(&broker_status).context("serialize broker status")?;
+    assert!(broker_status_text.contains("local_unauthenticated_access"));
     let get_status = tools
         .iter()
         .find(|tool| tool.name == "get_status")

@@ -17,9 +17,10 @@ use rmcp::{
         wrapper::{Json, Parameters},
     },
     model::{
-        ErrorCode, Implementation, ListResourceTemplatesResult, ListResourcesResult,
-        ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-        ResourceTemplate, ServerCapabilities, ServerInfo,
+        ErrorCode, GetPromptRequestParams, GetPromptResponse, Implementation, ListPromptsResult,
+        ListResourceTemplatesResult, ListResourcesResult, ProtocolVersion,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceTemplate,
+        ServerCapabilities, ServerInfo,
     },
     service::{
         RequestContext, RunningService, RxJsonRpcMessage, ServerInitializeError, ServiceRole,
@@ -79,15 +80,15 @@ use super::{
     schema::{
         BrokerLimits, BrokerStatusResult, BrokerVersions, DiscoverySummary, GetStatusInput,
         GetStatusResult, InstanceSelector, InstanceSummary, ListInstancesResult, RegistryStatus,
-        RejectedDescriptor, TransportStatus,
+        RejectedDescriptor, StatusWarning, TransportStatus,
     },
     telemetry::{ActivityGuard, BrokerTelemetry},
 };
 
-const PUBLIC_CALL_LIMIT: usize = 32;
+pub(super) const PUBLIC_CALL_LIMIT: usize = 32;
 const BLOCKING_SCAN_LIMIT: usize = 32;
 const MAPPING_CONVERSION_LIMIT: usize = 2;
-const LIVENESS_PROBE_LIMIT: usize = 16;
+pub(super) const LIVENESS_PROBE_LIMIT: usize = 16;
 const AMBIGUOUS_INSTANCE_LIMIT: usize = 16;
 const ORDINARY_DEADLINE: Duration = Duration::from_secs(30);
 const CLIENT_IDENTIFIER_LIMIT: usize = 128;
@@ -188,12 +189,26 @@ pub(crate) trait InstanceProbe: Send + Sync + 'static {
                             retained_capture_count,
                             settings_revision,
                         } => Ok(ControlResult::GetStatus {
+                            local_proxy_url: format!("http://{}", instance.proxy_endpoint),
+                            wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
+                            rpc_version: RPC_VERSION,
+                            config_source: descriptor
+                                .config_source()
+                                .map(std::path::Path::to_path_buf),
                             instance,
                             config_mode,
                             persistence,
                             recording_enabled,
                             retained_capture_count,
                             settings_revision,
+                            mapping: Default::default(),
+                            capture_store: Default::default(),
+                            capture_change_epoch: 0,
+                            metrics: Default::default(),
+                            private_rpc: Default::default(),
+                            body_work: Default::default(),
+                            search_work: Default::default(),
+                            audit: Default::default(),
                         }),
                         _ => Err(ControlError::internal(
                             "instance description returned an unexpected result",
@@ -531,6 +546,28 @@ impl Broker {
         }
         let report = self.probe_scan(scan, client, deadline, cancelled).await?;
         self.select(selector, report, deadline)
+    }
+
+    async fn call_instance(
+        &self,
+        descriptor: &InstanceDescriptor,
+        operation: ControlOperation,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<ControlResult, ControlError> {
+        let result = self
+            .probe
+            .call(descriptor, operation, client, deadline, cancelled)
+            .await;
+        if let Err(error) = &result {
+            if error.code() == ControlErrorCode::Cancelled {
+                self.telemetry.record_cancelled_call();
+            } else if error.is_definitive_stale_connect() {
+                self.telemetry.record_connection_failure();
+            }
+        }
+        result
     }
 
     fn select(
@@ -884,12 +921,21 @@ impl Broker {
             .resolve_with_client(
                 input.instance,
                 SelectorRequirement::SnapshotRead,
+                client.clone(),
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        let result = self
+            .call_instance(
+                &resolved.descriptor,
+                ControlOperation::GetStatus,
                 client,
                 deadline,
                 cancelled,
             )
             .await?;
-        status_result(resolved.description)
+        status_result(result)
     }
 
     pub(crate) async fn set_recording_enabled_impl(
@@ -910,8 +956,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(
+            .call_instance(
                 &resolved.descriptor,
                 input.operation(),
                 client,
@@ -939,8 +984,7 @@ impl Broker {
                 cancelled.clone(),
             )
             .await?;
-        self.probe
-            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+        self.call_instance(&resolved.descriptor, operation, client, deadline, cancelled)
             .await
     }
 
@@ -1135,8 +1179,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(
+            .call_instance(
                 &resolved.descriptor,
                 input.operation(),
                 client,
@@ -1165,8 +1208,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(
+            .call_instance(
                 &resolved.descriptor,
                 input.operation(),
                 client,
@@ -1220,8 +1262,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .call_instance(&resolved.descriptor, operation, client, deadline, cancelled)
             .await?;
         let ControlResult::SearchCaptureBody { instance, result } = result else {
             return Err(ControlError::internal(
@@ -1264,8 +1305,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .call_instance(&resolved.descriptor, operation, client, deadline, cancelled)
             .await?;
         let ControlResult::ExtractCaptureBody { instance, result } = result else {
             return Err(ControlError::internal(
@@ -1308,8 +1348,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .call_instance(&resolved.descriptor, operation, client, deadline, cancelled)
             .await?;
         let ControlResult::FindJsonPointers { instance, result } = result else {
             return Err(ControlError::internal(
@@ -1352,8 +1391,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(&resolved.descriptor, operation, client, deadline, cancelled)
+            .call_instance(&resolved.descriptor, operation, client, deadline, cancelled)
             .await?;
         let ControlResult::ProbeJsonPointerPattern { instance, result } = result else {
             return Err(ControlError::internal(
@@ -1399,8 +1437,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(
+            .call_instance(
                 &resolved.descriptor,
                 ControlOperation::ReadCaptureBody(Box::new(requested.request())),
                 client,
@@ -1447,8 +1484,7 @@ impl Broker {
             )
             .await?;
         let result = self
-            .probe
-            .call(
+            .call_instance(
                 &resolved.descriptor,
                 ControlOperation::ReadSelectedBody(Box::new(requested.request())),
                 client,
@@ -1492,7 +1528,7 @@ impl Broker {
                 cancelled.clone(),
             )
             .await?;
-        let dispatch = self.probe.call(
+        let dispatch = self.call_instance(
             &resolved.descriptor,
             input.operation(),
             client,
@@ -1503,6 +1539,7 @@ impl Broker {
         let result = tokio::select! {
             biased;
             _ = cancelled.cancelled() => {
+                self.telemetry.record_cancelled_call();
                 return Err(ControlError::cancelled("capture wait dispatch cancelled"));
             }
             _ = tokio::time::sleep_until(deadline) => {
@@ -1577,6 +1614,28 @@ impl Broker {
     ) -> Result<BrokerStatusResult, McpDomainError> {
         let report = self.discover(client, deadline, cancelled).await?;
         let telemetry = self.telemetry.snapshot();
+        let mut warnings = vec![StatusWarning {
+            code: "local_unauthenticated_access".to_owned(),
+            message: "MCP control is available to processes running as the current OS user"
+                .to_owned(),
+        }];
+        if report.stale_count > 0
+            || !report.rejected.is_empty()
+            || report.omitted > 0
+            || telemetry.connection_failures > 0
+        {
+            warnings.push(StatusWarning {
+                code: "registry_degraded".to_owned(),
+                message: "instance discovery encountered stale, rejected, omitted, or unreachable descriptors"
+                    .to_owned(),
+            });
+        }
+        if telemetry.saturated_calls > 0 || telemetry.cancelled_calls > 0 {
+            warnings.push(StatusWarning {
+                code: "broker_transport_limited".to_owned(),
+                message: "broker calls were saturated or cancelled".to_owned(),
+            });
+        }
         Ok(BrokerStatusResult {
             versions: BrokerVersions {
                 broker: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1599,6 +1658,7 @@ impl Broker {
                 bytes_relayed: telemetry.bytes_relayed,
             },
             limits: BrokerLimits::default(),
+            warnings,
         })
     }
 
@@ -1658,7 +1718,7 @@ impl Broker {
 
     #[tool(
         name = "get_status",
-        description = "Get identity, configuration, recording, and capture status for one Wirelens instance",
+        description = "Get authoritative identity, configuration, recording, mapping, capture-store, worker-resource, metric, warning, and bounded audit status for one Wirelens instance",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2282,12 +2342,33 @@ impl ServerHandler for Broker {
             ServerCapabilities::builder()
                 .enable_resources()
                 .enable_tools()
+                .enable_prompts()
                 .build(),
         )
         .with_server_info(Implementation::new("wirelens", env!("CARGO_PKG_VERSION")))
         .with_protocol_version(ProtocolVersion::LATEST)
         .with_instructions(
             "Use list_instances first and select an explicit instance when more than one is live.",
+        )
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListPromptsResult, ErrorData>> + Send + '_ {
+        std::future::ready(Ok(
+            ListPromptsResult::with_all_items(super::prompts::list()),
+        ))
+    }
+
+    fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<GetPromptResponse, ErrorData>> + Send + '_ {
+        std::future::ready(
+            super::prompts::get(&request.name, request.arguments.as_ref()).map(Into::into),
         )
     }
 
@@ -2423,54 +2504,115 @@ fn capture_body_resources(
 }
 
 fn status_result(result: ControlResult) -> Result<GetStatusResult, ControlError> {
-    let (
+    let ControlResult::GetStatus {
         instance,
+        local_proxy_url,
+        wirelens_version,
+        rpc_version,
+        config_source,
         config_mode,
         persistence,
         recording_enabled,
         retained_capture_count,
         settings_revision,
-    ) = match result {
-        ControlResult::GetStatus {
-            instance,
-            config_mode,
-            persistence,
-            recording_enabled,
-            retained_capture_count,
-            settings_revision,
-        }
-        | ControlResult::DescribeInstance {
-            instance,
-            config_mode,
-            persistence,
-            recording_enabled,
-            retained_capture_count,
-            settings_revision,
-        } => (
-            instance,
-            config_mode,
-            persistence,
-            recording_enabled,
-            retained_capture_count,
-            settings_revision,
-        ),
-        _ => {
-            return Err(ControlError::internal(
-                "private RPC returned an unexpected status result",
-            ));
-        }
+        mapping,
+        capture_store,
+        capture_change_epoch,
+        metrics,
+        private_rpc,
+        body_work,
+        search_work,
+        audit,
+    } = result
+    else {
+        return Err(ControlError::internal(
+            "private RPC returned an unexpected status result",
+        ));
     };
+    let metrics = *metrics;
+    let body_work = *body_work;
+    let audit = *audit;
+    let warnings = status_warnings(metrics, body_work, &audit);
     Ok(GetStatusResult {
         instance: InstanceSelector {
             proxy_endpoint: Some(instance.proxy_endpoint),
             run_id: Some(instance.run_id),
         },
+        local_proxy_url,
+        wirelens_version,
+        rpc_version,
+        config_source,
         config_mode,
         persistence,
         recording_enabled,
         retained_capture_count,
         settings_revision,
+        mapping,
+        capture_store,
+        capture_change_epoch,
+        private_rpc,
+        metrics,
+        search_work,
+        body_work,
+        audit,
+        limits: BrokerLimits::default(),
+        warnings,
     })
+}
+
+fn status_warnings(
+    metrics: crate::control::InstanceRuntimeMetrics,
+    body_work: crate::control::BodyWorkRuntimeStatus,
+    audit: &crate::control::audit::InstanceAuditSnapshot,
+) -> Vec<StatusWarning> {
+    let mut warnings = Vec::with_capacity(6);
+    warnings.push(StatusWarning {
+        code: "local_unauthenticated_access".to_owned(),
+        message: crate::control::MCP_LOCAL_ACCESS_WARNING.to_owned(),
+    });
+    if metrics.capture.exchanges_not_admitted > 0
+        || metrics.capture.memory_pressure > 0
+        || metrics.capture.previews_per_body_limited > 0
+        || metrics.capture.previews_memory_limited > 0
+        || metrics.capture.metadata_truncated > 0
+    {
+        warnings.push(StatusWarning {
+            code: "capture_retention_pressure".to_owned(),
+            message: "some captures, metadata, or body previews were limited by capture budgets"
+                .to_owned(),
+        });
+    }
+    if metrics.decode.rejected > 0 || metrics.decode.output_limited > 0 || metrics.decode.failed > 0
+    {
+        warnings.push(StatusWarning {
+            code: "body_decode_limited".to_owned(),
+            message: "some body decode work was rejected, limited, or failed".to_owned(),
+        });
+    }
+    if metrics.logging.producer_dropped > 0
+        || metrics.logging.tui_dropped > 0
+        || metrics.logging.records_truncated > 0
+    {
+        warnings.push(StatusWarning {
+            code: "logging_limited".to_owned(),
+            message: "some log records were dropped or truncated".to_owned(),
+        });
+    }
+    if body_work.queued > 0 || body_work.rejected > 0 {
+        warnings.push(StatusWarning {
+            code: "body_work_saturated".to_owned(),
+            message: "body processing is queued or has rejected work at its configured limits"
+                .to_owned(),
+        });
+    }
+    if audit.response_delivery_failures > 0 {
+        warnings.push(StatusWarning {
+            code: "response_delivery_failed".to_owned(),
+            message: "one or more private RPC responses could not be delivered to their client"
+                .to_owned(),
+        });
+    }
+    warnings
 }
 
 fn declared_client(context: &RequestContext<RoleServer>) -> Result<DeclaredClient, McpDomainError> {
@@ -2503,11 +2645,36 @@ pub(super) fn to_mcp_error(error: McpDomainError) -> ErrorData {
         "retryable": error.retryable(),
         "details": error.details(),
     });
-    if error.code() == ControlErrorCode::InvalidArgument {
-        ErrorData::invalid_params(error.message().to_owned(), Some(data))
-    } else {
-        ErrorData::new(ErrorCode(-32000), error.message().to_owned(), Some(data))
-    }
+    let code = match error.code() {
+        ControlErrorCode::InvalidArgument | ControlErrorCode::MappingValidationFailed => {
+            ErrorCode::INVALID_PARAMS
+        }
+        ControlErrorCode::NoInstances
+        | ControlErrorCode::InstanceRequired
+        | ControlErrorCode::InstanceNotFound
+        | ControlErrorCode::CaptureNotFound
+        | ControlErrorCode::NotFound => ErrorCode(-32004),
+        ControlErrorCode::InstanceGenerationConflict
+        | ControlErrorCode::CaptureRevisionConflict
+        | ControlErrorCode::SettingsRevisionConflict
+        | ControlErrorCode::TuiDraftConflict => ErrorCode(-32009),
+        ControlErrorCode::InstanceUnavailable | ControlErrorCode::ServiceUnavailable => {
+            ErrorCode(-32003)
+        }
+        ControlErrorCode::RpcVersionMismatch => ErrorCode(-32010),
+        ControlErrorCode::RpcFrameTooLarge
+        | ControlErrorCode::ResourceLimit
+        | ControlErrorCode::JsonDepthLimit
+        | ControlErrorCode::JsonSizeLimit => ErrorCode(-32005),
+        ControlErrorCode::UnsupportedBodyEncoding
+        | ControlErrorCode::UndecodableBody
+        | ControlErrorCode::BodyNotTextual
+        | ControlErrorCode::MalformedJson => ErrorCode(-32022),
+        ControlErrorCode::DeadlineExceeded => ErrorCode(-32008),
+        ControlErrorCode::Cancelled => ErrorCode(-32007),
+        ControlErrorCode::InternalError => ErrorCode::INTERNAL_ERROR,
+    };
+    ErrorData::new(code, error.message().to_owned(), Some(data))
 }
 
 #[cfg(test)]
@@ -2544,13 +2711,14 @@ mod tests {
 
     use super::{
         Broker, InstanceProbe, McpDomainError, RegistryAccess, SelectorRequirement,
-        run_public_search_validation,
+        run_public_search_validation, status_warnings, to_mcp_error,
     };
     use crate::{
         control_rpc::{
             client::connect_failure,
             protocol::{
-                ControlError, ControlErrorCode, ControlResult, DeclaredClient, InstanceScope,
+                ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
+                InstanceScope,
             },
         },
         instance::RunId,
@@ -3490,22 +3658,12 @@ mod tests {
         client_peer.cancel().await.expect("close client");
         server.await.expect("server task");
 
-        assert_eq!(
-            probe.calls(),
-            vec![
-                ProbeCall {
-                    endpoint: endpoint(19001),
-                    client: declared.clone()
-                },
-                ProbeCall {
-                    endpoint: endpoint(19001),
-                    client: declared.clone()
-                },
-                ProbeCall {
-                    endpoint: endpoint(19001),
-                    client: declared
-                },
-            ]
+        let calls = probe.calls();
+        assert_eq!(calls.len(), 5);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.endpoint == endpoint(19001) && call.client == declared)
         );
     }
 
@@ -3815,6 +3973,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwarded_call_records_definitive_connection_failure() {
+        let instance = descriptor(19704, RUN_A);
+        let probe = FakeProbe::live(std::slice::from_ref(&instance));
+        probe.mark_stale_connect(instance.proxy_endpoint());
+        let broker = broker(FakeRegistry::new(Vec::new()), probe);
+
+        let error = broker
+            .call_instance(
+                &instance,
+                ControlOperation::DescribeInstance,
+                client(),
+                deadline(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("stale connection");
+
+        assert!(error.is_definitive_stale_connect());
+        assert_eq!(broker.telemetry.snapshot().connection_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn forwarded_call_records_client_cancellation() {
+        let instance = descriptor(19705, RUN_A);
+        let broker = broker(
+            FakeRegistry::new(Vec::new()),
+            FakeProbe::live(std::slice::from_ref(&instance)),
+        );
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+
+        let error = broker
+            .call_instance(
+                &instance,
+                ControlOperation::DescribeInstance,
+                client(),
+                deadline(),
+                cancelled,
+            )
+            .await
+            .expect_err("cancelled call");
+
+        assert_eq!(error.code(), ControlErrorCode::Cancelled);
+        assert_eq!(broker.telemetry.snapshot().cancelled_calls, 1);
+    }
+    #[test]
+    fn status_warns_when_private_rpc_responses_were_not_delivered() {
+        let warnings = status_warnings(
+            Default::default(),
+            Default::default(),
+            &crate::control::audit::InstanceAuditSnapshot {
+                response_delivery_failures: 1,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code == "response_delivery_failed")
+        );
+    }
+
+    #[tokio::test]
     async fn probe_contract_borrows_large_descriptors_instead_of_cloning_them() {
         let descriptor = descriptor(19703, RUN_A);
         let probe = FakeProbe::live(std::slice::from_ref(&descriptor));
@@ -4071,4 +4293,48 @@ mod tests {
     mod task11_tests;
     mod task12_tests;
     mod task9_tests;
+
+    #[test]
+    fn every_control_error_code_has_a_stable_public_conversion() {
+        let codes = [
+            ControlErrorCode::InvalidArgument,
+            ControlErrorCode::NoInstances,
+            ControlErrorCode::InstanceRequired,
+            ControlErrorCode::InstanceNotFound,
+            ControlErrorCode::InstanceGenerationConflict,
+            ControlErrorCode::InstanceUnavailable,
+            ControlErrorCode::RpcVersionMismatch,
+            ControlErrorCode::RpcFrameTooLarge,
+            ControlErrorCode::ResourceLimit,
+            ControlErrorCode::CaptureNotFound,
+            ControlErrorCode::CaptureRevisionConflict,
+            ControlErrorCode::SettingsRevisionConflict,
+            ControlErrorCode::MappingValidationFailed,
+            ControlErrorCode::TuiDraftConflict,
+            ControlErrorCode::ServiceUnavailable,
+            ControlErrorCode::UnsupportedBodyEncoding,
+            ControlErrorCode::DeadlineExceeded,
+            ControlErrorCode::Cancelled,
+            ControlErrorCode::UndecodableBody,
+            ControlErrorCode::BodyNotTextual,
+            ControlErrorCode::NotFound,
+            ControlErrorCode::MalformedJson,
+            ControlErrorCode::JsonDepthLimit,
+            ControlErrorCode::JsonSizeLimit,
+            ControlErrorCode::InternalError,
+        ];
+
+        for code in codes {
+            let converted = to_mcp_error(ControlError::new(
+                code,
+                "stable message",
+                false,
+                json!({"field": "value"}),
+            ));
+            let data = converted.data.expect("structured error data");
+            assert_eq!(data["code"], code.as_str(), "{code:?}");
+            assert_eq!(data["retryable"], false, "{code:?}");
+            assert_eq!(data["details"]["field"], "value", "{code:?}");
+        }
+    }
 }

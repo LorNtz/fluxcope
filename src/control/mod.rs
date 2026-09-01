@@ -1,3 +1,6 @@
+pub(crate) const MCP_LOCAL_ACCESS_WARNING: &str = "MCP access is unauthenticated within the current OS user account. Any process running as this user can launch the broker, read raw retained captures from MCP-enabled Wirelens instances, and change their live proxy mappings.";
+
+pub(crate) mod audit;
 pub(crate) mod body;
 pub(crate) mod capture_query;
 pub(crate) mod json_walk;
@@ -14,11 +17,86 @@ use crate::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AppControlSummary {
     pub(crate) recording_enabled: bool,
     pub(crate) retained_capture_count: usize,
     pub(crate) settings_revision: u64,
+    pub(crate) mapping: MappingRuntimeStatus,
+    pub(crate) capture_store: CaptureStoreRuntimeStatus,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct MappingRuntimeStatus {
+    pub(crate) configured: bool,
+    pub(crate) enabled: bool,
+    pub(crate) active_preset: Option<String>,
+    pub(crate) map_remote_enabled: Option<bool>,
+    pub(crate) map_local_enabled: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct CaptureStoreRuntimeStatus {
+    pub(crate) revision: u64,
+    pub(crate) retained_bytes: usize,
+    pub(crate) maximum_retained_bytes: usize,
+    pub(crate) maximum_retained_records: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct CaptureRuntimeMetrics {
+    pub(crate) exchanges_not_admitted: u64,
+    pub(crate) memory_pressure: u64,
+    pub(crate) previews_per_body_limited: u64,
+    pub(crate) previews_memory_limited: u64,
+    pub(crate) metadata_truncated: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct DecodeRuntimeMetrics {
+    pub(crate) rejected: u64,
+    pub(crate) superseded: u64,
+    pub(crate) output_limited: u64,
+    pub(crate) failed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct LoggingRuntimeMetrics {
+    pub(crate) producer_dropped: u64,
+    pub(crate) tui_dropped: u64,
+    pub(crate) records_truncated: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct BodyWorkRuntimeStatus {
+    pub(crate) active: usize,
+    pub(crate) queued: usize,
+    pub(crate) queued_bytes: usize,
+    pub(crate) maximum_active: usize,
+    pub(crate) maximum_queued: usize,
+    pub(crate) maximum_queued_bytes: usize,
+    pub(crate) rejected: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct ControlRpcRuntimeStatus {
+    pub(crate) active: usize,
+    pub(crate) maximum_active: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct SearchWorkRuntimeStatus {
+    pub(crate) capture_searches_active: usize,
+    pub(crate) maximum_capture_searches: usize,
+    pub(crate) detail_materializations_active: usize,
+    pub(crate) maximum_detail_materializations: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub(crate) struct InstanceRuntimeMetrics {
+    pub(crate) capture: CaptureRuntimeMetrics,
+    pub(crate) decode: DecodeRuntimeMetrics,
+    pub(crate) logging: LoggingRuntimeMetrics,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,6 +107,9 @@ pub(crate) struct InstanceRuntimeSnapshot {
     pub(crate) persistence: PersistenceMode,
     pub(crate) recording_enabled: bool,
     pub(crate) retained_capture_count: usize,
+    pub(crate) mapping: MappingRuntimeStatus,
+    pub(crate) capture_store: CaptureStoreRuntimeStatus,
+    pub(crate) metrics: InstanceRuntimeMetrics,
     pub(crate) settings_revision: u64,
 }
 #[derive(Clone, Debug)]
@@ -153,7 +234,7 @@ pub(crate) enum RuntimeRequest {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeReply {
-    Instance(InstanceRuntimeSnapshot),
+    Instance(Box<InstanceRuntimeSnapshot>),
     RecordingUpdated(RecordingUpdate),
     CaptureSearchBatch(CaptureSearchBatch),
     CaptureSnapshot(Box<CaptureSnapshotReply>),
@@ -207,6 +288,9 @@ mod tests {
             recording_enabled: true,
             retained_capture_count: 3,
             settings_revision: 7,
+            mapping: Default::default(),
+            capture_store: Default::default(),
+            metrics: Default::default(),
         }
     }
 
@@ -221,7 +305,7 @@ mod tests {
     #[test]
     fn instance_reply_exposes_the_complete_compact_runtime_snapshot() {
         let expected = snapshot();
-        let reply = RuntimeReply::Instance(expected.clone());
+        let reply = RuntimeReply::Instance(Box::new(expected.clone()));
         let actual = reply.instance();
 
         assert_eq!(actual.instance, expected.instance);

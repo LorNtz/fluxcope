@@ -1,7 +1,10 @@
 use crate::{
     capture::CaptureSequence,
     control::{
+        BodyWorkRuntimeStatus, CaptureStoreRuntimeStatus, ControlRpcRuntimeStatus,
+        InstanceRuntimeMetrics, MappingRuntimeStatus, SearchWorkRuntimeStatus,
         WaitForCaptureRequest, WaitForCaptureResult,
+        audit::InstanceAuditSnapshot,
         body::{
             BodyContentRequest, BodyPage, ExtractCaptureBodyRequest, ExtractCaptureBodyResult,
             SearchCaptureBodyRequest, SearchCaptureBodyResult, SelectionContentRequest,
@@ -24,12 +27,14 @@ use crate::{
         },
     },
 };
+use schemars::JsonSchema;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
 use serde_json::{Value, value::RawValue};
 use std::{
     net::SocketAddr,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -47,7 +52,7 @@ pub(crate) struct DeclaredClient {
     pub(crate) version: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlOperationKind {
     DescribeInstance,
@@ -66,6 +71,45 @@ pub(crate) enum ControlOperationKind {
     ValidateMappingSettings,
     ExplainMapping,
     MutateMapping,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MutationAuditOperationKind {
+    SetRecordingEnabled,
+    CreatePreset,
+    RenamePreset,
+    DeletePreset,
+    SetActivePreset,
+    SetMappingGate,
+    CreateMappingRule,
+    UpdateMappingRule,
+    DeleteMappingRule,
+    MoveMappingRule,
+    SetMappingRuleEnabled,
+}
+
+impl ControlOperationKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::DescribeInstance => "describe_instance",
+            Self::GetStatus => "get_status",
+            Self::SetRecordingEnabled => "set_recording_enabled",
+            Self::SearchCaptures => "search_captures",
+            Self::GetCapture => "get_capture",
+            Self::WaitForCapture => "wait_for_capture",
+            Self::ReadCaptureBody => "read_capture_body",
+            Self::SearchCaptureBody => "search_capture_body",
+            Self::ExtractCaptureBody => "extract_capture_body",
+            Self::ReadSelectedBody => "read_selected_body",
+            Self::FindJsonPointers => "find_json_pointers",
+            Self::ProbeJsonPointerPattern => "probe_json_pointer_pattern",
+            Self::GetMappingSettings => "get_mapping_settings",
+            Self::ValidateMappingSettings => "validate_mapping_settings",
+            Self::ExplainMapping => "explain_mapping",
+            Self::MutateMapping => "mutate_mapping",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -842,11 +886,23 @@ pub(crate) enum ControlResult {
     },
     GetStatus {
         instance: InstanceScope,
+        local_proxy_url: String,
+        wirelens_version: String,
+        rpc_version: u16,
+        config_source: Option<PathBuf>,
         config_mode: ConfigMode,
         persistence: PersistenceMode,
         recording_enabled: bool,
         retained_capture_count: usize,
         settings_revision: u64,
+        mapping: MappingRuntimeStatus,
+        capture_store: CaptureStoreRuntimeStatus,
+        capture_change_epoch: u64,
+        metrics: Box<InstanceRuntimeMetrics>,
+        private_rpc: ControlRpcRuntimeStatus,
+        body_work: Box<BodyWorkRuntimeStatus>,
+        search_work: SearchWorkRuntimeStatus,
+        audit: Box<InstanceAuditSnapshot>,
     },
     SetRecordingEnabled {
         instance: InstanceScope,
@@ -970,7 +1026,7 @@ impl ControlResult {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlErrorCode {
     InvalidArgument,

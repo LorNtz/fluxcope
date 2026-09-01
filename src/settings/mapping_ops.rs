@@ -133,6 +133,115 @@ pub(crate) enum MappingMutation {
     },
 }
 
+impl MappingMutation {
+    pub(crate) fn audit_target_bounded(
+        &self,
+        maximum_name_bytes: usize,
+    ) -> (MappingObjectRef, bool) {
+        match self {
+            Self::CreatePreset { name, .. }
+            | Self::RenamePreset { name, .. }
+            | Self::DeletePreset { name } => {
+                let (name, truncated) = bounded_mapping_name(name, maximum_name_bytes);
+                (MappingObjectRef::Preset { name }, truncated)
+            }
+            Self::SetActivePreset { .. } => (MappingObjectRef::ActivePreset, false),
+            Self::SetGlobalEnabled { .. } => (MappingObjectRef::Proxy, false),
+            Self::SetTableEnabled { preset, table, .. } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Table {
+                        preset,
+                        table: *table,
+                    },
+                    truncated,
+                )
+            }
+            Self::AppendRemoteRule { preset, .. } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Table {
+                        preset,
+                        table: ProxyRuleTable::Remote,
+                    },
+                    truncated,
+                )
+            }
+            Self::AppendLocalRule { preset, .. } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Table {
+                        preset,
+                        table: ProxyRuleTable::Local,
+                    },
+                    truncated,
+                )
+            }
+            Self::InsertRemoteRule { preset, index, .. }
+            | Self::UpdateRemoteRule { preset, index, .. } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Rule {
+                        preset,
+                        table: ProxyRuleTable::Remote,
+                        index: *index,
+                    },
+                    truncated,
+                )
+            }
+            Self::InsertLocalRule { preset, index, .. }
+            | Self::UpdateLocalRule { preset, index, .. } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Rule {
+                        preset,
+                        table: ProxyRuleTable::Local,
+                        index: *index,
+                    },
+                    truncated,
+                )
+            }
+            Self::DeleteRule {
+                preset,
+                table,
+                index,
+            }
+            | Self::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                ..
+            } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Rule {
+                        preset,
+                        table: *table,
+                        index: *index,
+                    },
+                    truncated,
+                )
+            }
+            Self::MoveRule {
+                preset,
+                table,
+                from,
+                ..
+            } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    MappingObjectRef::Rule {
+                        preset,
+                        table: *table,
+                        index: *from,
+                    },
+                    truncated,
+                )
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MutationEffect {
@@ -166,6 +275,76 @@ pub(crate) enum MappingObjectRef {
         index: usize,
         field: MappingRuleField,
     },
+}
+
+impl MappingObjectRef {
+    pub(crate) fn bounded_clone(&self, maximum_name_bytes: usize) -> (Self, bool) {
+        match self {
+            Self::Proxy => (Self::Proxy, false),
+            Self::ActivePreset => (Self::ActivePreset, false),
+            Self::Preset { name } => {
+                let (name, truncated) = bounded_mapping_name(name, maximum_name_bytes);
+                (Self::Preset { name }, truncated)
+            }
+            Self::PresetName { name } => {
+                let (name, truncated) = bounded_mapping_name(name, maximum_name_bytes);
+                (Self::PresetName { name }, truncated)
+            }
+            Self::Table { preset, table } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    Self::Table {
+                        preset,
+                        table: *table,
+                    },
+                    truncated,
+                )
+            }
+            Self::Rule {
+                preset,
+                table,
+                index,
+            } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    Self::Rule {
+                        preset,
+                        table: *table,
+                        index: *index,
+                    },
+                    truncated,
+                )
+            }
+            Self::RuleField {
+                preset,
+                table,
+                index,
+                field,
+            } => {
+                let (preset, truncated) = bounded_mapping_name(preset, maximum_name_bytes);
+                (
+                    Self::RuleField {
+                        preset,
+                        table: *table,
+                        index: *index,
+                        field: *field,
+                    },
+                    truncated,
+                )
+            }
+        }
+    }
+}
+
+fn bounded_mapping_name(value: &str, maximum_bytes: usize) -> (String, bool) {
+    if value.len() <= maximum_bytes {
+        return (value.to_owned(), false);
+    }
+    let mut end = maximum_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_owned(), true)
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

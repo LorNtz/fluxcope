@@ -17,7 +17,10 @@ pub(crate) use change::{
     CaptureChangeSubscription,
 };
 
-pub(crate) use body_work::{ActiveBodyWorkLease, BodyWorkAdmission};
+pub(crate) use body_work::{
+    ACTIVE_BODY_WORK_LIMIT, ActiveBodyWorkLease, BodyWorkAdmission, QUEUED_BODY_INPUT_LIMIT_BYTES,
+    QUEUED_BODY_WORK_LIMIT,
+};
 pub(crate) use decode::{
     ContentDecodePolicy, DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics,
     DecodeMetricsSnapshot, DecodePolicy, DecodeResult, DecodedBytes, decode_content_bytes,

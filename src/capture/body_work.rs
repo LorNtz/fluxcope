@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use serde_json::json;
@@ -30,6 +30,7 @@ struct BodyWorkAdmissionInner {
     queue: Mutex<QueueState>,
     active: AtomicUsize,
     active_waiters: AtomicUsize,
+    rejected: AtomicU64,
     changed: Notify,
 }
 
@@ -47,6 +48,7 @@ impl BodyWorkAdmission {
                 queue: Mutex::new(QueueState::default()),
                 active: AtomicUsize::new(0),
                 active_waiters: AtomicUsize::new(0),
+                rejected: AtomicU64::new(0),
                 changed: Notify::new(),
             }),
         }
@@ -86,6 +88,7 @@ impl BodyWorkAdmission {
             .lock()
             .expect("body work queue lock poisoned");
         if queue.jobs >= QUEUED_BODY_WORK_LIMIT {
+            self.inner.rejected.fetch_add(1, Ordering::Relaxed);
             return Err(ControlError::new(
                 ControlErrorCode::ResourceLimit,
                 "body work queue is full",
@@ -94,9 +97,11 @@ impl BodyWorkAdmission {
             ));
         }
         let Some(next_bytes) = queue.bytes.checked_add(input_bytes) else {
+            self.inner.rejected.fetch_add(1, Ordering::Relaxed);
             return Err(queue_bytes_error(input_bytes, queue.bytes));
         };
         if next_bytes > QUEUED_BODY_INPUT_LIMIT_BYTES {
+            self.inner.rejected.fetch_add(1, Ordering::Relaxed);
             return Err(queue_bytes_error(input_bytes, queue.bytes));
         }
         queue.jobs += 1;
@@ -122,8 +127,7 @@ impl BodyWorkAdmission {
         self.inner.changed.notify_waiters();
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_snapshot(&self) -> BodyWorkAdmissionSnapshot {
+    pub(crate) fn snapshot(&self) -> BodyWorkAdmissionSnapshot {
         let queue = self
             .inner
             .queue
@@ -133,7 +137,13 @@ impl BodyWorkAdmission {
             active: self.inner.active.load(Ordering::Acquire),
             queued: queue.jobs,
             queued_bytes: queue.bytes,
+            rejected: self.inner.rejected.load(Ordering::Relaxed),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(&self) -> BodyWorkAdmissionSnapshot {
+        self.snapshot()
     }
 
     #[cfg(test)]
@@ -282,12 +292,12 @@ fn deadline_error() -> ControlError {
     ControlError::deadline_exceeded("body work deadline elapsed")
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BodyWorkAdmissionSnapshot {
     pub(crate) active: usize,
     pub(crate) queued: usize,
     pub(crate) queued_bytes: usize,
+    pub(crate) rejected: u64,
 }
 
 #[cfg(test)]

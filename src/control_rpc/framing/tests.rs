@@ -235,7 +235,7 @@ async fn response_budget_wait_obeys_the_same_operation_deadline_and_cancellation
     )
     .await
     .expect_err("budget wait deadline");
-    assert_eq!(deadline_error.code, ControlErrorCode::InstanceUnavailable);
+    assert_eq!(deadline_error.code, ControlErrorCode::DeadlineExceeded);
 
     let cancelled = CancellationToken::new();
     let cancellation = cancelled.clone();
@@ -250,10 +250,7 @@ async fn response_budget_wait_obeys_the_same_operation_deadline_and_cancellation
     tokio::pin!(cancelled_call);
     cancellation.cancel();
     let cancellation_error = cancelled_call.await.expect_err("budget wait cancellation");
-    assert_eq!(
-        cancellation_error.code,
-        ControlErrorCode::InstanceUnavailable
-    );
+    assert_eq!(cancellation_error.code, ControlErrorCode::Cancelled);
     drop(held);
 }
 
@@ -263,10 +260,10 @@ async fn cancelled_response_serialization_keeps_worker_leases_until_worker_exit(
     let budget = ResponseSerializationBudget::new(RESPONSE_SERIALIZATION_BUDGET_BYTES);
     let lease = admission.acquire().await.expect("call permit");
     let (started_tx, mut started_rx) = mpsc::channel(1);
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = SerializationGateRelease::new();
     let value = SerializationGate {
         started: started_tx,
-        release: Arc::clone(&release),
+        release: release.gate(),
     };
     let cancelled = CancellationToken::new();
     let cancel = cancelled.clone();
@@ -275,27 +272,26 @@ async fn cancelled_response_serialization_keeps_worker_leases_until_worker_exit(
         RESPONSE_MAX_BYTES,
         budget,
         lease,
-        Instant::now() + Duration::from_secs(1),
+        Instant::now() + Duration::from_secs(30),
         cancelled,
     ));
-    started_rx.recv().await.expect("serializer worker started");
+    tokio::time::timeout(Duration::from_secs(30), started_rx.recv())
+        .await
+        .expect("serializer worker start stays bounded")
+        .expect("serializer worker started");
 
     cancel.cancel();
     let error = task
         .await
         .expect("serialization task")
         .expect_err("serialization cancellation");
-    assert_eq!(error.code, ControlErrorCode::InstanceUnavailable);
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
     assert!(
         admission.try_acquire().is_err(),
         "cancelled serializer worker must retain the call permit"
     );
 
-    {
-        let (lock, wake) = &*release;
-        *lock.lock().expect("serializer gate") = true;
-        wake.notify_all();
-    }
+    release.signal();
     tokio::time::timeout(Duration::from_secs(1), admission.acquire())
         .await
         .expect("serializer worker exits")
@@ -339,6 +335,34 @@ async fn capped_writer_uses_bounded_geometric_growth_for_tiny_tokens() {
 struct SerializationGate {
     started: mpsc::Sender<()>,
     release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+struct SerializationGateRelease {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl SerializationGateRelease {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn gate(&self) -> Arc<(Mutex<bool>, Condvar)> {
+        Arc::clone(&self.gate)
+    }
+
+    fn signal(&self) {
+        let (lock, wake) = &*self.gate;
+        *lock.lock().expect("serializer gate") = true;
+        wake.notify_all();
+    }
+}
+
+impl Drop for SerializationGateRelease {
+    fn drop(&mut self) {
+        self.signal();
+    }
 }
 
 impl Serialize for SerializationGate {
