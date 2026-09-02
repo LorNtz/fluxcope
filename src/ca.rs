@@ -143,6 +143,7 @@ fn path_present(path: &Path) -> io::Result<bool> {
 }
 
 fn read_owner_only_file(path: &Path) -> io::Result<Vec<u8>> {
+    // Validate ownership/link safety and tighten legacy permissions before reading.
     let file = private_fs::open_file(path, false)?;
     let metadata = file.metadata()?;
     const MAX_AUTHORITY_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -226,6 +227,43 @@ mod tests {
         // DER bytes should also match
         assert_eq!(ca1.cert_der(), ca2.cert_der(), "DER bytes should match");
         assert_eq!(ca1.key_der(), ca2.key_der(), "Key DER bytes should match");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_authority_permissions_are_tightened_before_loading() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let cert_dir = tempfile::tempdir().expect("temporary CA directory");
+        let pem_filename = "wirelens-ca.pem";
+        let original = create_or_load_ca(cert_dir.path(), pem_filename)
+            .expect("initial authority creation should succeed");
+
+        for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+            fs::set_permissions(
+                cert_dir.path().join(name),
+                fs::Permissions::from_mode(0o644),
+            )
+            .expect("legacy permissions should be installed");
+        }
+
+        let loaded = create_or_load_ca(cert_dir.path(), pem_filename)
+            .expect("legacy authority should be migrated and loaded");
+
+        assert_eq!(loaded.cert_der(), original.cert_der());
+        assert_eq!(loaded.key_der(), original.key_der());
+        assert_eq!(loaded.cert_pem(), original.cert_pem());
+        for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+            assert_eq!(
+                fs::metadata(cert_dir.path().join(name))
+                    .expect("migrated authority metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{name} must be tightened to owner-only",
+            );
+        }
     }
 
     #[test]

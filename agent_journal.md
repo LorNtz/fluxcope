@@ -53,3 +53,8 @@ Date: 2026/09/17 10:41
 Date: 2026/09/17 10:42
 
 - Integrated MCP acceptance benchmarks with the Fluxcope crate name while preserving master dist profile and release packaging. Kept benchmark feature gating and master dependency lock baseline.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:43
+
+- Integrated legacy CA permissions migration through master private_fs::open_file, which validates ownership/link safety and chmods the same opened file to 0600 before reading. Retained the feature regression checking unchanged certificate/key bytes after migration.
