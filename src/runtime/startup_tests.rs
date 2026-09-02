@@ -754,3 +754,37 @@ async fn service_exit_after_publication_is_detected_before_supervision_handoff()
         .expect("rollback published dead service");
     assert!(!descriptor_path.exists());
 }
+
+#[tokio::test]
+async fn supervision_handoff_does_not_cancel_the_control_service() {
+    let home = TempDir::new().expect("temporary Wirelens home");
+    let identity = identity("127.0.0.1:19032");
+    let (handler, _control_rx) = runtime_handler();
+    let shutdown = CancellationToken::new();
+    let prepared = PrivateControlStartup::prepare(true, home.path(), identity, &settings())
+        .expect("prepare control")
+        .expect("enabled control");
+    let mut running = prepared
+        .start(handler, shutdown.clone())
+        .expect("start control service");
+    running
+        .publish_after_probe(
+            &StubProbe::unavailable(),
+            Instant::now() + Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("publish live control service");
+
+    let (_publisher, task) = running
+        .into_supervised_parts()
+        .expect("transfer control service ownership");
+    tokio::task::yield_now().await;
+
+    assert!(!shutdown.is_cancelled());
+    assert!(!task.is_finished());
+    shutdown.cancel();
+    task.await
+        .expect("join control service")
+        .expect("control service shutdown");
+}

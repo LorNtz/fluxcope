@@ -233,7 +233,7 @@ impl CapturedBodyPreview {
         flattened
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark"))]
     pub(crate) fn unbudgeted(bytes: Bytes) -> Self {
         let len = bytes.len();
         Self::new(None, bytes, len, CaptureBudgetLease::unbudgeted())

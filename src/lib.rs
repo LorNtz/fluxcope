@@ -1,4 +1,5 @@
 mod app;
+#[cfg(feature = "benchmark")]
 #[doc(hidden)]
 pub mod benchmark_support;
 mod ca;

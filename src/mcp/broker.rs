@@ -10,7 +10,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{
         router::tool::ToolRouter,
         tool::schema_for_type,
@@ -22,12 +22,8 @@ use rmcp::{
         ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceTemplate,
         ServerCapabilities, ServerInfo,
     },
-    service::{
-        RequestContext, RunningService, RxJsonRpcMessage, ServerInitializeError, ServiceRole,
-        TxJsonRpcMessage,
-    },
+    service::RequestContext,
     tool, tool_handler, tool_router,
-    transport::{IntoTransport, Transport},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -91,6 +87,7 @@ const MAPPING_CONVERSION_LIMIT: usize = 2;
 pub(super) const LIVENESS_PROBE_LIMIT: usize = 16;
 const AMBIGUOUS_INSTANCE_LIMIT: usize = 16;
 const ORDINARY_DEADLINE: Duration = Duration::from_secs(30);
+const STALE_CLEANUP_MAX_WAIT: Duration = Duration::from_millis(250);
 const CLIENT_IDENTIFIER_LIMIT: usize = 128;
 
 pub(crate) type McpDomainError = ControlError;
@@ -344,42 +341,6 @@ async fn validate_public_wait_input(
     }
 }
 
-struct DisconnectCancellingTransport<T> {
-    inner: T,
-    cancelled: CancellationToken,
-}
-
-impl<R, T> Transport<R> for DisconnectCancellingTransport<T>
-where
-    R: ServiceRole,
-    T: Transport<R>,
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: TxJsonRpcMessage<R>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.inner.send(item)
-    }
-
-    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<R>>> + Send {
-        let cancelled = self.cancelled.clone();
-        let receive = self.inner.receive();
-        async move {
-            let message = receive.await;
-            if message.is_none() {
-                cancelled.cancel();
-            }
-            message
-        }
-    }
-
-    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.inner.close()
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct Broker {
     tool_router: ToolRouter<Self>,
@@ -393,21 +354,22 @@ pub(crate) struct Broker {
     telemetry: Arc<BrokerTelemetry>,
 }
 
+#[cfg(test)]
 impl Broker {
-    pub(crate) async fn serve<T, E, A>(
+    async fn serve<T, E, A>(
         self,
         transport: T,
-    ) -> Result<RunningService<RoleServer, Self>, ServerInitializeError>
+    ) -> Result<rmcp::service::RunningService<RoleServer, Self>, rmcp::service::ServerInitializeError>
     where
-        T: IntoTransport<RoleServer, E, A>,
+        T: rmcp::transport::IntoTransport<RoleServer, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
         let cancelled = CancellationToken::new();
-        let transport = DisconnectCancellingTransport {
-            inner: transport.into_transport(),
-            cancelled: cancelled.clone(),
-        };
-        ServiceExt::serve_with_ct(self, transport, cancelled).await
+        let transport = super::stdio::cancel_on_disconnect(
+            rmcp::transport::IntoTransport::into_transport(transport),
+            cancelled.clone(),
+        );
+        rmcp::ServiceExt::serve_with_ct(self, transport, cancelled).await
     }
 }
 
@@ -811,9 +773,21 @@ impl Broker {
                 && left.socket_path() == right.socket_path()
         });
         let stale_count = stale.len();
-        if !stale.is_empty() {
-            self.prune_stale_batch(stale, deadline, cancelled.clone())
-                .await?;
+        if !stale.is_empty()
+            && let Err(error) = self
+                .prune_stale_batch(stale, deadline, cancelled.clone())
+                .await
+        {
+            if matches!(
+                error.code(),
+                ControlErrorCode::Cancelled | ControlErrorCode::DeadlineExceeded
+            ) {
+                return Err(error);
+            }
+            rejected.push(DiscoveryDiagnostic::from_parts(
+                "stale_cleanup_failed",
+                error.message(),
+            ));
         }
         live_instances.sort_by(|left, right| {
             left.descriptor
@@ -859,9 +833,12 @@ impl Broker {
         };
         let registry = Arc::clone(&self.registry);
         let cleanup_cancelled = cancelled.clone();
+        let cleanup_limit = Instant::now() + STALE_CLEANUP_MAX_WAIT;
+        let cleanup_deadline = deadline.min(cleanup_limit);
+        let cleanup_uses_call_deadline = deadline <= cleanup_limit;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            registry.prune_batch_if_current(&descriptors, deadline, &cleanup_cancelled)
+            registry.prune_batch_if_current(&descriptors, cleanup_deadline, &cleanup_cancelled)
         });
         tokio::select! {
             biased;
@@ -869,8 +846,14 @@ impl Broker {
                 self.telemetry.record_cancelled_call();
                 Err(ControlError::cancelled("stale cleanup cancelled"))
             }
-            () = tokio::time::sleep_until(deadline) => {
-                Err(ControlError::deadline_exceeded("stale cleanup deadline elapsed"))
+            () = tokio::time::sleep_until(cleanup_deadline) => {
+                if cleanup_uses_call_deadline {
+                    Err(ControlError::deadline_exceeded("stale cleanup deadline elapsed"))
+                } else {
+                    Err(ControlError::instance_unavailable(
+                        "stale cleanup mutation lock wait limit elapsed",
+                    ))
+                }
             }
             result = task => {
                 result
@@ -2889,6 +2872,7 @@ mod tests {
         scan_calls: AtomicUsize,
         endpoint_calls: AtomicUsize,
         prune_calls: AtomicUsize,
+        prune_error: bool,
     }
 
     impl FakeRegistry {
@@ -2901,6 +2885,7 @@ mod tests {
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
                 prune_calls: AtomicUsize::new(0),
+                prune_error: false,
             })
         }
 
@@ -2916,6 +2901,7 @@ mod tests {
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
                 prune_calls: AtomicUsize::new(0),
+                prune_error: false,
             })
         }
 
@@ -2932,6 +2918,20 @@ mod tests {
                 scan_calls: AtomicUsize::new(0),
                 endpoint_calls: AtomicUsize::new(0),
                 prune_calls: AtomicUsize::new(0),
+                prune_error: false,
+            })
+        }
+
+        fn with_prune_failure(candidates: Vec<InstanceDescriptor>) -> Arc<Self> {
+            Arc::new(Self {
+                endpoint_candidates: candidates.clone(),
+                scan_candidates: candidates,
+                rejected: Vec::new(),
+                omitted: 0,
+                scan_calls: AtomicUsize::new(0),
+                endpoint_calls: AtomicUsize::new(0),
+                prune_calls: AtomicUsize::new(0),
+                prune_error: true,
             })
         }
 
@@ -2971,7 +2971,14 @@ mod tests {
             _cancelled: &CancellationToken,
         ) -> io::Result<usize> {
             self.prune_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(descriptors.len())
+            if self.prune_error {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test stale cleanup failure",
+                ))
+            } else {
+                Ok(descriptors.len())
+            }
         }
     }
 
@@ -3346,6 +3353,30 @@ mod tests {
             vec!["a_invalid", "z_invalid"]
         );
         assert_eq!(report.omitted, 7);
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_failure_keeps_probed_live_instances_visible() {
+        let live = descriptor(19004, RUN_A);
+        let stale = descriptor(19005, RUN_STALE);
+        let registry = FakeRegistry::with_prune_failure(vec![live.clone(), stale.clone()]);
+        let probe = FakeProbe::live(&[live.clone(), stale.clone()]);
+        probe.mark_stale_connect(stale.proxy_endpoint());
+        let broker = broker(registry, probe);
+
+        let report = broker
+            .discover(client(), deadline(), CancellationToken::new())
+            .await
+            .expect("cleanup failure must not hide live instances");
+
+        assert_eq!(report.live_instances.len(), 1);
+        assert_eq!(
+            report.live_instances[0].descriptor.proxy_endpoint(),
+            live.proxy_endpoint()
+        );
+        assert_eq!(report.stale_count, 1);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(report.rejected[0].code(), "stale_cleanup_failed");
     }
 
     #[tokio::test]
@@ -3939,6 +3970,45 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contended_stale_cleanup_degrades_after_its_short_mutation_wait_budget() {
+        let stale = descriptor(19702, RUN_STALE);
+        let gate = Arc::new(BlockingGate::default());
+        let registry = Arc::new(BlockingPruneRegistry {
+            descriptor: stale.clone(),
+            gate: Arc::clone(&gate),
+            prune_started: AtomicBool::new(false),
+            prune_committed: AtomicUsize::new(0),
+        });
+        let probe = FakeProbe::live(std::slice::from_ref(&stale));
+        probe.mark_stale_connect(stale.proxy_endpoint());
+        let broker = Broker::with_dependencies(
+            PathBuf::from("/test/.wirelens/run/instances"),
+            Arc::clone(&registry),
+            probe,
+        );
+
+        let report = tokio::time::timeout(
+            Duration::from_secs(1),
+            broker.discover(
+                client(),
+                Instant::now() + Duration::from_secs(5),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("stale cleanup must not consume the ordinary call deadline")
+        .expect("cleanup lock contention should degrade to a diagnostic");
+        gate.release();
+
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(report.rejected[0].code(), "stale_cleanup_failed");
+        assert!(
+            report.rejected[0]
+                .message()
+                .contains("mutation lock wait limit")
+        );
+    }
     #[tokio::test]
     async fn duplicate_stale_probe_results_are_pruned_once_per_identity() {
         let stale = descriptor(19701, RUN_STALE);

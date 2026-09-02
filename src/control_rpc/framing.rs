@@ -4,8 +4,11 @@ use crate::control_rpc::protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fmt,
-    io::{self, Write},
-    sync::Arc,
+    io::{self, BufReader as SyncBufReader, Cursor, Read, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 use tokio::{
@@ -18,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const REQUEST_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const RESPONSE_SERIALIZATION_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+const CANCELLABLE_JSON_READER_THRESHOLD_BYTES: usize = 64 * 1024;
 pub(crate) const ACTIVE_CALL_LIMIT: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -115,6 +119,7 @@ pub(crate) struct ValidatedRequestFrame {
     pub(crate) request: Result<ControlRequest, ControlError>,
 }
 
+#[cfg(test)]
 pub(crate) async fn read_json_frame<T, R>(
     reader: &mut R,
     max_bytes: usize,
@@ -125,6 +130,21 @@ where
 {
     let payload = read_frame_payload(reader, max_bytes).await?;
     parse_json_payload(payload).await
+}
+
+pub(crate) async fn read_json_frame_cancellable<T, R>(
+    reader: &mut R,
+    max_bytes: usize,
+    cancelled: Arc<AtomicBool>,
+) -> Result<T, ControlError>
+where
+    T: DeserializeOwned + Send + 'static,
+    R: AsyncRead + Unpin,
+{
+    let payload = read_frame_payload(reader, max_bytes).await?;
+    tokio::task::spawn_blocking(move || parse_json_payload_cancellable(payload, &cancelled))
+        .await
+        .map_err(|_| ControlError::instance_unavailable("private RPC parser worker failed"))?
 }
 
 async fn read_frame_payload<R>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, ControlError>
@@ -153,6 +173,7 @@ where
     Ok(payload)
 }
 
+#[cfg(test)]
 async fn parse_json_payload<T>(payload: Vec<u8>) -> Result<T, ControlError>
 where
     T: DeserializeOwned + Send + 'static,
@@ -160,6 +181,63 @@ where
     tokio::task::spawn_blocking(move || strict_from_slice::<T>(&payload))
         .await
         .map_err(|_| ControlError::instance_unavailable("private RPC parser worker failed"))?
+}
+
+fn parse_json_payload_cancellable<T>(
+    payload: Vec<u8>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<T, ControlError>
+where
+    T: DeserializeOwned,
+{
+    if cancelled.load(Ordering::Acquire) {
+        return Err(response_parsing_cancelled());
+    }
+    if payload.len() <= CANCELLABLE_JSON_READER_THRESHOLD_BYTES {
+        let result = strict_from_slice::<T>(&payload);
+        return if cancelled.load(Ordering::Acquire) {
+            Err(response_parsing_cancelled())
+        } else {
+            result
+        };
+    }
+    let reader = SyncBufReader::with_capacity(
+        32 * 1024,
+        CancellationReader {
+            inner: Cursor::new(payload),
+            cancelled: Arc::clone(cancelled),
+        },
+    );
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let value = T::deserialize(&mut deserializer);
+    if cancelled.load(Ordering::Acquire) {
+        return Err(response_parsing_cancelled());
+    }
+    let value = value.map_err(|error| ControlError::invalid_argument(error.to_string()))?;
+    let completed = deserializer.end();
+    if cancelled.load(Ordering::Acquire) {
+        return Err(response_parsing_cancelled());
+    }
+    completed.map_err(|error| ControlError::invalid_argument(error.to_string()))?;
+    Ok(value)
+}
+
+fn response_parsing_cancelled() -> ControlError {
+    ControlError::cancelled("private RPC response parsing cancelled")
+}
+
+struct CancellationReader {
+    inner: Cursor<Vec<u8>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Read for CancellationReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(io::Error::other("private RPC response parsing cancelled"));
+        }
+        Read::read(&mut self.inner, buffer)
+    }
 }
 
 pub(crate) async fn read_validated_request_frame_with_call_lease<R>(
@@ -342,6 +420,48 @@ where
         let (serialized, allocation_growth_count) = writer.finish()?;
         Ok((serialized, pessimistic_lease, allocation_growth_count))
     })
+}
+
+#[cfg(feature = "benchmark")]
+pub(crate) struct BenchmarkSerializationFixture {
+    payload: Arc<str>,
+    admission: CallAdmission,
+    budget: ResponseSerializationBudget,
+}
+
+#[cfg(feature = "benchmark")]
+impl BenchmarkSerializationFixture {
+    pub(crate) fn new(payload_bytes: usize) -> Self {
+        Self {
+            payload: Arc::from("x".repeat(payload_bytes)),
+            admission: CallAdmission::new(ACTIVE_CALL_LIMIT),
+            budget: ResponseSerializationBudget::new(RESPONSE_SERIALIZATION_BUDGET_BYTES),
+        }
+    }
+
+    pub(crate) async fn serialize(&self) -> Result<usize, ControlError> {
+        #[derive(Serialize)]
+        struct Payload {
+            operation: &'static str,
+            payload: Arc<str>,
+        }
+
+        let call_lease = self.admission.acquire().await?;
+        let pessimistic_lease = self.budget.acquire(RESPONSE_MAX_BYTES).await?;
+        let worker = spawn_serialization_worker(
+            Payload {
+                operation: "benchmark",
+                payload: Arc::clone(&self.payload),
+            },
+            RESPONSE_MAX_BYTES,
+            pessimistic_lease,
+            call_lease,
+        );
+        let (bytes, _lease, _capacity) = worker
+            .await
+            .map_err(|_| ControlError::instance_unavailable("benchmark serializer failed"))??;
+        Ok(bytes.len())
+    }
 }
 
 fn finish_serialized_frame(

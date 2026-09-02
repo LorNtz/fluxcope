@@ -218,6 +218,23 @@ fn decoded_utf8_treats_length_as_a_maximum_and_aligns_actual_end_down() {
     assert_eq!(final_page.next_offset, None);
 }
 
+#[test]
+fn decoded_utf8_short_page_advances_to_the_next_character_boundary() {
+    let decoded = DecodedBytes::new(Bytes::from_static("中a".as_bytes()), Vec::new(), false);
+    let page = page_decoded_body(
+        &decoded,
+        &request(BodyRepresentation::Decoded, 0, 1),
+        &status(BodyStreamState::Complete, 4),
+        &headers("text/plain"),
+    )
+    .expect("short decoded page");
+
+    assert_eq!(page.content.as_ref(), "中".as_bytes());
+    assert_eq!(page.requested_range.length, 1);
+    assert_eq!(page.actual_range.length, 3);
+    assert_eq!(page.next_offset, Some(3));
+}
+
 fn encode_with<W>(mut encoder: W, plain: &[u8]) -> Vec<u8>
 where
     W: Write,

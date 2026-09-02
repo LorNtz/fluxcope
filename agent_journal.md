@@ -48,3 +48,8 @@ Date: 2026/09/17 10:40
 Date: 2026/09/17 10:41
 
 - Merged paged-body capture subscriptions with Hyper 1 body helpers. Kept master private_fs log admission on a bounded blocking task instead of restoring the weaker duplicated file-open implementation.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:42
+
+- Integrated MCP acceptance benchmarks with the Fluxcope crate name while preserving master dist profile and release packaging. Kept benchmark feature gating and master dependency lock baseline.

@@ -1,7 +1,8 @@
 use super::{
     CallAdmission, REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, RESPONSE_SERIALIZATION_BUDGET_BYTES,
-    ResponseSerializationBudget, read_json_frame, read_validated_request_frame_with_call_lease,
-    run_blocking_with_call_lease, serialize_json_frame, serialize_json_frame_until,
+    ResponseSerializationBudget, read_json_frame, read_json_frame_cancellable,
+    read_validated_request_frame_with_call_lease, run_blocking_with_call_lease,
+    serialize_json_frame, serialize_json_frame_until,
 };
 use crate::control_rpc::{
     protocol::{ControlErrorCode, RequestEnvelope},
@@ -10,7 +11,7 @@ use crate::control_rpc::{
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -75,6 +76,19 @@ async fn malformed_utf8_and_trailing_json_are_rejected() {
         .await
         .expect_err("trailing JSON");
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
+}
+
+#[tokio::test]
+async fn cancelled_response_parse_returns_a_typed_cancellation() {
+    let frame = framed(br#"{"value":7}"#);
+    let mut input = frame.as_slice();
+    let cancelled = Arc::new(AtomicBool::new(true));
+
+    let error = read_json_frame_cancellable::<TinyPayload, _>(&mut input, 128, cancelled)
+        .await
+        .expect_err("cancelled response parse");
+
+    assert_eq!(error.code, ControlErrorCode::Cancelled);
 }
 
 #[tokio::test]

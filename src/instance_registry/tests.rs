@@ -503,6 +503,52 @@ fn registry_mutation_lock_is_exclusive_across_independent_handles() {
 }
 
 #[test]
+fn registry_mutation_lock_honors_deadline_while_contended() {
+    let fixture = RegistryFixture::new();
+    let first = RegistryMutationLock::acquire(fixture.home()).expect("registry mutation lock");
+    let cancelled = CancellationToken::new();
+    let started = Instant::now();
+
+    let error = RegistryMutationLock::acquire_until(
+        fixture.home(),
+        started + Duration::from_millis(25),
+        &cancelled,
+    )
+    .err()
+    .expect("contended lock deadline");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(first);
+}
+
+#[test]
+fn publisher_drop_is_nonblocking_when_registry_lock_is_contended() {
+    let fixture = RegistryFixture::new();
+    let publisher = fixture.publish(ENDPOINT_A);
+    let descriptor_path = publisher.descriptor_path().to_path_buf();
+    let first = RegistryMutationLock::acquire(fixture.home()).expect("registry mutation lock");
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let drop_task = std::thread::spawn(move || {
+        drop(publisher);
+        let _ = finished_tx.send(());
+    });
+
+    let finished = finished_rx.recv_timeout(Duration::from_millis(100));
+    drop(first);
+    drop_task.join().expect("publisher drop thread");
+
+    assert!(
+        finished.is_ok(),
+        "Drop must not wait for registry mutation lock"
+    );
+    assert!(
+        descriptor_path.exists(),
+        "best-effort Drop leaves a discoverable stale descriptor for later pruning"
+    );
+}
+
+#[test]
 fn endpoint_read_does_not_scan_an_unrelated_invalid_descriptor() {
     let fixture = RegistryFixture::new();
     let good = fixture.publish(ENDPOINT_A);

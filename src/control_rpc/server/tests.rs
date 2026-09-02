@@ -352,6 +352,25 @@ async fn server_admits_at_most_thirty_two_calls() {
     assert_eq!(handler.calls.load(Ordering::SeqCst), ACTIVE_CALLS + 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn idle_connection_releases_its_call_permit_after_the_handshake_deadline() {
+    let identity = InstanceIdentity::new(endpoint()).expect("instance identity");
+    let handler = handler(&identity, HandlerMode::Success);
+    let server = ControlRpcServer::new(identity, handler.clone());
+    let (server_stream, _client_stream) = UnixStream::pair().expect("Unix stream pair");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        server.serve_connection(server_stream),
+    )
+    .await
+    .expect("server handshake must expire independently")
+    .expect_err("idle handshake");
+
+    assert_eq!(result.code, ControlErrorCode::DeadlineExceeded);
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn stale_run_id_is_rejected_before_handler_dispatch() {
     let identity = InstanceIdentity::new(endpoint()).expect("instance identity");

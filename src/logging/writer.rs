@@ -127,6 +127,12 @@ async fn rotate(path: &Path, retained_files: usize) -> io::Result<()> {
     rename_if_exists(path, &rotated_path(path, 1)).await
 }
 
+#[cfg(feature = "benchmark")]
+pub(crate) async fn benchmark_rotate(path: &Path, retained_files: usize) -> io::Result<()> {
+    fs::write(path, b"benchmark log record\n").await?;
+    rotate(path, retained_files).await
+}
+
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(format!(".{index}"));

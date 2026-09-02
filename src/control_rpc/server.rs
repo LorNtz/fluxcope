@@ -31,6 +31,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+const REQUEST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug)]
 pub(crate) struct ControlCallContext {
     pub(crate) request_id: String,
@@ -152,14 +154,21 @@ where
         };
         validate_peer_identity(&stream)?;
         let (mut reader, mut writer) = stream.into_split();
+        let handshake_deadline = tokio::time::Instant::now() + REQUEST_HANDSHAKE_TIMEOUT;
         let parsed = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => return Ok(()),
+            _ = tokio::time::sleep_until(handshake_deadline) => {
+                return Err(ControlError::deadline_exceeded(
+                    "private RPC request handshake deadline elapsed",
+                ));
+            }
             parsed = read_validated_request_frame_with_call_lease(
                 &mut reader,
                 REQUEST_MAX_BYTES,
                 Arc::clone(&call_lease),
                 Instant::now(),
             ) => parsed?,
-            _ = cancelled.cancelled() => return Ok(()),
         };
         let request = match parsed.request {
             Ok(request) => request,

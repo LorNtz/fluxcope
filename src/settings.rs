@@ -787,6 +787,14 @@ fn write_settings_atomically(path: &Path, settings: &AppSettings) -> io::Result<
     crate::private_fs::write_file(path, content.as_bytes())
 }
 
+#[cfg(feature = "benchmark")]
+pub(crate) fn benchmark_atomic_settings_write(
+    path: &Path,
+    settings: &AppSettings,
+) -> io::Result<()> {
+    write_settings_atomically(path, settings)
+}
+
 fn default_config_path() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".fluxcope/config.yml"))
 }

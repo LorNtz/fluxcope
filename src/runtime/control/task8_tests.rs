@@ -435,6 +435,54 @@ async fn recording_mutation_returns_same_turn_identity_without_a_follow_up_statu
 }
 
 #[tokio::test]
+async fn admitted_recording_mutation_observes_its_authoritative_reply_after_cancellation() {
+    let (identity, _, _) = runtime_fixture(1);
+    let scope = InstanceScope {
+        proxy_endpoint: identity.proxy_endpoint(),
+        run_id: identity.run_id().clone(),
+    };
+    let (client, mut receiver) = RuntimeGateway::channel(1);
+    let handler = RuntimeControlHandler::new(client);
+    let cancelled = CancellationToken::new();
+    let mut call = tokio::spawn({
+        let cancelled = cancelled.clone();
+        async move {
+            handler
+                .handle(
+                    control_context("recording-terminal-delivery"),
+                    ControlOperation::SetRecordingEnabled { enabled: true },
+                    cancelled,
+                )
+                .await
+        }
+    });
+
+    let command = receiver.recv().await.expect("recording command");
+    cancelled.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut call)
+            .await
+            .is_err(),
+        "an admitted recording mutation must wait for its authoritative reply"
+    );
+    command
+        .reply
+        .send(Ok(RuntimeReply::RecordingUpdated(
+            crate::control::RecordingUpdate {
+                instance: scope,
+                previous: false,
+                current: true,
+            },
+        )))
+        .expect("recording reply receiver");
+
+    assert!(matches!(
+        call.await.expect("handler task"),
+        Ok(ControlResult::SetRecordingEnabled { current: true, .. })
+    ));
+}
+
+#[tokio::test]
 async fn private_handler_rejects_invalid_search_semantics_before_runtime_dispatch() {
     let (client, mut receiver) = RuntimeGateway::channel(1);
     let handler = RuntimeControlHandler::new(client);

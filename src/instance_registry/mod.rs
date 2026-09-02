@@ -8,7 +8,7 @@ use std::{
         net::UnixListener,
     },
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -31,6 +31,8 @@ const SOCKET_HASH_HEX_BYTES: usize = 24;
 const REGISTRY_INDEX_VERSION: u16 = 1;
 const REGISTRY_INDEX_FILENAME: &str = ".registry-index.json";
 const REGISTRY_INDEX_TEMP_FILENAME: &str = ".registry-index.tmp";
+const REGISTRY_MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const REGISTRY_MUTATION_LOCK_RETRY: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -153,15 +155,50 @@ pub(crate) struct RegistryMutationLock {
 
 impl RegistryMutationLock {
     pub(crate) fn acquire(wirelens_home: &Path) -> io::Result<Self> {
-        Self::open(wirelens_home, true)
+        let cancelled = CancellationToken::new();
+        Self::acquire_until(
+            wirelens_home,
+            Instant::now() + REGISTRY_MUTATION_LOCK_TIMEOUT,
+            &cancelled,
+        )
     }
 
-    #[cfg(test)]
+    pub(crate) fn acquire_until(
+        wirelens_home: &Path,
+        deadline: Instant,
+        cancelled: &CancellationToken,
+    ) -> io::Result<Self> {
+        let (file, path) = Self::open_file(wirelens_home)?;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Self::finish(file, &path),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+            if cancelled.is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "registry mutation lock acquisition was cancelled",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "registry mutation lock acquisition timed out",
+                ));
+            }
+            std::thread::sleep(remaining.min(REGISTRY_MUTATION_LOCK_RETRY));
+        }
+    }
+
     pub(crate) fn try_acquire(wirelens_home: &Path) -> io::Result<Self> {
-        Self::open(wirelens_home, false)
+        let (file, path) = Self::open_file(wirelens_home)?;
+        file.try_lock_exclusive()?;
+        Self::finish(file, &path)
     }
 
-    fn open(wirelens_home: &Path, blocking: bool) -> io::Result<Self> {
+    fn open_file(wirelens_home: &Path) -> io::Result<(File, PathBuf)> {
         ensure_owner_only_directory(wirelens_home)?;
         let run_dir = wirelens_home.join("run");
         ensure_owner_only_directory(&run_dir)?;
@@ -201,12 +238,11 @@ impl RegistryMutationLock {
             ));
         }
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        if blocking {
-            file.lock_exclusive()?;
-        } else {
-            file.try_lock_exclusive()?;
-        }
-        let path_metadata = fs::symlink_metadata(&path)?;
+        Ok((file, path))
+    }
+
+    fn finish(file: File, path: &Path) -> io::Result<Self> {
+        let path_metadata = fs::symlink_metadata(path)?;
         let locked_metadata = file.metadata()?;
         if !path_metadata.file_type().is_file()
             || path_metadata.dev() != locked_metadata.dev()
@@ -603,6 +639,7 @@ impl RegistryPublisher {
         self.remove_stale_for_replacement_internal(expected, observer, || true)
     }
 
+    #[cfg(test)]
     fn cleanup_internal<F>(&mut self, observer: F) -> io::Result<()>
     where
         F: FnOnce(),
@@ -610,7 +647,18 @@ impl RegistryPublisher {
         if self.cleanup_attempted {
             return Ok(());
         }
-        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        let mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        self.cleanup_locked(mutation_lock, observer)
+    }
+
+    fn cleanup_locked<F>(
+        &mut self,
+        _mutation_lock: RegistryMutationLock,
+        observer: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(),
+    {
         if !self.published {
             let _ = fs::remove_file(&self.socket_path);
             self.cleanup_attempted = true;
@@ -650,6 +698,21 @@ impl RegistryPublisher {
         Ok(())
     }
 
+    fn cleanup_best_effort(&mut self) {
+        if self.cleanup_attempted {
+            return;
+        }
+        if !self.published {
+            let _ = fs::remove_file(&self.socket_path);
+            self.cleanup_attempted = true;
+            return;
+        }
+        let Ok(mutation_lock) = RegistryMutationLock::try_acquire(&self.wirelens_home) else {
+            return;
+        };
+        let _ = self.cleanup_locked(mutation_lock, || {});
+    }
+
     #[cfg(test)]
     pub(crate) fn cleanup_with_observer<F>(&mut self, observer: F) -> io::Result<()>
     where
@@ -682,11 +745,15 @@ impl RegistryPublisher {
     pub(crate) fn wirelens_home(&self) -> &Path {
         &self.wirelens_home
     }
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn benchmark_disarm_cleanup(&mut self) {
+        self.cleanup_attempted = true;
+    }
 }
 
 impl Drop for RegistryPublisher {
     fn drop(&mut self) {
-        let _ = self.cleanup_internal(|| {});
+        self.cleanup_best_effort();
     }
 }
 
@@ -806,7 +873,8 @@ impl RegistryScanner {
                 "registry run root has no Wirelens home parent",
             )
         })?;
-        let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
+        let _mutation_lock =
+            RegistryMutationLock::acquire_until(wirelens_home, deadline, cancelled)?;
         if cancelled.is_cancelled() || Instant::now() >= deadline {
             return Ok(0);
         }

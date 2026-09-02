@@ -61,6 +61,7 @@ use crate::{
     },
     control_rpc::{
         client::ControlRpcClient,
+        framing::ACTIVE_CALL_LIMIT,
         protocol::{
             ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
             InstanceScope, MappingSettingsPayload, RPC_VERSION,
@@ -442,6 +443,11 @@ pub(super) fn page_decoded_body(
         }
         while end > start && !is_utf8_boundary(&decoded.bytes, end) {
             end -= 1;
+        }
+        if end == start && end < total_bytes {
+            end = (start + 1..=total_bytes)
+                .find(|offset| is_utf8_boundary(&decoded.bytes, *offset))
+                .unwrap_or(total_bytes);
         }
     }
     Ok(body_page(
@@ -2073,7 +2079,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
                 }
                 ControlOperation::SetRecordingEnabled { enabled } => {
                     let update = match runtime
-                        .request(
+                        .request_admission(
                             RuntimeRequest::SetRecordingEnabled { enabled },
                             cancelled.clone(),
                         )
@@ -2463,7 +2469,7 @@ impl ControlServiceFactory for TokioControlServiceFactory {
                         calls.shutdown().await;
                         return Ok(());
                     }
-                    accepted = listener.accept() => {
+                    accepted = listener.accept(), if calls.len() < ACTIVE_CALL_LIMIT => {
                         let (stream, _) = accepted.map_err(|error| {
                             anyhow!("private control listener accept failed: {error}")
                         })?;
@@ -2774,8 +2780,8 @@ mod task12_tests;
 
 impl Drop for RunningPrivateControl {
     fn drop(&mut self) {
-        self.shutdown.cancel();
         if let Some(task) = self.task.as_ref() {
+            self.shutdown.cancel();
             task.abort();
         }
     }

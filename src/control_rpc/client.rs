@@ -2,7 +2,7 @@ use crate::{
     control_rpc::{
         framing::{
             ACTIVE_CALL_LIMIT, REQUEST_MAX_BYTES, RESPONSE_MAX_BYTES, encode_json_frame,
-            read_json_frame,
+            read_json_frame_cancellable,
         },
         protocol::{
             ControlError, ControlOperation, ControlResult, DeclaredClient, InstanceScope,
@@ -15,7 +15,7 @@ use std::{
     io,
     sync::{
         Arc, LazyLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -27,6 +27,14 @@ static REQUEST_SERIALIZATION_ADMISSION: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(ACTIVE_CALL_LIMIT)));
 
 pub(crate) struct ControlRpcClient;
+
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 impl ControlRpcClient {
     pub(crate) async fn call(
@@ -46,7 +54,9 @@ impl ControlRpcClient {
             run_id: descriptor.run_id().clone(),
         };
         let socket_path = descriptor.socket_path().to_path_buf();
+        let parse_cancelled = Arc::new(AtomicBool::new(false));
         let call = async move {
+            let _parse_cancellation = CancelOnDrop(parse_cancelled.clone());
             let serialization_permit = Arc::clone(&REQUEST_SERIALIZATION_ADMISSION)
                 .acquire_owned()
                 .await
@@ -76,8 +86,12 @@ impl ControlRpcClient {
             stream.write_all(&payload).await.map_err(|_| {
                 ControlError::instance_unavailable("private RPC request write failed")
             })?;
-            let response =
-                read_json_frame::<ResponseEnvelope, _>(&mut stream, RESPONSE_MAX_BYTES).await?;
+            let response = read_json_frame_cancellable::<ResponseEnvelope, _>(
+                &mut stream,
+                RESPONSE_MAX_BYTES,
+                parse_cancelled,
+            )
+            .await?;
             response.validate(&request_id, &expected_scope, expected_kind)
         };
 

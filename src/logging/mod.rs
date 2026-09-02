@@ -178,6 +178,36 @@ impl AppLogger {
     }
 }
 
+#[cfg(feature = "benchmark")]
+pub(crate) fn benchmark_format_endpoint_records(count: usize, payload_bytes: usize) -> usize {
+    let (tx, _rx) = mpsc::channel(1);
+    let logger = AppLogger {
+        tx,
+        max_record_bytes: payload_bytes.saturating_add(256),
+        metrics: Arc::new(LoggingMetrics::default()),
+    };
+    let payload = "x".repeat(payload_bytes);
+    (0..count)
+        .map(|index| {
+            let arguments = format_args!("endpoint=127.0.0.1:8989 index={index} {payload}");
+            let record = Record::builder()
+                .level(Level::Info)
+                .target("wirelens::proxy")
+                .args(arguments)
+                .build();
+            logger.format_record(&record).len()
+        })
+        .sum()
+}
+
+#[cfg(feature = "benchmark")]
+pub(crate) async fn benchmark_log_rotation(
+    path: &std::path::Path,
+    retained_files: usize,
+) -> std::io::Result<()> {
+    writer::benchmark_rotate(path, retained_files).await
+}
+
 impl log::Log for AppLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         let is_crate_log = metadata.target().starts_with("fluxcope");
