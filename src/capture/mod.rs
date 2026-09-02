@@ -7,6 +7,7 @@ mod model;
 mod publisher;
 mod store;
 
+#[cfg(any(test, feature = "benchmark"))]
 use hyper::Method;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,7 @@ pub(crate) use publisher::{
 };
 pub(crate) use store::{CaptureRetentionPolicy, CaptureStore};
 
+#[cfg(feature = "benchmark")]
 pub(crate) fn benchmark_ordered_store(captures: Vec<CapturedExchange>) -> usize {
     let mut store = CaptureStore::new(CaptureRetentionPolicy {
         max_records: usize::MAX,
@@ -67,6 +69,7 @@ impl CaptureSequence {
     }
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 /// Immutable, completed capture representation used while live streaming is introduced.
 #[derive(Clone, Debug)]
 pub struct CapturedExchange {
@@ -82,6 +85,7 @@ pub struct CapturedExchange {
     pub res_body: Option<String>,
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 impl CapturedExchange {
     pub fn display_uri(&self) -> &str {
         self.mapped_uri.as_deref().unwrap_or(&self.uri)
@@ -101,6 +105,7 @@ impl CapturedExchange {
     }
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 fn headers_bytes(headers: &[(String, String)]) -> usize {
     headers.iter().fold(0_usize, |total, (name, value)| {
         total.saturating_add(name.len()).saturating_add(value.len())

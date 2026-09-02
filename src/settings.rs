@@ -976,6 +976,7 @@ fn preserve_semantic_noop_entries(
     Ok(())
 }
 
+#[cfg(feature = "benchmark")]
 pub(crate) fn benchmark_yaml_semantic_preservation(rule_count: usize) -> usize {
     let rules = (0..rule_count)
         .map(|index| ProxyMapRemoteRule {
@@ -1009,6 +1010,7 @@ pub(crate) fn benchmark_yaml_semantic_preservation(rule_count: usize) -> usize {
         .len()
 }
 
+#[cfg(feature = "benchmark")]
 fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
     let key = |name: &str| serde_yaml::Value::String(name.to_string());
     let Some(proxy) = value

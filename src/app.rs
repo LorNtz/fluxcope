@@ -49,6 +49,7 @@ pub(crate) use settings_popup::{
     SettingsKeyHint, SettingsScrollRequest, SettingsSelectId, validate_settings,
 };
 
+#[cfg(feature = "benchmark")]
 pub(crate) fn benchmark_request_tree(captures: Vec<crate::capture::CapturedExchange>) -> usize {
     fn count(nodes: &[RequestTreeNodeSnapshot]) -> usize {
         nodes
@@ -64,6 +65,7 @@ pub(crate) fn benchmark_request_tree(captures: Vec<crate::capture::CapturedExcha
     count(&RequestTreeModel::from_requests(summaries).snapshot())
 }
 
+#[cfg(feature = "benchmark")]
 pub(crate) fn benchmark_retained_log_join(record_count: usize, record_bytes: usize) -> usize {
     let mut panel = LogPanel::with_retention(LogRetentionPolicy {
         max_records: record_count,

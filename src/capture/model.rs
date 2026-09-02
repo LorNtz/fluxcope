@@ -13,7 +13,9 @@ use hyper::Method;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{CaptureChangeFeed, CaptureChangeKind, CaptureSequence, CapturedExchange};
+#[cfg(any(test, feature = "benchmark"))]
+use super::CapturedExchange;
+use super::{CaptureChangeFeed, CaptureChangeKind, CaptureSequence};
 
 #[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -380,6 +382,7 @@ impl BodyCapture {
         }
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     fn completed(body: Option<String>) -> Self {
         let bytes = body.map_or_else(Bytes::new, Bytes::from);
         let retained_bytes = bytes.len();
@@ -489,6 +492,7 @@ impl CaptureRecord {
         }
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     pub(crate) fn from_completed(exchange: CapturedExchange) -> Arc<Self> {
         let metadata_bytes = exchange.retained_bytes();
 
