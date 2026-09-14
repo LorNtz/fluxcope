@@ -1,0 +1,8 @@
+{
+  "RUSTSEC-2024-0436": {
+    "crate": "paste",
+    "version": "1.0.15",
+    "expires": "2026-12-14",
+    "reason": "Unmaintained compile-time macro in the existing Ratatui/edtui stack; no vulnerability identified by this advisory. Reassess with compatible TUI upgrades."
+  }
+}

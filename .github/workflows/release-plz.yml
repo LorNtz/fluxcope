@@ -1,0 +1,185 @@
+name: Release source
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit X.Y.Z or X.Y.Z-rc.N; empty uses the automatic proposal'
+        type: string
+        default: ''
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  pull-requests: read
+concurrency:
+  group: release-source-coordinator
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      action: ${{ steps.route.outputs.action }}
+      bootstrap: ${{ steps.route.outputs.bootstrap }}
+      version: ${{ steps.route.outputs.version }}
+      source: ${{ steps.route.outputs.source }}
+      channel: ${{ steps.route.outputs.channel }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+        run: python3 scripts/release_source.py route
+  prepare-plan:
+    needs: gate
+    if: needs.gate.outputs.action == 'prepare'
+    runs-on: ubuntu-24.04
+    outputs:
+      prepared: ${{ steps.plan.outputs.prepared }}
+      attempt: ${{ steps.plan.outputs.attempt }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-prepare
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-plz
+      - run: python3 scripts/install_tool.py release-plz --directory "$RUNNER_TEMP/fluxcope-tools"
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/release_prepare.py plan --version "$VERSION"
+      - if: steps.plan.outputs.prepared == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-preparation-${{ github.run_attempt }}
+          path: target/release-preparation.json
+          if-no-files-found: error
+          retention-days: 7
+  prepare:
+    needs: prepare-plan
+    if: needs.prepare-plan.outputs.prepared == 'true'
+    runs-on: ubuntu-24.04
+    environment: release-prepare
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-preparation-${{ needs.prepare-plan.outputs.attempt }}
+          path: target
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ steps.app.outputs.token }}
+        run: python3 scripts/release_prepare.py apply
+  preflight:
+    needs: gate
+    if: needs.gate.outputs.action == 'source'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.gate.outputs.source }}
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_source.py preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-evidence-${{ github.run_attempt }}
+          path: target/source-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+      - if: needs.gate.outputs.bootstrap == 'true'
+        run: echo 'bootstrap-required — follow docs/releasing.md using the exact source CI package. No crate or tag was published.' >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    needs: [gate, preflight]
+    if: needs.gate.outputs.channel == 'stable' && needs.gate.outputs.bootstrap == 'false'
+    runs-on: ubuntu-24.04
+    environment: crates-release
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.gate.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-plz
+      - run: python3 scripts/install_tool.py release-plz --directory "$RUNNER_TEMP/fluxcope-tools"
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ steps.app.outputs.token }}
+          CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+        run: python3 scripts/release_source.py publish
+  rc-tag:
+    needs: [gate, preflight]
+    if: needs.gate.outputs.channel == 'rc'
+    runs-on: ubuntu-24.04
+    environment: release-source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ steps.app.outputs.token }}
+        run: python3 scripts/release_source.py tag
+  distribution:
+    needs: [gate, publish, rc-tag]
+    if: always() && (needs.publish.result == 'success' || needs.rc-tag.result == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_source.py dispatch

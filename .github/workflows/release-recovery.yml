@@ -1,0 +1,103 @@
+name: Recover release
+run-name: ${{ inputs.operation == 'mark-for-replacement' && 'Classify' || 'Recover' }} ${{ inputs.version }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing authorized X.Y.Z or X.Y.Z-rc.N'
+        type: string
+        required: true
+      pr:
+        description: 'Original merged release PR number'
+        type: string
+        required: true
+      operation:
+        description: 'Concrete recovery operation shown by just release-recover'
+        type: choice
+        options: [refresh, source-rerun, tag-and-distribute, distribute, verify-public, stable-installations, mark-for-replacement]
+        required: true
+      reason:
+        description: 'Public reason, required only for mark-for-replacement'
+        type: string
+        default: ''
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  pull-requests: read
+  attestations: read
+concurrency:
+  group: release-source-coordinator
+  cancel-in-progress: false
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      operation: ${{ steps.plan.outputs.operation }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+          VERSION: ${{ inputs.version }}
+          PR: ${{ inputs.pr }}
+          OPERATION: ${{ inputs.operation }}
+          REASON: ${{ inputs.reason }}
+        run: python3 scripts/release_recovery.py plan --version "$VERSION" --pr "$PR" --operation "$OPERATION" --reason "$REASON"
+  resume:
+    needs: gate
+    if: needs.gate.outputs.operation != 'mark-for-replacement'
+    runs-on: ubuntu-24.04
+    environment: release-source
+    permissions:
+      contents: read
+      actions: write
+      checks: read
+      pull-requests: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      - if: needs.gate.outputs.operation == 'tag-and-distribute'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_CREATION_TOKEN: ${{ steps.app.outputs.token }}
+          CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+          VERSION: ${{ inputs.version }}
+          PR: ${{ inputs.pr }}
+          OPERATION: ${{ inputs.operation }}
+          REASON: ${{ inputs.reason }}
+        run: python3 scripts/release_recovery.py execute --version "$VERSION" --pr "$PR" --operation "$OPERATION" --reason "$REASON"
+  replacement:
+    needs: gate
+    if: needs.gate.outputs.operation == 'mark-for-replacement'
+    runs-on: ubuntu-24.04
+    environment: release-result
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PR: ${{ inputs.pr }}
+          REASON: ${{ inputs.reason }}
+        run: python3 scripts/release_recovery.py execute --version "$VERSION" --pr "$PR" --operation mark-for-replacement --reason "$REASON"

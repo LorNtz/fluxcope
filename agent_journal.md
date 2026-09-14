@@ -405,3 +405,68 @@ Date: 2026/09/14 22:43
 - Synced design with the reviewed preparation wrapper, installer guard, native checksum sidecars and recoverable publication evidence.
 
 **Result**: application changes are ready for a separate local commit; remote CI and account setup remain pending.
+
+### Reduce stable installation work
+Date: 2026/09/14 22:45
+
+- Centralized full public-asset/provenance verification in the Homebrew gate; update/install jobs now fetch only small immutable metadata and let brew download the native archive.
+- Retained exact installed binary digest checks, while removing twelve unnecessary cross-architecture archive downloads.
+- Limited large temporary build artifacts to seven days; small machine evidence remains for ninety days plus durable release metadata.
+
+**Result**: performance review advice adopted without removing publication checks.
+
+### Real Git preparation and rerun regressions
+Date: 2026/09/14 22:49
+
+- Added temporary bare-repository tests for first push, no-op preparation, preserving newer master code/old PR history and stale-lease rejection.
+- Added producer-attempt and normal source-CI waiting regressions.
+
+**Result**: integration-oriented tests added; execution follows.
+
+### Release preparation credential isolation
+Date: 2026/09/14 22:58
+
+- Split native version/changelog computation from the App-authenticated PR writer into separate jobs; only four bounded metadata files cross the boundary.
+- Preserve expected-head leases and reject a changed base or release PR before applying the prepared result.
+
+### Signed durable results and recovery races
+Date: 2026/09/14 23:00
+
+- Sign canonical result JSON with the trusted master observer and verify its attestation before using Release notes as durable evidence.
+- Regenerate archive inputs on each attempt, avoid rewriting valid archives, and leave actionable partial status if signing never starts; local watching checks the actual observer run.
+- Give replacement classification its own run identity so it cannot mark itself as active publication.
+
+### Release retry and bootstrap regression coverage
+Date: 2026/09/14 23:05
+
+- Added signed-result tamper, lost-response, cancellation, replacement, bootstrap checksum-before-token and token revocation regression scenarios.
+- Guard bootstrap against a pre-existing different stable version; verify exact-package CLI help; permit rebuilding temporary artifacts during retries.
+- Old-version Homebrew recovery locates and verifies its historical formula without changing a newer public tap.
+- 33 Python release tests passed; native release-plz update with final changelog filters passed in an isolated Git fixture and excluded design-only MCP entries.
+
+### Apply retry and archive repair review fixes
+Date: 2026/09/14 23:07
+
+- Accept a completed preparation push on retry only if its full tree and ancestry exactly match the original plan; reconcile its existing PR before finishing labels.
+- Permit re-signing damaged archived metadata only when all required live channel evidence independently passes; missing evidence remains a hard failure.
+
+### Reviewed release orchestration verification
+Date: 2026/09/14 23:11
+
+- Completed both required design/maintainability and performance reviews, including fixed-plan retries after push/PR/label failures.
+- Preserve diagnostic partial state when a signed archive is invalid so recovery can rerun missing independent checks; never use invalid notes as success evidence.
+- Synchronized release commands, setup environments, signed evidence retention and bootstrap/recovery instructions with implementation.
+
+### Archive input structure review fixes
+Date: 2026/09/14 23:13
+
+- Reject non-object archive/package JSON with an actionable error before signature lookup.
+- Refuse unmatched, reversed or duplicated notes markers before remote writes and document the precise manual repair when the display block cannot be identified safely.
+- Added real parse/write-path regressions for both boundary cases.
+
+### Final local release CI validation
+Date: 2026/09/14 23:14
+
+- Release orchestration tests: 39 passed; actionlint and release metadata checks passed.
+- Give the unprivileged Linux container build a writable isolated process home; host credentials are not mounted.
+- History secret scan of both remote branches plus the app preparation commit found no leaks; retained detailed privacy findings outside Git for the visibility decision.

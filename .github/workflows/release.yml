@@ -1,0 +1,154 @@
+name: Release distribution
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing authorized tag, e.g. v0.1.0'
+        required: true
+        type: string
+      operation:
+        description: 'Distribute an unpublished tag or verify existing immutable public assets'
+        type: choice
+        options: [distribute, verify]
+        default: distribute
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  attestations: read
+concurrency:
+  group: distribution-${{ github.event.pull_request.number || inputs.tag }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.select.outputs.build }}
+      version: ${{ steps.identity.outputs.version }}
+      source: ${{ steps.identity.outputs.source }}
+      channel: ${{ steps.identity.outputs.channel }}
+      matrix: ${{ steps.identity.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BRANCH: ${{ github.head_ref }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          if [[ "$OPERATION" != verify && ( "$EVENT" == workflow_dispatch || "$PR_BRANCH" == release-plz-* || "$PR_BRANCH" == rc/* ) ]]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+          fi
+      - id: identity
+        if: github.event_name == 'workflow_dispatch' || steps.select.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$EVENT" == pull_request ]]; then
+            python3 scripts/release_gate.py preview
+          else
+            python3 scripts/release_gate.py distribution --tag "$TAG"
+          fi
+  build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      source: ${{ needs.gate.outputs.source }}
+      version: ${{ needs.gate.outputs.version }}
+      matrix: ${{ needs.gate.outputs.matrix }}
+  preview:
+    name: Release preview
+    needs: [gate, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    env:
+      GATE: ${{ needs.gate.result }}
+      REQUIRED: ${{ needs.gate.outputs.build }}
+      BUILD: ${{ needs.build.result }}
+    steps:
+      - run: '[[ "$GATE" == success && ( "$REQUIRED" == false || "$BUILD" == success ) ]]'
+  attest:
+    needs: [gate, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.operation != 'verify'
+    runs-on: ubuntu-24.04
+    environment: github-release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: target/release-assets
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            target/release-assets/*.tar.xz
+            target/release-assets/fluxcope-installer.sh
+  publish:
+    needs: [gate, attest]
+    if: github.event_name == 'workflow_dispatch' && inputs.operation != 'verify'
+    runs-on: ubuntu-24.04
+    environment: github-release
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.gate.outputs.source }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-assets
+          path: target/release-assets
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          IMMUTABLE_RELEASES_ENABLED: ${{ vars.IMMUTABLE_RELEASES_ENABLED }}
+        run: python3 scripts/release_publish.py publish --tag "$TAG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-verification-${{ github.run_attempt }}
+          path: target/public-verification.json
+          if-no-files-found: error
+          retention-days: 90
+  verify:
+    needs: gate
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'verify'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: python3 scripts/release_publish.py verify --tag "$TAG"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-verification-${{ github.run_attempt }}
+          path: target/public-verification.json
+          if-no-files-found: error
+          retention-days: 90
+  homebrew:
+    needs: [gate, publish, verify]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.gate.outputs.channel == 'stable' && (needs.publish.result == 'success' || needs.verify.result == 'success')
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit

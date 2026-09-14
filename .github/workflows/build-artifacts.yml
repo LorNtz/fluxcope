@@ -1,0 +1,96 @@
+name: Build release artifacts
+on:
+  workflow_call:
+    inputs:
+      source:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      matrix:
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  local:
+    name: Archive (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ inputs.version }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: dist-${{ matrix.target }}
+      - run: python3 scripts/install_tool.py cargo-dist --directory target/ci-tools
+      - name: Build and exercise macOS archive
+        if: runner.os == 'macOS'
+        run: python3 scripts/dist_artifacts.py local --target "$TARGET" --version "$VERSION"
+      - name: Build and exercise Linux archive in the declared glibc environment
+        if: runner.os == 'Linux'
+        run: |
+          TOOLCHAIN=$(rustup show active-toolchain | cut -d ' ' -f 1)
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=/work" \
+            --mount "type=bind,src=$HOME/.rustup,dst=/rustup,readonly" \
+            --mount "type=bind,src=$HOME/.cargo/bin,dst=/cargo-bin,readonly" \
+            --workdir /work --env "RUSTUP_TOOLCHAIN=$TOOLCHAIN" \
+            "$CONTAINER" bash scripts/build_linux.sh "$TARGET" "$VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: local-${{ matrix.target }}
+          path: target/local-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+  global:
+    name: Installers and manifest
+    needs: local
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - run: rustup show active-toolchain
+      - run: python3 scripts/install_tool.py cargo-dist --directory target/ci-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: local-*
+          path: target/distrib
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/dist_artifacts.py global --version "$VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: target/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
