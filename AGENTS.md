@@ -1,6 +1,6 @@
 # Project Description
 
-Wirelens is a terminal UI MITM proxy built with ratatui and hudsucker. The long-term goal is to provide a Charles-like local debugging proxy experience in the terminal: capture HTTP/HTTPS traffic, inspect requests and responses, rewrite requests, map responses to local files, and keep the configuration editable and stable across launches.
+Fluxcope is a terminal UI MITM proxy built with ratatui and hudsucker. The long-term goal is to provide a Charles-like local debugging proxy experience in the terminal: capture HTTP/HTTPS traffic, inspect requests and responses, rewrite requests, map responses to local files, and keep the configuration editable and stable across launches.
 
 The app currently runs a local proxy on the configured port, forwards HTTP and HTTPS traffic, and records captured request/response pairs while recording is enabled. The main UI has a status bar at the top and a normal workspace below it:
 1. Left request tree:
@@ -14,7 +14,7 @@ The app currently runs a local proxy on the configured port, forwards HTTP and H
     - Hidden by default.
     - Toggled over the normal request/detail workspace without covering the top status bar.
 
-Persistent settings live in `~/.wirelens/config.yml`. The `proxy` YAML section is optional, supports named presets, `map_remote`, and `map_local`, and is intentionally structured for future in-app editing. Serialization should not add proxy boilerplate when no proxy settings are present, and should preserve explicit but semantically default config entries and existing mapping order when possible.
+Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section is optional, supports named presets, `map_remote`, and `map_local`, and is intentionally structured for future in-app editing. Serialization should not add proxy boilerplate when no proxy settings are present, and should preserve explicit but semantically default config entries and existing mapping order when possible.
 
 # Current Status
 
@@ -35,7 +35,7 @@ Persistent settings live in `~/.wirelens/config.yml`. The `proxy` YAML section i
 - Request/response body tabs support an enterable read-only `edtui` editor view entered with `Enter` and exited with `Esc`.
 - The body editor supports Vim-like navigation, `/` search, visual selection and copy, flash-style visible-text jumping with adaptive labels, and a scoped subset of normal-mode `y` copy actions for common motions plus inner-word/delimiter text objects.
 - Log panel is hidden by default and toggles as a full-workspace panel below the status bar.
-- Persistent settings manager reads and writes YAML at `~/.wirelens/config.yml`.
+- Persistent settings manager reads and writes YAML at `~/.fluxcope/config.yml`.
 - Supported config currently includes `server.port`, `certificate.store_dir`, `certificate.pem_filename`, `recording.start_record_on_launch`, `ui.request_list.auto_expand`, and optional `proxy` mapping settings.
 - Optional proxy mapping supports enable flags, active presets, map-remote rules, map-local rules, disabled rules, host-level rules, full-path rules, and map-local after map-remote.
 - Config serialization preserves present default-valued entries generically when removing them would be a semantic no-op, and keeps existing YAML mapping order stable where possible.

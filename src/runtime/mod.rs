@@ -6,16 +6,18 @@ use std::{
     convert::Infallible,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    path::PathBuf,
 };
 
 use anyhow::{Context, Result, anyhow};
-use hudsucker::{ProxyBuilder, certificate_authority::RcgenAuthority, rustls::PrivateKey};
+use hudsucker::{Body, Proxy, certificate_authority::RcgenAuthority};
 use hyper::{
-    Body, Method, Request, Response, Server,
+    Method, Request, Response,
     header::{CONTENT_DISPOSITION, CONTENT_TYPE},
-    service::{make_service_fn, service_fn},
+    service::service_fn,
 };
+use hyper_util::rt::TokioIo;
+use rcgen::{Issuer, KeyPair};
+use rustls::{crypto::aws_lc_rs, pki_types::CertificateDer};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -44,13 +46,13 @@ fn proxy_bind_addr(port: u16) -> SocketAddr {
 }
 
 pub async fn run() -> Result<()> {
-    let mut settings = SettingsManager::load().context("failed to load Wirelens settings")?;
+    let mut settings = SettingsManager::load().context("failed to load Fluxcope settings")?;
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
     let shutdown = CancellationToken::new();
 
     let logging = AppLogger::init(
-        PathBuf::from("debug.log"),
+        settings.path().with_file_name("fluxcope.log"),
         policy.logging.clone(),
         shutdown.child_token(),
     )
@@ -186,29 +188,30 @@ fn start_proxy(
     recording: RecordingState,
     shutdown: CancellationToken,
 ) -> Result<JoinHandle<Result<()>>> {
-    let authority = RcgenAuthority::new(
-        PrivateKey(ca.key_der()),
-        rustls::Certificate(ca.cert_der()),
-        1_000,
-    )
-    .context("failed to construct proxy certificate authority")?;
+    let key =
+        KeyPair::try_from(ca.key_der().as_slice()).context("failed to decode proxy CA key")?;
+    let issuer = Issuer::from_ca_cert_der(&CertificateDer::from(ca.cert_der()), key)
+        .context("failed to decode proxy CA certificate")?;
+    let authority = RcgenAuthority::new(issuer, 1_000, aws_lc_rs::default_provider());
 
-    let proxy = ProxyBuilder::new()
+    let proxy = Proxy::builder()
         .with_addr(proxy_addr)
-        .with_rustls_client()
         .with_ca(authority)
+        .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(LogHandler::new(
             capture_publisher,
             body_tasks,
             request_policy_store,
             recording,
         ))
-        .build();
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .build()
+        .context("failed to build proxy")?;
 
     log::info!("Proxy server listening on {proxy_addr}");
     Ok(tokio::spawn(async move {
         proxy
-            .start(shutdown.cancelled_owned())
+            .start()
             .await
             .with_context(|| format!("proxy service failed at {proxy_addr}"))
     }))
@@ -238,27 +241,49 @@ fn start_certificate_download_server(
         .unwrap_or_else(|| "127.0.0.1".to_string());
     let url = format!("http://{host}:{}/{cert_filename}", local_addr.port());
 
-    let make_service = make_service_fn(move |_| {
-        let cert_pem = cert_pem.clone();
-        let cert_filename = cert_filename.clone();
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                let cert_pem = cert_pem.clone();
-                let cert_filename = cert_filename.clone();
-                async move {
-                    Ok::<_, Infallible>(certificate_download_response(req, cert_pem, cert_filename))
-                }
-            }))
-        }
-    });
-    let server = Server::from_tcp(listener)
-        .context("failed to create certificate download server")?
-        .serve(make_service)
-        .with_graceful_shutdown(shutdown.cancelled_owned());
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .context("failed to create certificate download server")?;
     let task = tokio::spawn(async move {
-        server
-            .await
-            .context("certificate download server stopped unexpectedly")
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                completed = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        log::debug!("CA download connection stopped: {error}");
+                    }
+                }
+                accepted = listener.accept() => {
+                    let (stream, _) = match accepted {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            log::debug!("CA download listener temporarily unavailable: {error}");
+                            if !matches!(error.kind(), io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset) {
+                                tokio::select! {
+                                    _ = shutdown.cancelled() => break,
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    let cert_pem = cert_pem.clone();
+                    let cert_filename = cert_filename.clone();
+                    connections.spawn(async move {
+                        let service = service_fn(move |req| {
+                            let response = certificate_download_response(req, cert_pem.clone(), cert_filename.clone());
+                            async { Ok::<_, Infallible>(response) }
+                        });
+                        if let Err(error) = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service).await {
+                            log::debug!("CA download request failed: {error}");
+                        }
+                    });
+                }
+            }
+        }
+        connections.shutdown().await;
+        Ok(())
     });
 
     log::info!("CA certificate download URL: {url}");
@@ -266,7 +291,7 @@ fn start_certificate_download_server(
 }
 
 fn certificate_download_response(
-    req: Request<Body>,
+    req: Request<hyper::body::Incoming>,
     cert_pem: String,
     cert_filename: String,
 ) -> Response<Body> {

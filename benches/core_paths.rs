@@ -1,6 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group};
-use hyper::Method;
-use wirelens::{
+use fluxcope::{
     benchmark_support::{
         ordered_capture_store, request_search_fixture, request_search_rapid_supersession,
         request_tree_build_and_snapshot, request_tree_search, retained_log_join,
@@ -8,6 +7,7 @@ use wirelens::{
     },
     capture::{CaptureSequence, CapturedExchange},
 };
+use hyper::Method;
 
 fn capture(sequence: u64) -> CapturedExchange {
     CapturedExchange {

@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::fs;
 use std::{
-    env, fs, io,
+    env, io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 const DEFAULT_PROXY_PORT: u16 = 8989;
-const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.wirelens/certificate/";
-const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "wirelens-ca.pem";
+const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.fluxcope/certificate/";
+const DEFAULT_CERTIFICATE_PEM_FILENAME: &str = "fluxcope-ca.pem";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
@@ -307,6 +310,9 @@ impl SettingsManager {
 
     pub fn load_from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            crate::private_fs::ensure_directory(parent)?;
+        }
 
         if !path.exists() {
             let manager = Self {
@@ -318,7 +324,8 @@ impl SettingsManager {
             return Ok(manager);
         }
 
-        let content = fs::read_to_string(&path)?;
+        let mut content = String::new();
+        crate::private_fs::open_file(&path, false)?.read_to_string(&mut content)?;
         let (settings, load_diagnostics) = if content.trim().is_empty() {
             (AppSettings::default(), Vec::new())
         } else {
@@ -396,7 +403,7 @@ impl SettingsManager {
 
     fn write_settings(&self, settings: &AppSettings) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+            crate::private_fs::ensure_directory(parent)?;
         }
 
         let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
@@ -406,12 +413,12 @@ impl SettingsManager {
         }
 
         let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
-        fs::write(&self.path, content)
+        crate::private_fs::write_file(&self.path, content.as_bytes())
     }
 }
 
 fn default_config_path() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".wirelens/config.yml"))
+    Ok(home_dir()?.join(".fluxcope/config.yml"))
 }
 
 fn expand_home_path(path: &str) -> io::Result<PathBuf> {
@@ -520,9 +527,16 @@ fn is_true(value: &bool) -> bool {
 }
 
 fn read_yaml_value(path: &Path) -> io::Result<Option<serde_yaml::Value>> {
-    match fs::read_to_string(path) {
-        Ok(content) if content.trim().is_empty() => Ok(None),
-        Ok(content) => serde_yaml::from_str(&content).map(Some).map_err(yaml_error),
+    match crate::private_fs::open_file(path, false) {
+        Ok(mut file) => {
+            let mut content = String::new();
+            file.read_to_string(&mut content)?;
+            if content.trim().is_empty() {
+                Ok(None)
+            } else {
+                serde_yaml::from_str(&content).map(Some).map_err(yaml_error)
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }

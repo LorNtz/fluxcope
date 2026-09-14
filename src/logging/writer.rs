@@ -1,7 +1,7 @@
 use std::{io, path::Path, path::PathBuf, sync::Arc};
 
 use tokio::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::AsyncWriteExt,
     sync::mpsc,
 };
@@ -88,11 +88,11 @@ pub(super) async fn run(
 }
 
 async fn open_log_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    let path = path.to_owned();
+    let file = tokio::task::spawn_blocking(move || crate::private_fs::open_file(&path, true))
         .await
+        .map_err(io::Error::other)??;
+    Ok(File::from_std(file))
 }
 
 async fn file_size(path: &Path) -> io::Result<u64> {
@@ -179,6 +179,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("test clock should follow the Unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("wirelens-log-{nanos}.log"))
+        std::env::temp_dir().join(format!("fluxcope-log-{nanos}.log"))
     }
 }

@@ -180,7 +180,7 @@ impl AppLogger {
 
 impl log::Log for AppLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        let is_crate_log = metadata.target().starts_with("wirelens");
+        let is_crate_log = metadata.target().starts_with("fluxcope");
         if is_crate_log {
             metadata.level() <= Level::Info
         } else {
@@ -278,7 +278,7 @@ mod tests {
         };
         let record = Record::builder()
             .level(Level::Info)
-            .target("wirelens::test")
+            .target("fluxcope::test")
             .args(format_args!("abcdefghijklmnopqrstuvwxyz"))
             .build();
 
@@ -300,12 +300,12 @@ mod tests {
         };
         let first = Record::builder()
             .level(Level::Info)
-            .target("wirelens::test")
+            .target("fluxcope::test")
             .args(format_args!("first"))
             .build();
         let second = Record::builder()
             .level(Level::Info)
-            .target("wirelens::test")
+            .target("fluxcope::test")
             .args(format_args!(
                 "this record is deliberately long enough to require truncation if formatted"
             ))
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(metrics.snapshot().records_truncated, 0);
         assert_eq!(
             rx.try_recv().unwrap().as_str(),
-            "INFO - [wirelens::test] first"
+            "INFO - [fluxcope::test] first"
         );
     }
 }

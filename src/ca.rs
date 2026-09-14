@@ -1,9 +1,13 @@
 // src/ca.rs
+use crate::private_fs;
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyPair,
+    KeyUsagePurpose,
 };
+#[cfg(test)]
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 // File names (not paths) - the directory is added separately
@@ -19,14 +23,10 @@ pub struct CaData {
 
 impl CaData {
     /// Create new CaData from a Certificate
-    fn from_cert(cert: &Certificate) -> Result<Self> {
-        let cert_der = cert
-            .serialize_der()
-            .context("failed to serialize generated CA certificate as DER")?;
-        let key_der = cert.serialize_private_key_der();
-        let cert_pem = cert
-            .serialize_pem()
-            .context("failed to serialize generated CA certificate as PEM")?;
+    fn from_cert(cert: &Certificate, key: &KeyPair) -> Result<Self> {
+        let cert_der = cert.der().to_vec();
+        let key_der = key.serialize_der();
+        let cert_pem = cert.pem();
         Ok(CaData {
             cert_der,
             key_der,
@@ -40,11 +40,17 @@ impl CaData {
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
 
-        let cert_der = fs::read(&cert_path)
+        let mut cert_der = Vec::new();
+        private_fs::open_file(&cert_path, false)?
+            .read_to_end(&mut cert_der)
             .with_context(|| format!("failed to read CA certificate {}", cert_path.display()))?;
-        let key_der = fs::read(&key_path)
+        let mut key_der = Vec::new();
+        private_fs::open_file(&key_path, false)?
+            .read_to_end(&mut key_der)
             .with_context(|| format!("failed to read CA private key {}", key_path.display()))?;
-        let cert_pem = fs::read_to_string(&pem_path)
+        let mut cert_pem = String::new();
+        private_fs::open_file(&pem_path, false)?
+            .read_to_string(&mut cert_pem)
             .with_context(|| format!("failed to read CA PEM {}", pem_path.display()))?;
 
         Ok(CaData {
@@ -56,16 +62,16 @@ impl CaData {
 
     /// Save to disk
     fn save(&self, cert_dir: &Path, pem_filename: &str) -> Result<()> {
-        fs::create_dir_all(cert_dir)
+        private_fs::ensure_directory(cert_dir)
             .with_context(|| format!("failed to create CA directory {}", cert_dir.display()))?;
         let cert_path = cert_dir.join(CA_CERT_FILE);
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
-        fs::write(&cert_path, &self.cert_der)
+        private_fs::write_file(&cert_path, &self.cert_der)
             .with_context(|| format!("failed to persist CA certificate {}", cert_path.display()))?;
-        fs::write(&key_path, &self.key_der)
+        private_fs::write_file(&key_path, &self.key_der)
             .with_context(|| format!("failed to persist CA private key {}", key_path.display()))?;
-        fs::write(&pem_path, &self.cert_pem)
+        private_fs::write_file(&pem_path, self.cert_pem.as_bytes())
             .with_context(|| format!("failed to persist CA PEM {}", pem_path.display()))?;
         Ok(())
     }
@@ -88,6 +94,15 @@ impl CaData {
 
 /// Create or load CA certificate from disk
 pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> {
+    anyhow::ensure!(
+        Path::new(pem_filename).components().count() == 1
+            && matches!(
+                Path::new(pem_filename).components().next(),
+                Some(std::path::Component::Normal(_))
+            ),
+        "CA PEM filename must be a single filename"
+    );
+    private_fs::ensure_directory(cert_dir)?;
     let cert_path = cert_dir.join(CA_CERT_FILE);
     let key_path = cert_dir.join(CA_KEY_FILE);
     let pem_path = cert_dir.join(pem_filename);
@@ -100,8 +115,8 @@ pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> 
         return Ok(data);
     }
 
-    let cert = create_ca()?;
-    let data = CaData::from_cert(&cert)?;
+    let (cert, key) = create_ca()?;
+    let data = CaData::from_cert(&cert, &key)?;
 
     data.save(cert_dir, pem_filename)?;
     log::info!("CA certificate saved to {:?}", cert_dir);
@@ -109,19 +124,23 @@ pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> 
     Ok(data)
 }
 
-fn create_ca() -> Result<Certificate> {
+fn create_ca() -> Result<(Certificate, KeyPair)> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "Wirelens CA");
+        .push(rcgen::DnType::CommonName, "Fluxcope CA");
     params.key_usages = vec![
         KeyUsagePurpose::KeyCertSign,
         KeyUsagePurpose::DigitalSignature,
     ];
 
-    Certificate::from_params(params).context("failed to generate CA certificate")
+    let key = KeyPair::generate().context("failed to generate CA key")?;
+    let certificate = params
+        .self_signed(&key)
+        .context("failed to generate CA certificate")?;
+    Ok((certificate, key))
 }
 
 #[cfg(test)]
@@ -131,7 +150,7 @@ mod tests {
     #[test]
     fn test_certificate_persistence() {
         let cert_dir = tempfile::tempdir().expect("temporary CA directory should be created");
-        let pem_filename = "wirelens-ca.pem";
+        let pem_filename = "fluxcope-ca.pem";
 
         // First run - should create new certificate
         let ca1 = create_or_load_ca(cert_dir.path(), pem_filename)
@@ -171,7 +190,7 @@ mod tests {
     #[test]
     fn incomplete_persisted_authority_is_fatal() {
         let cert_dir = tempfile::tempdir().expect("temporary CA directory should be created");
-        let pem_filename = "wirelens-ca.pem";
+        let pem_filename = "fluxcope-ca.pem";
         fs::write(cert_dir.path().join(CA_CERT_FILE), b"incomplete")
             .expect("partial CA file should be written");
 

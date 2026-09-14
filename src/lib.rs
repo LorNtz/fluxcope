@@ -5,6 +5,7 @@ mod ca;
 pub mod capture;
 mod logging;
 mod mapping;
+mod private_fs;
 mod proxy_handler;
 mod recording;
 mod request_policy;

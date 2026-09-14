@@ -44,7 +44,7 @@ fn reads_existing_config_and_updates_file() -> io::Result<()> {
 
     assert_eq!(9010, manager.server_port());
     assert_eq!(
-        home_dir()?.join(".wirelens/certificate/"),
+        home_dir()?.join(".fluxcope/certificate/"),
         manager.certificate_store_dir()?
     );
     assert_eq!(
@@ -120,9 +120,9 @@ fn reads_start_record_on_launch_setting() -> io::Result<()> {
 }
 
 #[test]
-fn default_config_path_uses_wirelens_home_dir() -> io::Result<()> {
+fn default_config_path_uses_fluxcope_home_dir() -> io::Result<()> {
     assert_eq!(
-        home_dir()?.join(".wirelens/config.yml"),
+        home_dir()?.join(".fluxcope/config.yml"),
         default_config_path()?
     );
     Ok(())
