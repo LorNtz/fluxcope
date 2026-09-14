@@ -1,3 +1,5 @@
+mod preview;
+
 use std::{fmt, sync::Arc};
 
 use schemars::JsonSchema;
@@ -13,6 +15,7 @@ use crate::{
     app::validate_settings,
     control::{
         RuntimeReply, RuntimeRequest,
+        settings::mapping::{MappingReadScope, MappingSettingsView},
         settings::{
             FinalizedSettingsTransaction, MappingExplanationReply, MappingSettingsResult,
             MappingValidationReply,
@@ -184,6 +187,7 @@ impl SettingsTransactionClient {
 
     pub(crate) async fn get_mapping_settings(
         &self,
+        scope: MappingReadScope,
         cancelled: CancellationToken,
     ) -> Result<MappingSettingsResult, ControlError> {
         let permit = acquire_worker_permit(Arc::clone(&self.mapping_workers), &cancelled).await?;
@@ -199,17 +203,26 @@ impl SettingsTransactionClient {
                 ));
             }
         };
-        if cancelled.is_cancelled() {
-            return Err(ControlError::cancelled(
-                "mapping settings read was cancelled",
-            ));
-        }
+        let worker_permit = Arc::new(permit);
+        let retained_permit = Arc::clone(&worker_permit);
+        let settings = snapshot.settings;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = retained_permit;
+            MappingSettingsView::scoped(
+                settings.proxy.as_ref().unwrap_or(&ProxySettings::default()),
+                scope,
+            )
+        });
+        let mapping = tokio::select! {
+            result = task => result.map_err(|error| ControlError::internal(format!("settings worker failed: {error}")))??,
+            _ = cancelled.cancelled() => return Err(ControlError::cancelled("mapping settings read was cancelled")),
+        };
         Ok(MappingSettingsResult {
             revision: snapshot.revision,
             config_mode: snapshot.config_mode,
             persistence: snapshot.persistence,
-            settings: snapshot.settings,
-            worker_permit: Arc::new(permit),
+            mapping,
+            worker_permit,
         })
     }
 
@@ -575,35 +588,10 @@ async fn execute_admitted_transaction(
             if let Some(observer) = compile_observer {
                 observer.compile()?;
             }
-            let compilation = RequestPolicy::compile(&settings);
-            if compilation
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == RequestPolicyDiagnosticSeverity::Error)
-            {
-                let diagnostics_total = compilation.diagnostics.len();
-                let diagnostics = compilation
-                    .diagnostics
-                    .iter()
-                    .take(MAX_MAPPING_DIAGNOSTICS)
-                    .map(|diagnostic| diagnostic.message.clone())
-                    .collect::<Vec<_>>();
-                return Err(ControlError::new(
-                    ControlErrorCode::MappingValidationFailed,
-                    "mapping settings failed compilation",
-                    false,
-                    serde_json::json!({
-                        "stage": "compilation",
-                        "diagnostics": diagnostics,
-                        "diagnostics_total": diagnostics_total,
-                        "diagnostics_omitted":
-                            diagnostics_total.saturating_sub(MAX_MAPPING_DIAGNOSTICS),
-                    }),
-                ));
-            }
+            let policy = preview::compile_candidate(&settings)?;
             Ok(PreparedSettingsCandidate {
                 settings,
-                policy: Some(compilation.policy),
+                policy: Some(policy),
                 effect,
                 affected,
             })

@@ -2,6 +2,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{capture::RequiredInstanceSelector, schema::InstanceSelector};
+#[path = "mapping/preview.rs"]
+mod preview;
+use crate::control::settings::mapping::{MappingReadScope, MappingSettingsView};
 use crate::{
     control_rpc::protocol::{ControlError, ControlOperation, ControlResult},
     runtime::settings::{SettingsRevision, SettingsTransactionOutcome},
@@ -14,6 +17,9 @@ use crate::{
         },
     },
 };
+pub(crate) use preview::{
+    PreviewMappingMutationInput, PreviewMappingMutationResult, preview_mapping_result,
+};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -21,11 +27,20 @@ pub(crate) struct GetMappingSettingsInput {
     #[serde(default)]
     #[schemars(default)]
     pub(crate) instance: InstanceSelector,
+    #[serde(default)]
+    pub(crate) preset: Option<String>,
+    #[serde(default)]
+    pub(crate) table: Option<ProxyRuleTable>,
 }
 
 impl GetMappingSettingsInput {
     pub(crate) fn into_operation(self) -> ControlOperation {
-        ControlOperation::GetMappingSettings
+        ControlOperation::GetMappingSettings {
+            scope: MappingReadScope {
+                preset: self.preset,
+                table: self.table,
+            },
+        }
     }
 }
 
@@ -309,8 +324,11 @@ macro_rules! operation_impl {
             pub(crate) fn into_operation(self) -> ControlOperation {
                 ControlOperation::MutateMapping {
                     expected_revision: self.expected_settings_revision,
-                    mutation: Box::new(($body)(self)),
+                    mutation: Box::new(self.into_mutation()),
                 }
+            }
+            fn into_mutation(self) -> MappingMutation {
+                ($body)(self)
             }
         }
     };
@@ -458,84 +476,6 @@ mapping_tool_input!(SetMappingRuleEnabledInput);
 
 #[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MappingRuleView {
-    pub(crate) index: usize,
-    pub(crate) from: String,
-    pub(crate) to: String,
-    pub(crate) enabled: bool,
-}
-
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MappingRuleTableView {
-    pub(crate) enabled: bool,
-    pub(crate) rules: Vec<MappingRuleView>,
-}
-
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MappingPresetView {
-    pub(crate) name: String,
-    pub(crate) map_remote: MappingRuleTableView,
-    pub(crate) map_local: MappingRuleTableView,
-}
-
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct MappingSettingsView {
-    pub(crate) enabled: bool,
-    pub(crate) active_preset: Option<String>,
-    pub(crate) presets: Vec<MappingPresetView>,
-}
-
-impl From<ProxySettings> for MappingSettingsView {
-    fn from(proxy: ProxySettings) -> Self {
-        Self {
-            enabled: proxy.enable,
-            active_preset: proxy.active_preset,
-            presets: proxy
-                .presets
-                .into_iter()
-                .map(|preset| MappingPresetView {
-                    name: preset.name,
-                    map_remote: MappingRuleTableView {
-                        enabled: preset.map_remote.enable,
-                        rules: preset
-                            .map_remote
-                            .rules
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, rule)| MappingRuleView {
-                                index,
-                                from: rule.from,
-                                to: rule.to,
-                                enabled: rule.enable,
-                            })
-                            .collect(),
-                    },
-                    map_local: MappingRuleTableView {
-                        enabled: preset.map_local.enable,
-                        rules: preset
-                            .map_local
-                            .rules
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, rule)| MappingRuleView {
-                                index,
-                                from: rule.from,
-                                to: rule.to,
-                                enabled: rule.enable,
-                            })
-                            .collect(),
-                    },
-                })
-                .collect(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct GetMappingSettingsResult {
     pub(crate) instance: InstanceSelector,
     pub(crate) settings_revision: SettingsRevision,
@@ -622,7 +562,7 @@ pub(crate) fn get_mapping_result(
             settings_revision,
             config_mode,
             persistence,
-            mapping: proxy.into_proxy().into(),
+            mapping: proxy.into_mapping(),
         }),
         _ => Err(ControlError::internal(
             "private RPC returned an unexpected mapping settings result",

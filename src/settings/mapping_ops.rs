@@ -1006,6 +1006,16 @@ pub(crate) fn explain_mapping_candidate(
     url: &str,
 ) -> MappingExplanation {
     let validation = validate_mapping_candidate(proxy);
+    let mapping = MappingEngine::compile(proxy);
+    explain_compiled_mapping(proxy, url, validation, &mapping)
+}
+
+pub(crate) fn explain_compiled_mapping(
+    proxy: Option<&ProxySettings>,
+    url: &str,
+    validation: MappingValidationResult,
+    mapping: &MappingEngine,
+) -> MappingExplanation {
     let mut diagnostics = validation.diagnostics;
     let mut diagnostics_total = validation.diagnostics_total;
     let parsed = url.parse::<Uri>().ok().filter(|uri| {
@@ -1033,7 +1043,7 @@ pub(crate) fn explain_mapping_candidate(
         };
     };
 
-    let trace = MappingEngine::compile(proxy).trace_request(&uri);
+    let trace = mapping.trace_request(&uri);
     let matches = proxy
         .map(|proxy| {
             [trace.remote_match, trace.local_match]

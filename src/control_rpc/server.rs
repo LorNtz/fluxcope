@@ -502,6 +502,12 @@ impl ControlCallOutcome {
                 settings_revision,
                 ..
             }
+            | ControlResult::PreviewMappingMutation {
+                config_mode,
+                persistence,
+                settings_revision,
+                ..
+            }
             | ControlResult::ExplainMapping {
                 config_mode,
                 persistence,

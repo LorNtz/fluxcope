@@ -497,6 +497,45 @@ impl AppRuntime {
         }
         changed
     }
+    fn check_settings_admission(
+        &self,
+        expected_revision: Option<SettingsRevision>,
+        origin: SettingsTransactionOrigin,
+    ) -> std::result::Result<(), ControlError> {
+        if let Some(expected) = expected_revision
+            && expected != self.settings_revision
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::SettingsRevisionConflict,
+                "settings revision does not match",
+                false,
+                serde_json::json!({
+                    "expected_revision": expected,
+                    "current_revision": self.settings_revision,
+                }),
+            ));
+        }
+        if origin == SettingsTransactionOrigin::Mcp && self.app.settings_popup.is_dirty() {
+            return Err(ControlError::new(
+                ControlErrorCode::TuiDraftConflict,
+                "mapping settings conflict with an unsaved TUI draft",
+                false,
+                serde_json::json!({"current_revision": self.settings_revision}),
+            ));
+        }
+        if (origin == SettingsTransactionOrigin::Mcp && self.app.settings_transaction_pending())
+            || self.pending_settings_transaction.is_some()
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::ServiceUnavailable,
+                "another settings transaction is pending",
+                true,
+                serde_json::json!({"stage": "settings_transaction_pending"}),
+            ));
+        }
+        Ok(())
+    }
+
     fn execute_control(
         &mut self,
         request: RuntimeRequest,
@@ -510,49 +549,23 @@ impl AppRuntime {
                     persistence: self.settings_context.persistence,
                 }))
             }
+            RuntimeRequest::PreviewMappingSnapshot { expected_revision } => {
+                self.check_settings_admission(
+                    Some(expected_revision),
+                    SettingsTransactionOrigin::Mcp,
+                )?;
+                Ok(RuntimeReply::MappingSettings(MappingSettingsSnapshot {
+                    settings: Arc::clone(&self.settings),
+                    revision: self.settings_revision,
+                    config_mode: self.settings_context.config_mode,
+                    persistence: self.settings_context.persistence,
+                }))
+            }
             RuntimeRequest::BeginSettingsTransaction {
                 expected_revision,
                 origin,
             } => {
-                if let Some(expected) = expected_revision
-                    && expected != self.settings_revision
-                {
-                    return Err(ControlError::new(
-                        ControlErrorCode::SettingsRevisionConflict,
-                        "settings revision does not match",
-                        false,
-                        serde_json::json!({
-                            "expected_revision": expected,
-                            "current_revision": self.settings_revision,
-                        }),
-                    ));
-                }
-                if origin == SettingsTransactionOrigin::Mcp && self.app.settings_popup.is_dirty() {
-                    return Err(ControlError::new(
-                        ControlErrorCode::TuiDraftConflict,
-                        "mapping settings conflict with an unsaved TUI draft",
-                        false,
-                        serde_json::json!({"current_revision": self.settings_revision}),
-                    ));
-                }
-                if origin == SettingsTransactionOrigin::Mcp
-                    && self.app.settings_transaction_pending()
-                {
-                    return Err(ControlError::new(
-                        ControlErrorCode::ServiceUnavailable,
-                        "another settings transaction is pending",
-                        true,
-                        serde_json::json!({"stage": "settings_transaction_pending"}),
-                    ));
-                }
-                if self.pending_settings_transaction.is_some() {
-                    return Err(ControlError::new(
-                        ControlErrorCode::ServiceUnavailable,
-                        "another settings transaction is pending",
-                        true,
-                        serde_json::json!({"stage": "settings_transaction_pending"}),
-                    ));
-                }
+                self.check_settings_admission(expected_revision, origin)?;
                 let token = SettingsTransactionToken::new(self.next_settings_transaction_token);
                 self.next_settings_transaction_token =
                     self.next_settings_transaction_token.saturating_add(1);
@@ -850,6 +863,7 @@ fn execute_control_request(
             "unsupported runtime control operation",
         )),
         RuntimeRequest::GetMappingSettings
+        | RuntimeRequest::PreviewMappingSnapshot { .. }
         | RuntimeRequest::BeginSettingsTransaction { .. }
         | RuntimeRequest::FinalizeSettingsTransaction { .. }
         | RuntimeRequest::AbortSettingsTransaction { .. } => Err(ControlError::internal(

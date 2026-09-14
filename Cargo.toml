@@ -21,7 +21,7 @@ tui-tree-widget = "0.23" # Essential for the request list panel
 
 # Async & Runtime
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "codec"] }
 futures = "0.3"
 
 # Proxy & Networking
@@ -63,7 +63,7 @@ tui-scrollview = "=0.5.1"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
 globset = "0.4"
 tempfile = "3"
-rmcp = { version = "=3.1.4", default-features = false, features = ["base64", "macros", "server", "transport-io"] }
+rmcp = { version = "=3.1.4", default-features = false, features = ["base64", "macros", "server", "client", "transport-io"] }
 schemars = "1.1"
 
 [features]
@@ -74,7 +74,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-rmcp = { version = "=3.1.4", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "=3.1.4", default-features = false, features = ["transport-child-process"] }
 portable-pty = "0.8"
 
 [[bench]]

@@ -116,7 +116,9 @@ fn mapping_read_validate_and_explain_decode_to_strict_typed_operations() {
         (
             "get_mapping_settings",
             json!({}),
-            ControlOperation::GetMappingSettings,
+            ControlOperation::GetMappingSettings {
+                scope: Default::default(),
+            },
         ),
         (
             "validate_mapping_settings",
@@ -299,25 +301,6 @@ fn mapping_rpc_arguments_reject_unknown_nested_mapping_fields() {
 
 #[test]
 fn mapping_results_have_exact_identity_mode_persistence_revision_and_affected_shapes() {
-    let get = ControlResult::GetMappingSettings {
-        instance: instance_scope(),
-        settings_revision: crate::runtime::settings::SettingsRevision::new(7),
-        config_mode: ConfigMode::ReadOnlyFile,
-        persistence: PersistenceMode::Ephemeral,
-        proxy: MappingSettingsPayload::from_proxy(ProxySettings::default()),
-    };
-    assert_eq!(
-        serde_json::to_value(get).expect("get result"),
-        json!({
-            "operation": "get_mapping_settings",
-            "instance": scope_value(ENDPOINT, RUN_ID),
-            "settings_revision": 7,
-            "config_mode": "read_only_file",
-            "persistence": "ephemeral",
-            "proxy": {}
-        })
-    );
-
     let mutation = ControlResult::MutateMapping {
         instance: instance_scope(),
         settings_revision: crate::runtime::settings::SettingsRevision::new(8),
@@ -396,7 +379,7 @@ fn oversized_mapping_request_is_rejected_by_one_pass_capped_framing() {
 }
 
 #[test]
-fn large_mapping_snapshot_retains_one_arc_and_worker_permit_through_serialization() {
+fn large_mapping_snapshot_retains_worker_permit_through_serialization() {
     let settings = Arc::new(AppSettings {
         proxy: Some(large_proxy(10_000)),
         ..AppSettings::default()
@@ -410,7 +393,14 @@ fn large_mapping_snapshot_retains_one_arc_and_worker_permit_through_serializatio
         settings_revision: crate::runtime::settings::SettingsRevision::new(7),
         config_mode: ConfigMode::Temporary,
         persistence: PersistenceMode::Ephemeral,
-        proxy: MappingSettingsPayload::from_snapshot(Arc::clone(&settings), Arc::new(permit)),
+        proxy: MappingSettingsPayload::from_snapshot(
+            crate::control::settings::mapping::MappingSettingsView::scoped(
+                settings.proxy.as_ref().expect("proxy"),
+                Default::default(),
+            )
+            .expect("full view"),
+            Arc::new(permit),
+        ),
     };
 
     let encoded = serde_json::to_vec(&result).expect("large mapping result");
@@ -419,7 +409,6 @@ fn large_mapping_snapshot_retains_one_arc_and_worker_permit_through_serializatio
         "fixture must exercise a large result"
     );
     assert!(encoded.len() < 8 * 1024 * 1024, "private response limit");
-    assert_eq!(Arc::strong_count(&settings), 2);
     assert!(
         Arc::clone(&admission).try_acquire_owned().is_err(),
         "serialization must retain worker admission"
@@ -431,7 +420,6 @@ fn large_mapping_snapshot_retains_one_arc_and_worker_permit_through_serializatio
             .try_acquire_owned()
             .expect("worker permit released after result delivery"),
     );
-    assert_eq!(Arc::strong_count(&settings), 1);
 }
 
 #[test]

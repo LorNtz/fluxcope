@@ -36,6 +36,10 @@ where
     match cli::parse_from(args)? {
         cli::ProcessMode::Proxy(startup) => runtime::run(startup).await,
         cli::ProcessMode::Broker => mcp::run_stdio().await,
+        cli::ProcessMode::McpClient {
+            command,
+            timeout_secs,
+        } => mcp::client::run(command, timeout_secs).await,
     }
 }
 

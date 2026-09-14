@@ -57,7 +57,7 @@ impl ControlRpcHandler for BenchmarkHandler {
                 instance: self.instance.clone(),
                 local_proxy_url: format!("http://{}", self.instance.proxy_endpoint),
                 wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
-                rpc_version: 1,
+                rpc_version: crate::control_rpc::protocol::RPC_VERSION,
                 config_source: None,
                 config_mode: self.config_mode,
                 persistence: self.persistence,

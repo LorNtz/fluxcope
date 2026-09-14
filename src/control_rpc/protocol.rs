@@ -1,5 +1,8 @@
 use crate::{
     capture::CaptureSequence,
+    control::settings::mapping::{
+        MappingMutationPreview, MappingReadScope, MappingSettingsView, validate_preview_urls,
+    },
     control::{
         BodyWorkRuntimeStatus, CaptureStoreRuntimeStatus, ControlRpcRuntimeStatus,
         InstanceRuntimeMetrics, MappingRuntimeStatus, SearchWorkRuntimeStatus,
@@ -19,8 +22,8 @@ use crate::{
     instance::RunId,
     runtime::settings::{SettingsRevision, SettingsTransactionOutcome},
     settings::{
-        AppSettings, ConfigMode, PersistenceMode, ProxyMapLocalRule, ProxyMapLocalSettings,
-        ProxyMapRemoteRule, ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
+        ConfigMode, PersistenceMode, ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule,
+        ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
         mapping_ops::{
             MappingExplanation, MappingMutation, MappingObjectRef, MappingValidationResult,
             ProxyRuleTable,
@@ -40,7 +43,7 @@ use std::{
 };
 use tokio::sync::OwnedSemaphorePermit;
 
-pub(crate) const RPC_VERSION: u16 = 1;
+pub(crate) const RPC_VERSION: u16 = 2;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const ORDINARY_MAX_DEADLINE: Duration = Duration::from_secs(30);
 const WAIT_MAX_DEADLINE: Duration = Duration::from_secs(330);
@@ -70,6 +73,7 @@ pub(crate) enum ControlOperationKind {
     GetMappingSettings,
     ValidateMappingSettings,
     ExplainMapping,
+    PreviewMappingMutation,
     MutateMapping,
 }
 
@@ -107,6 +111,7 @@ impl ControlOperationKind {
             Self::GetMappingSettings => "get_mapping_settings",
             Self::ValidateMappingSettings => "validate_mapping_settings",
             Self::ExplainMapping => "explain_mapping",
+            Self::PreviewMappingMutation => "preview_mapping_mutation",
             Self::MutateMapping => "mutate_mapping",
         }
     }
@@ -156,13 +161,20 @@ pub(crate) enum ControlOperation {
     ReadSelectedBody(Box<SelectionContentRequest>),
     FindJsonPointers(Box<FindJsonPointersRequest>),
     ProbeJsonPointerPattern(Box<ProbeJsonPointerPatternRequest>),
-    GetMappingSettings,
+    GetMappingSettings {
+        scope: MappingReadScope,
+    },
     ValidateMappingSettings {
         proxy: Box<ProxySettings>,
     },
     ExplainMapping {
         url: String,
         proposed_proxy: Option<Box<ProxySettings>>,
+    },
+    PreviewMappingMutation {
+        expected_revision: SettingsRevision,
+        mutation: Box<MappingMutation>,
+        urls: Vec<String>,
     },
     MutateMapping {
         expected_revision: SettingsRevision,
@@ -185,9 +197,10 @@ impl ControlOperation {
             Self::ReadSelectedBody(_) => ControlOperationKind::ReadSelectedBody,
             Self::FindJsonPointers(_) => ControlOperationKind::FindJsonPointers,
             Self::ProbeJsonPointerPattern(_) => ControlOperationKind::ProbeJsonPointerPattern,
-            Self::GetMappingSettings => ControlOperationKind::GetMappingSettings,
+            Self::GetMappingSettings { .. } => ControlOperationKind::GetMappingSettings,
             Self::ValidateMappingSettings { .. } => ControlOperationKind::ValidateMappingSettings,
             Self::ExplainMapping { .. } => ControlOperationKind::ExplainMapping,
+            Self::PreviewMappingMutation { .. } => ControlOperationKind::PreviewMappingMutation,
             Self::MutateMapping { .. } => ControlOperationKind::MutateMapping,
         }
     }
@@ -232,9 +245,10 @@ impl Serialize for ControlOperationArguments<'_> {
         S: Serializer,
     {
         match self.0 {
-            ControlOperation::DescribeInstance
-            | ControlOperation::GetStatus
-            | ControlOperation::GetMappingSettings => serializer.serialize_map(Some(0))?.end(),
+            ControlOperation::DescribeInstance | ControlOperation::GetStatus => {
+                serializer.serialize_map(Some(0))?.end()
+            }
+            ControlOperation::GetMappingSettings { scope } => scope.serialize(serializer),
             ControlOperation::SetRecordingEnabled { enabled } => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("enabled", enabled)?;
@@ -281,6 +295,17 @@ impl Serialize for ControlOperationArguments<'_> {
                 map.serialize_entry("proposed_proxy", proposed_proxy)?;
                 map.end()
             }
+            ControlOperation::PreviewMappingMutation {
+                expected_revision,
+                mutation,
+                urls,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("expected_revision", expected_revision)?;
+                map.serialize_entry("mutation", mutation)?;
+                map.serialize_entry("urls", urls)?;
+                map.end()
+            }
             ControlOperation::MutateMapping {
                 expected_revision,
                 mutation,
@@ -325,10 +350,6 @@ struct GetCaptureArguments {
     #[serde(default)]
     expected_revision: Option<u64>,
 }
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct GetMappingSettingsArguments {}
 
 fn mapping_default_enabled() -> bool {
     true
@@ -796,6 +817,14 @@ struct MutateMappingArguments {
     mutation: StrictMappingMutation,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewMappingMutationArguments {
+    expected_revision: SettingsRevision,
+    mutation: StrictMappingMutation,
+    urls: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InstanceScope {
@@ -805,17 +834,17 @@ pub(crate) struct InstanceScope {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MappingSettingsPayload {
-    settings: Arc<AppSettings>,
+    mapping: MappingSettingsView,
     _worker_permit: Option<Arc<OwnedSemaphorePermit>>,
 }
 
 impl MappingSettingsPayload {
     pub(crate) fn from_snapshot(
-        settings: Arc<AppSettings>,
+        mapping: MappingSettingsView,
         worker_permit: Arc<OwnedSemaphorePermit>,
     ) -> Self {
         Self {
-            settings,
+            mapping,
             _worker_permit: Some(worker_permit),
         }
     }
@@ -823,25 +852,20 @@ impl MappingSettingsPayload {
     #[cfg(test)]
     pub(crate) fn from_proxy(proxy: ProxySettings) -> Self {
         Self {
-            settings: Arc::new(AppSettings {
-                proxy: Some(proxy),
-                ..AppSettings::default()
-            }),
+            mapping: MappingSettingsView::scoped(&proxy, MappingReadScope::default())
+                .expect("unfiltered mapping view"),
             _worker_permit: None,
         }
     }
 
-    pub(crate) fn into_proxy(self) -> ProxySettings {
-        Arc::try_unwrap(self.settings)
-            .unwrap_or_else(|settings| settings.as_ref().clone())
-            .proxy
-            .unwrap_or_default()
+    pub(crate) fn into_mapping(self) -> MappingSettingsView {
+        self.mapping
     }
 }
 
 impl PartialEq for MappingSettingsPayload {
     fn eq(&self, other: &Self) -> bool {
-        self.settings.proxy == other.settings.proxy
+        self.mapping == other.mapping
     }
 }
 
@@ -850,10 +874,7 @@ impl Serialize for MappingSettingsPayload {
     where
         S: Serializer,
     {
-        match self.settings.proxy.as_ref() {
-            Some(proxy) => proxy.serialize(serializer),
-            None => ProxySettings::default().serialize(serializer),
-        }
+        self.mapping.serialize(serializer)
     }
 }
 
@@ -862,12 +883,9 @@ impl<'de> Deserialize<'de> for MappingSettingsPayload {
     where
         D: Deserializer<'de>,
     {
-        let proxy = ProxySettings::deserialize(deserializer)?;
+        let mapping = MappingSettingsView::deserialize(deserializer)?;
         Ok(Self {
-            settings: Arc::new(AppSettings {
-                proxy: Some(proxy),
-                ..AppSettings::default()
-            }),
+            mapping,
             _worker_permit: None,
         })
     }
@@ -972,6 +990,13 @@ pub(crate) enum ControlResult {
         persistence: PersistenceMode,
         explanation: Box<MappingExplanation>,
     },
+    PreviewMappingMutation {
+        instance: InstanceScope,
+        settings_revision: SettingsRevision,
+        config_mode: ConfigMode,
+        persistence: PersistenceMode,
+        preview: Box<MappingMutationPreview>,
+    },
     MutateMapping {
         instance: InstanceScope,
         settings_revision: SettingsRevision,
@@ -1000,6 +1025,7 @@ impl ControlResult {
             | Self::GetMappingSettings { instance, .. }
             | Self::ValidateMappingSettings { instance, .. }
             | Self::ExplainMapping { instance, .. }
+            | Self::PreviewMappingMutation { instance, .. }
             | Self::MutateMapping { instance, .. } => instance,
         }
     }
@@ -1021,6 +1047,7 @@ impl ControlResult {
             Self::GetMappingSettings { .. } => ControlOperationKind::GetMappingSettings,
             Self::ValidateMappingSettings { .. } => ControlOperationKind::ValidateMappingSettings,
             Self::ExplainMapping { .. } => ControlOperationKind::ExplainMapping,
+            Self::PreviewMappingMutation { .. } => ControlOperationKind::PreviewMappingMutation,
             Self::MutateMapping { .. } => ControlOperationKind::MutateMapping,
         }
     }
@@ -1278,6 +1305,7 @@ impl RequestEnvelope {
             | ControlOperationKind::GetMappingSettings
             | ControlOperationKind::ValidateMappingSettings
             | ControlOperationKind::ExplainMapping
+            | ControlOperationKind::PreviewMappingMutation
             | ControlOperationKind::MutateMapping => ORDINARY_MAX_DEADLINE,
         };
         received_at + Duration::from_millis(self.deadline_ms).min(maximum)
@@ -1366,8 +1394,8 @@ impl RequestEnvelope {
                 ControlOperation::ProbeJsonPointerPattern(Box::new(request))
             }
             ControlOperationKind::GetMappingSettings => {
-                parse_arguments::<GetMappingSettingsArguments>(&self.arguments)?;
-                ControlOperation::GetMappingSettings
+                let scope = parse_arguments::<MappingReadScope>(&self.arguments)?;
+                ControlOperation::GetMappingSettings { scope }
             }
             ControlOperationKind::ValidateMappingSettings => {
                 let arguments =
@@ -1381,6 +1409,16 @@ impl RequestEnvelope {
                 ControlOperation::ExplainMapping {
                     url: arguments.url,
                     proposed_proxy: arguments.proposed_proxy.map(|proxy| Box::new(proxy.into())),
+                }
+            }
+            ControlOperationKind::PreviewMappingMutation => {
+                let arguments =
+                    parse_arguments::<PreviewMappingMutationArguments>(&self.arguments)?;
+                validate_preview_urls(&arguments.urls)?;
+                ControlOperation::PreviewMappingMutation {
+                    expected_revision: arguments.expected_revision,
+                    mutation: Box::new(arguments.mutation.into()),
+                    urls: arguments.urls,
                 }
             }
             ControlOperationKind::MutateMapping => {
@@ -1555,3 +1593,6 @@ mod task10_tests;
 mod task12_tests;
 #[cfg(test)]
 mod task14_tests;
+
+#[cfg(test)]
+mod mapping_preview_tests;

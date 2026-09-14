@@ -59,7 +59,12 @@ fn decode<T: DeserializeOwned>(value: Value) -> T {
 fn read_validate_and_explain_inputs_are_closed_and_side_effect_free_operations() {
     let get: GetMappingSettingsInput = decode(json!({"instance": instance_json()}));
     assert_eq!(get.instance, instance().selector());
-    assert_eq!(get.into_operation(), ControlOperation::GetMappingSettings);
+    assert_eq!(
+        get.into_operation(),
+        ControlOperation::GetMappingSettings {
+            scope: Default::default()
+        }
+    );
 
     let validate: ValidateMappingSettingsInput = decode(json!({
         "instance": instance_json(),

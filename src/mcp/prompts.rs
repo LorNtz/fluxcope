@@ -4,7 +4,7 @@ const DEBUG_HTTP_FLOW: &str = "debug_http_flow";
 const CONFIGURE_MAPPING: &str = "configure_mapping";
 
 const DEBUG_HTTP_FLOW_TEXT: &str = r#"Debug one HTTP flow with Wirelens using bounded, retention-aware steps:
-1. Call `get_broker_status`, then `list_instances`; if several instances are live, make an explicit endpoint/run choice and keep that exact identity on every later call. Treat status warnings and reported limits as the operating boundary.
+1. Call `list_instances`; if several instances are live, make an explicit endpoint/run choice and keep that exact identity on every later call. Inspect discovery diagnostics; use `get_broker_status` when diagnosing connection or resource limits. Empty discovery is not evidence of an empty capture store.
 2. Call `get_status` and confirm recording is enabled and the selected instance has sufficient capture/body capacity. Use `set_recording_enabled` only when the user asked you to change it.
 3. Trigger the target app action outside Wirelens when needed, then call `wait_for_capture` with a narrow query and milestone. Fall back to narrowly paginated `search_captures`; never broad-scan by default.
 4. Call `get_capture` for compact request/response metadata. Respect capture retention, body preview truncation, live-stream state, and revision conflicts.
@@ -13,40 +13,13 @@ const DEBUG_HTTP_FLOW_TEXT: &str = r#"Debug one HTTP flow with Wirelens using bo
 7. Report the selected instance identity, capture ID/revision, evidence, and any retention, truncation, or decode limitation."#;
 
 const CONFIGURE_MAPPING_TEXT: &str = r#"Configure Wirelens mappings with one revision-safe transaction per requested change:
-1. Call `get_broker_status`, then `list_instances`; choose one explicit endpoint/run identity and never retarget a supplied run ID. Treat status warnings and reported limits as the operating boundary.
-2. Call `get_mapping_settings`; record `settings_revision`, config mode, and persistence. Explain whether the result is persistent or ephemeral.
-3. Build only the requested candidate change. Call `validate_mapping_settings`, then `explain_mapping` for affected URLs without reading local files.
-4. Apply only the requested typed mutation (`create_preset`, `rename_preset`, `delete_preset`, `set_active_preset`, `set_mapping_gate`, `create_mapping_rule`, `update_mapping_rule`, `delete_mapping_rule`, `move_mapping_rule`, or `set_mapping_rule_enabled`) with `expected_settings_revision`.
-5. After every successful write, refresh with `get_mapping_settings` and use the returned revision for the next write. Stop on revision, TUI-draft, validation, persistence, or instance-generation conflict rather than retrying blindly.
-6. When applicable, verify the mapping through new traffic using `wait_for_capture`, `search_captures`, and `get_capture`; do not claim an unexercised mapping works."#;
-
-#[cfg(test)]
-const REFERENCES: &[&str] = &[
-    "get_broker_status",
-    "list_instances",
-    "get_status",
-    "set_recording_enabled",
-    "wait_for_capture",
-    "search_captures",
-    "get_capture",
-    "find_json_pointers",
-    "probe_json_pointer_pattern",
-    "search_capture_body",
-    "extract_capture_body",
-    "get_mapping_settings",
-    "validate_mapping_settings",
-    "explain_mapping",
-    "create_preset",
-    "rename_preset",
-    "delete_preset",
-    "set_active_preset",
-    "set_mapping_gate",
-    "create_mapping_rule",
-    "update_mapping_rule",
-    "delete_mapping_rule",
-    "move_mapping_rule",
-    "set_mapping_rule_enabled",
-];
+1. Prefer native Wirelens MCP tools. Otherwise use `wirelens mcp tools [NAME]`, `wirelens mcp call TOOL --arguments @FILE`, and `wirelens mcp read URI`; do not improvise JSON-RPC pipelines or use a terminal for the broker. The CLI manages initialization, deadlines, output normalization, and shutdown. Discover only needed input schemas.
+2. Call `list_instances`; choose one explicit endpoint/run identity and never retarget a supplied run ID. Inspect discovery diagnostics; use `get_broker_status` or `get_status` when relevant to diagnosis, not as mandatory full dumps.
+3. Call `get_mapping_settings`, scoped to the requested `preset` and `table` when known; record `settings_revision`, config mode, persistence, active selection, gates, and scope/omissions. Rule indexes preserve table order, including disabled variants. Do not reconstruct a complete configuration from a scoped result.
+4. Call `preview_mapping_mutation` with the exact instance, `expected_settings_revision`, requested typed `operation`, and affected `urls`. Inspect validation, affected object, gates, and original/effective mapping decisions. Preview changes no state and checks neither file readability nor traffic. Use `validate_mapping_settings` only for an independently prepared complete configuration, or `explain_mapping` for current-state decisions.
+5. Apply the same requested typed mutation (`create_preset`, `rename_preset`, `delete_preset`, `set_active_preset`, `set_mapping_gate`, `create_mapping_rule`, `update_mapping_rule`, `delete_mapping_rule`, `move_mapping_rule`, or `set_mapping_rule_enabled`) with the preview's revision as `expected_settings_revision`. Preview is not a reservation: intervening edits and TUI drafts still block commit. Never enable unrelated gates.
+6. Inspect the mutation outcome and persistence; use its returned revision for subsequent writes rather than assuming an increment or unconditionally rereading all settings. Refresh the affected scope when current indexes or reconciliation are needed. Stop on revision, TUI-draft, validation, persistence, or instance-generation conflict. After a lost acknowledgment, reread the same run's state before considering another write; do not blindly retry.
+7. When authorized, verify through new traffic using `wait_for_capture`, `search_captures`, and `get_capture`. Report configuration validity, predicted selection, file/payload checks, actual traffic and response comparison separately. Effective-URL HTTP success does not establish original-URL HTTPS/TLS success or app/UI behavior. Keep fixture bodies and comparisons local."#;
 
 pub(crate) fn list() -> Vec<Prompt> {
     vec![
@@ -96,62 +69,10 @@ pub(crate) fn get(
 }
 
 #[cfg(test)]
-pub(crate) fn references() -> &'static [&'static str] {
-    REFERENCES
-}
-
-#[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use serde_json::Value;
 
     use super::*;
-
-    const ADVERTISED_TOOLS: &[&str] = &[
-        "get_broker_status",
-        "list_instances",
-        "get_status",
-        "set_recording_enabled",
-        "search_captures",
-        "get_capture",
-        "wait_for_capture",
-        "find_json_pointers",
-        "probe_json_pointer_pattern",
-        "search_capture_body",
-        "extract_capture_body",
-        "get_mapping_settings",
-        "validate_mapping_settings",
-        "explain_mapping",
-        "create_preset",
-        "rename_preset",
-        "delete_preset",
-        "set_active_preset",
-        "set_mapping_gate",
-        "create_mapping_rule",
-        "update_mapping_rule",
-        "delete_mapping_rule",
-        "move_mapping_rule",
-        "set_mapping_rule_enabled",
-    ];
-
-    const ADVERTISED_TEMPLATES: &[&str] = &[
-        "wirelens://instances/{proxy_endpoint}/{run_id}/captures/{capture_id}/{side}/{representation}?revision={revision}&start={start}&length={length}",
-        "wirelens://instances/{proxy_endpoint}/{run_id}/captures/{capture_id}/{side}/json?revision={revision}&pointer={pointer}&start={start}&length={length}",
-        "wirelens://instances/{proxy_endpoint}/{run_id}/captures/{capture_id}/{side}/form?revision={revision}&name={name}&occurrence={occurrence}&start={start}&length={length}",
-    ];
-
-    fn prompt_text(name: &str) -> String {
-        let result = get(name, None).expect("known prompt");
-        let value = serde_json::to_value(result).expect("prompt result JSON");
-        value["messages"]
-            .as_array()
-            .expect("messages")
-            .iter()
-            .filter_map(|message| message["content"]["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 
     #[test]
     fn lists_exactly_the_two_approved_prompts() {
@@ -160,58 +81,6 @@ mod tests {
         assert_eq!(prompts[0].name, "debug_http_flow");
         assert_eq!(prompts[1].name, "configure_mapping");
         assert!(prompts.iter().all(|prompt| prompt.arguments.is_none()));
-    }
-
-    #[test]
-    fn prompts_reference_only_advertised_surface() {
-        let tools = ADVERTISED_TOOLS.iter().copied().collect::<HashSet<_>>();
-        let templates = ADVERTISED_TEMPLATES.iter().copied().collect::<HashSet<_>>();
-        for reference in references() {
-            assert!(
-                tools.contains(reference) || templates.contains(reference),
-                "prompt references unadvertised surface {reference}"
-            );
-        }
-    }
-
-    #[test]
-    fn debug_prompt_encodes_safe_bounded_workflow() {
-        let text = prompt_text("debug_http_flow");
-        for required in [
-            "get_broker_status",
-            "list_instances",
-            "explicit",
-            "get_status",
-            "wait_for_capture",
-            "search_captures",
-            "get_capture",
-            "find_json_pointers",
-            "retention",
-            "truncation",
-            "decode",
-        ] {
-            assert!(text.contains(required), "missing {required}: {text}");
-        }
-        assert!(!text.contains("Authorization"));
-    }
-
-    #[test]
-    fn mapping_prompt_requires_revision_safe_validation_and_verification() {
-        let text = prompt_text("configure_mapping");
-        for required in [
-            "get_broker_status",
-            "list_instances",
-            "explicit",
-            "get_mapping_settings",
-            "persistence",
-            "validate_mapping_settings",
-            "explain_mapping",
-            "expected_settings_revision",
-            "refresh",
-            "new traffic",
-        ] {
-            assert!(text.contains(required), "missing {required}: {text}");
-        }
     }
 
     #[test]

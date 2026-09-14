@@ -6,6 +6,10 @@ use clap::{CommandFactory, Parser, Subcommand, error::ErrorKind};
 pub(crate) enum ProcessMode {
     Proxy(ProxyStartup),
     Broker,
+    McpClient {
+        command: McpClientCommand,
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +60,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Mcp,
+    /// Run the stdio broker, or execute a command through a managed broker child.
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpClientCommand>,
+        /// Whole-command deadline (default 60 seconds). Use 360 for a five-minute capture wait.
+        #[arg(long, global = true, value_parser = clap::value_parser!(u64).range(1..=360))]
+        timeout_secs: Option<u64>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum McpClientCommand {
+    /// List tool names/descriptions, or the selected tool's input schema and annotations.
+    Tools { name: Option<String> },
+    /// Call a tool once; arguments must be a JSON object (maximum 1 MiB).
+    Call {
+        tool: String,
+        /// JSON, @PATH, or - to read standard input.
+        #[arg(long, value_name = "JSON|@PATH|-")]
+        arguments: String,
+    },
+    /// Read an MCP resource URI.
+    Read { uri: String },
 }
 
 pub(crate) fn parse_from<I, T>(args: I) -> Result<ProcessMode, clap::Error>
@@ -69,7 +95,11 @@ where
 
 impl Cli {
     fn into_process_mode(self) -> Result<ProcessMode, clap::Error> {
-        if matches!(self.command, Some(Command::Mcp)) {
+        if let Some(Command::Mcp {
+            command,
+            timeout_secs,
+        }) = self.command
+        {
             if self.config.is_some()
                 || self.host.is_some()
                 || self.port.is_some()
@@ -82,7 +112,17 @@ impl Cli {
                 ));
             }
 
-            return Ok(ProcessMode::Broker);
+            return match command {
+                Some(command) => Ok(ProcessMode::McpClient {
+                    command,
+                    timeout_secs: timeout_secs.unwrap_or(60),
+                }),
+                None if timeout_secs.is_some() => Err(validation_error(
+                    ErrorKind::ArgumentConflict,
+                    "--timeout-secs requires an mcp client command",
+                )),
+                None => Ok(ProcessMode::Broker),
+            };
         }
 
         if self.config.is_some() && (self.host.is_some() || self.port.is_some()) {

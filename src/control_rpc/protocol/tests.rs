@@ -46,7 +46,7 @@ fn request_envelope_serializes_operation_and_arguments_at_top_level() {
     assert_eq!(
         actual,
         json!({
-            "protocol_version": 1,
+            "protocol_version": RPC_VERSION,
             "request_id": "request-1",
             "run_id": RUN_ID,
             "deadline_ms": 1_000,
@@ -78,7 +78,7 @@ fn response_envelopes_serialize_exactly_one_typed_outcome() {
     assert_eq!(
         serde_json::to_value(failure).expect("serialize failure"),
         json!({
-            "protocol_version": 1,
+            "protocol_version": RPC_VERSION,
             "request_id": "request-2",
             "error": {
                 "code": "instance_unavailable",
@@ -121,8 +121,8 @@ fn request_deadline_is_clamped_to_the_operation_maximum() {
 
 #[test]
 fn request_rejects_unknown_and_duplicate_envelope_fields() {
-    let unknown = br#"{"protocol_version":1,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{},"extra":true}"#;
-    let duplicate = br#"{"protocol_version":1,"protocol_version":1,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{}}"#;
+    let unknown = br#"{"protocol_version":2,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{},"extra":true}"#;
+    let duplicate = br#"{"protocol_version":2,"protocol_version":2,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{}}"#;
 
     assert_invalid_request(unknown);
     assert_invalid_request(duplicate);
@@ -130,8 +130,8 @@ fn request_rejects_unknown_and_duplicate_envelope_fields() {
 
 #[test]
 fn request_rejects_unknown_and_duplicate_client_fields() {
-    let unknown = br#"{"protocol_version":1,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0","extra":true},"operation":"describe_instance","arguments":{}}"#;
-    let duplicate = br#"{"protocol_version":1,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","name":"other","version":"1.0"},"operation":"describe_instance","arguments":{}}"#;
+    let unknown = br#"{"protocol_version":2,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0","extra":true},"operation":"describe_instance","arguments":{}}"#;
+    let duplicate = br#"{"protocol_version":2,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","name":"other","version":"1.0"},"operation":"describe_instance","arguments":{}}"#;
 
     assert_invalid_request(unknown);
     assert_invalid_request(duplicate);
@@ -140,7 +140,7 @@ fn request_rejects_unknown_and_duplicate_client_fields() {
 #[test]
 fn describe_instance_rejects_unknown_and_duplicate_argument_fields() {
     let unknown = request_with(|value| value["arguments"] = json!({"extra": true}));
-    let duplicate = br#"{"protocol_version":1,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{"extra":1,"extra":2}}"#;
+    let duplicate = br#"{"protocol_version":2,"request_id":"request-1","run_id":"AAAAAAAAAAAAAAAAAAAAAA","deadline_ms":1000,"client":{"name":"test-client","version":"1.0"},"operation":"describe_instance","arguments":{"extra":1,"extra":2}}"#;
 
     assert_invalid_request(&unknown);
     assert_invalid_request(duplicate);
@@ -157,7 +157,7 @@ fn request_rejects_trailing_json_data() {
 #[test]
 fn request_rejects_unknown_operation_and_protocol_version() {
     let unknown_operation = request_with(|value| value["operation"] = json!("not_an_operation"));
-    let wrong_version = request_with(|value| value["protocol_version"] = json!(2));
+    let wrong_version = request_with(|value| value["protocol_version"] = json!(1));
 
     assert_invalid_request(&unknown_operation);
     let error = decode_request_payload(&wrong_version, Instant::now()).expect_err("wrong version");
@@ -196,7 +196,7 @@ fn request_rejects_empty_or_overlong_identifiers_by_utf8_bytes() {
 #[test]
 fn response_rejects_both_or_neither_outcome() {
     let both = json!({
-        "protocol_version": 1,
+        "protocol_version": RPC_VERSION,
         "request_id": "request-1",
         "result": {
             "operation": "describe_instance",
@@ -209,7 +209,7 @@ fn response_rejects_both_or_neither_outcome() {
             "details": {}
         }
     });
-    let neither = json!({"protocol_version": 1, "request_id": "request-1"});
+    let neither = json!({"protocol_version": RPC_VERSION, "request_id": "request-1"});
 
     for value in [both, neither] {
         let payload = serde_json::to_vec(&value).expect("response JSON");
@@ -226,7 +226,7 @@ fn response_rejects_both_or_neither_outcome() {
 
 #[test]
 fn response_rejects_duplicate_fields_and_trailing_json() {
-    let duplicate = br#"{"protocol_version":1,"request_id":"request-1","result":{"operation":"describe_instance","instance":{"proxy_endpoint":"127.0.0.1:19001","run_id":"AAAAAAAAAAAAAAAAAAAAAA"}},"result":{"operation":"describe_instance","instance":{"proxy_endpoint":"127.0.0.1:19001","run_id":"AAAAAAAAAAAAAAAAAAAAAA"}}}"#;
+    let duplicate = br#"{"protocol_version":2,"request_id":"request-1","result":{"operation":"describe_instance","instance":{"proxy_endpoint":"127.0.0.1:19001","run_id":"AAAAAAAAAAAAAAAAAAAAAA"}},"result":{"operation":"describe_instance","instance":{"proxy_endpoint":"127.0.0.1:19001","run_id":"AAAAAAAAAAAAAAAAAAAAAA"}}}"#;
     let mut trailing = serde_json::to_vec(&success_response_value(
         "request-1",
         scope_value(ENDPOINT, RUN_ID),
@@ -249,7 +249,7 @@ fn response_rejects_duplicate_fields_and_trailing_json() {
 #[test]
 fn response_rejects_unknown_fields_versions_and_error_codes() {
     let unknown_field = json!({
-        "protocol_version": 1,
+        "protocol_version": RPC_VERSION,
         "request_id": "request-1",
         "result": {
             "operation": "describe_instance",
@@ -262,9 +262,9 @@ fn response_rejects_unknown_fields_versions_and_error_codes() {
         describe_result(),
     ))
     .expect("complete describe response");
-    wrong_version["protocol_version"] = json!(2);
+    wrong_version["protocol_version"] = json!(1);
     let unknown_error_code = json!({
-        "protocol_version": 1,
+        "protocol_version": RPC_VERSION,
         "request_id": "request-1",
         "error": {
             "code": "made_up",
@@ -452,7 +452,7 @@ fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
     let status = ControlResult::GetStatus {
         local_proxy_url: format!("http://{ENDPOINT}"),
         wirelens_version: "0.1.0-test".to_owned(),
-        rpc_version: 1,
+        rpc_version: RPC_VERSION,
         config_source: None,
         instance: instance_scope(),
         config_mode: ConfigMode::Temporary,
@@ -487,7 +487,7 @@ fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
             "instance": scope_value(ENDPOINT, RUN_ID),
             "local_proxy_url": format!("http://{ENDPOINT}"),
             "wirelens_version": "0.1.0-test",
-            "rpc_version": 1,
+            "rpc_version": RPC_VERSION,
             "config_source": null,
             "config_mode": "temporary",
             "persistence": "ephemeral",

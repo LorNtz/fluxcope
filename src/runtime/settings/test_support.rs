@@ -627,7 +627,7 @@ impl SettingsRuntimeFixture {
     ) -> Result<crate::control::settings::MappingSettingsResult, ControlError> {
         self.inner
             .client
-            .get_mapping_settings(CancellationToken::new())
+            .get_mapping_settings(Default::default(), CancellationToken::new())
             .await
     }
 
@@ -735,6 +735,36 @@ fn execute_runtime_request(
     match request {
         RuntimeRequest::GetMappingSettings => {
             let state = state.lock().expect("runtime state");
+            Ok(RuntimeReply::MappingSettings(
+                crate::control::settings::MappingSettingsSnapshot {
+                    settings: Arc::clone(&state.settings),
+                    revision: state.revision,
+                    config_mode: state.config_mode,
+                    persistence: state.persistence,
+                },
+            ))
+        }
+        RuntimeRequest::PreviewMappingSnapshot { expected_revision } => {
+            let state = state.lock().expect("runtime state");
+            if expected_revision != state.revision {
+                return Err(ControlError::new(
+                    ControlErrorCode::SettingsRevisionConflict,
+                    "settings revision does not match",
+                    false,
+                    serde_json::json!({"expected_revision": expected_revision, "current_revision": state.revision}),
+                ));
+            }
+            if state.popup_dirty {
+                return Err(ControlError::new(
+                    ControlErrorCode::TuiDraftConflict,
+                    "mapping settings conflict with an unsaved TUI draft",
+                    false,
+                    serde_json::json!({"current_revision": state.revision}),
+                ));
+            }
+            if state.pending.is_some() {
+                return Err(pending_error());
+            }
             Ok(RuntimeReply::MappingSettings(
                 crate::control::settings::MappingSettingsSnapshot {
                     settings: Arc::clone(&state.settings),

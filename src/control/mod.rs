@@ -217,6 +217,9 @@ pub(crate) enum RuntimeRequest {
         side: crate::capture::BodySide,
     },
     GetMappingSettings,
+    PreviewMappingSnapshot {
+        expected_revision: crate::runtime::settings::SettingsRevision,
+    },
     BeginSettingsTransaction {
         expected_revision: Option<crate::runtime::settings::SettingsRevision>,
         origin: crate::runtime::settings::SettingsTransactionOrigin,

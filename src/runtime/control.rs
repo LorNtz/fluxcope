@@ -2176,7 +2176,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
                         .probe_json_pointer_pattern(*request, _context.deadline, cancelled)
                         .await
                 }
-                ControlOperation::GetMappingSettings => {
+                ControlOperation::GetMappingSettings { scope } => {
                     let client = settings_transactions.as_ref().ok_or_else(|| {
                         ControlError::service_unavailable(
                             "settings transaction service is unavailable",
@@ -2185,14 +2185,14 @@ impl ControlRpcHandler for RuntimeControlHandler {
                     let identity = Self::instance_snapshot(&runtime, &cancelled)
                         .await?
                         .instance;
-                    let result = client.get_mapping_settings(cancelled).await?;
+                    let result = client.get_mapping_settings(scope, cancelled).await?;
                     Ok(ControlResult::GetMappingSettings {
                         instance: identity,
                         settings_revision: result.revision,
                         config_mode: result.config_mode,
                         persistence: result.persistence,
                         proxy: MappingSettingsPayload::from_snapshot(
-                            result.settings,
+                            result.mapping,
                             result.worker_permit,
                         ),
                     })
@@ -2236,6 +2236,30 @@ impl ControlRpcHandler for RuntimeControlHandler {
                         config_mode: result.config_mode,
                         persistence: result.persistence,
                         explanation: Box::new(result.explanation),
+                    })
+                }
+                ControlOperation::PreviewMappingMutation {
+                    expected_revision,
+                    mutation,
+                    urls,
+                } => {
+                    let client = settings_transactions.as_ref().ok_or_else(|| {
+                        ControlError::service_unavailable(
+                            "settings transaction service is unavailable",
+                        )
+                    })?;
+                    let identity = Self::instance_snapshot(&runtime, &cancelled)
+                        .await?
+                        .instance;
+                    let result = client
+                        .preview_mapping_mutation(*mutation, expected_revision, urls, cancelled)
+                        .await?;
+                    Ok(ControlResult::PreviewMappingMutation {
+                        instance: identity,
+                        settings_revision: result.revision,
+                        config_mode: result.config_mode,
+                        persistence: result.persistence,
+                        preview: Box::new(result.preview),
                     })
                 }
                 ControlOperation::MutateMapping {

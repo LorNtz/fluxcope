@@ -68,10 +68,11 @@ use super::{
         CreateMappingRuleInput, CreatePresetInput, DeleteMappingRuleInput, DeletePresetInput,
         ExplainMappingInput, ExplainMappingResult, GetMappingSettingsInput,
         GetMappingSettingsResult, MappingMutationOutput, MappingToolInput, MoveMappingRuleInput,
-        RenamePresetInput, SetActivePresetInput, SetMappingGateInput, SetMappingRuleEnabledInput,
+        PreviewMappingMutationInput, PreviewMappingMutationResult, RenamePresetInput,
+        SetActivePresetInput, SetMappingGateInput, SetMappingRuleEnabledInput,
         UpdateMappingRuleInput, ValidateMappingSettingsInput, ValidateMappingSettingsResult,
         explain_mapping_result, get_mapping_result, mapping_mutation_result,
-        validate_mapping_result,
+        preview_mapping_result, validate_mapping_result,
     },
     schema::{
         BrokerLimits, BrokerStatusResult, BrokerVersions, DiscoverySummary, GetStatusInput,
@@ -1091,6 +1092,38 @@ impl Broker {
         .await
     }
 
+    async fn preview_mapping_mutation_impl(
+        &self,
+        input: PreviewMappingMutationInput,
+        client: DeclaredClient,
+        deadline: Instant,
+        cancelled: CancellationToken,
+    ) -> Result<PreviewMappingMutationResult, ControlError> {
+        let (instance, operation) = self
+            .run_mapping_worker(deadline, cancelled.clone(), move || {
+                ensure_json_payload_within_limit(&input, REQUEST_MAX_BYTES)?;
+                let instance = input.instance.clone().selector();
+                Ok((instance, input.into_operation()?))
+            })
+            .await?;
+        let result = self
+            .mapping_call(
+                instance,
+                operation,
+                SelectorRequirement::Mutation,
+                client,
+                deadline,
+                cancelled.clone(),
+            )
+            .await?;
+        self.run_mapping_worker(deadline, cancelled, move || {
+            let result = preview_mapping_result(result)?;
+            ensure_json_payload_within_limit(&result, RESPONSE_MAX_BYTES)?;
+            Ok(result)
+        })
+        .await
+    }
+
     async fn validate_mapping_settings_impl(
         &self,
         input: ValidateMappingSettingsInput,
@@ -1757,7 +1790,7 @@ impl Broker {
 
     #[tool(
         name = "get_mapping_settings",
-        description = "Get revisioned proxy mapping settings",
+        description = "Get revisioned mapping settings, optionally scoped by exact preset and remote/local table; retain all ordered rules including disabled duplicates, gates, original indexes and explicit omissions",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1829,6 +1862,34 @@ impl Broker {
         let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
         let client = declared_client(&context).map_err(to_mcp_error)?;
         self.explain_mapping_impl(
+            input,
+            client,
+            Instant::now() + ORDINARY_DEADLINE,
+            context.ct.clone(),
+        )
+        .await
+        .map(Json)
+        .map_err(to_mcp_error)
+    }
+
+    #[tool(
+        name = "preview_mapping_mutation",
+        description = "Preview one typed mutation against an exact instance and expected settings revision without commit, file reads or traffic; return validation, gates, affected change and remote-then-local explanations for at most 16 URLs. Commit with the same revision using the matching named mutation tool; stale revisions and unsaved TUI drafts are rejected",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn preview_mapping_mutation(
+        &self,
+        Parameters(input): Parameters<PreviewMappingMutationInput>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<PreviewMappingMutationResult>, ErrorData> {
+        let _call = self.try_admit_public_call().map_err(to_mcp_error)?;
+        let client = declared_client(&context).map_err(to_mcp_error)?;
+        self.preview_mapping_mutation_impl(
             input,
             client,
             Instant::now() + ORDINARY_DEADLINE,
@@ -2701,7 +2762,7 @@ mod tests {
             client::connect_failure,
             protocol::{
                 ControlError, ControlErrorCode, ControlOperation, ControlResult, DeclaredClient,
-                InstanceScope,
+                InstanceScope, RPC_VERSION,
             },
         },
         instance::RunId,
@@ -3072,7 +3133,7 @@ mod tests {
         let endpoint = endpoint(port);
         let value = serde_json::json!({
             "schema_version": 1,
-            "rpc_version": 1,
+            "rpc_version": RPC_VERSION,
             "binary_version": "9.8.7-test",
             "pid": u32::from(port),
             "proxy_endpoint": endpoint,
@@ -3638,7 +3699,7 @@ mod tests {
         );
         assert_eq!(listed.local_proxy_url, "http://127.0.0.1:19001");
         assert_eq!(listed.wirelens_version, "9.8.7-test");
-        assert_eq!(listed.rpc_version, 1);
+        assert_eq!(listed.rpc_version, RPC_VERSION);
         assert_eq!(listed.config_mode, ConfigMode::Temporary);
         assert_eq!(listed.persistence, PersistenceMode::Ephemeral);
         assert_eq!(listed.config_source, None);

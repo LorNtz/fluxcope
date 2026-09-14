@@ -101,7 +101,10 @@ async fn request_frame_cap_accepts_the_normal_wire_envelope() {
         .await
         .expect("bounded request frame");
 
-    assert_eq!(envelope.protocol_version, 1);
+    assert_eq!(
+        envelope.protocol_version,
+        crate::control_rpc::protocol::RPC_VERSION
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

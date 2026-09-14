@@ -1,3 +1,5 @@
+pub(crate) mod mapping;
+
 use std::sync::Arc;
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -53,7 +55,7 @@ pub(crate) struct MappingSettingsResult {
     pub(crate) revision: SettingsRevision,
     pub(crate) config_mode: ConfigMode,
     pub(crate) persistence: PersistenceMode,
-    pub(crate) settings: Arc<AppSettings>,
+    pub(crate) mapping: mapping::MappingSettingsView,
     pub(crate) worker_permit: Arc<OwnedSemaphorePermit>,
 }
 
@@ -71,4 +73,12 @@ pub(crate) struct MappingExplanationReply {
     pub(crate) config_mode: ConfigMode,
     pub(crate) persistence: PersistenceMode,
     pub(crate) explanation: MappingExplanation,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MappingPreviewReply {
+    pub(crate) revision: SettingsRevision,
+    pub(crate) config_mode: ConfigMode,
+    pub(crate) persistence: PersistenceMode,
+    pub(crate) preview: mapping::MappingMutationPreview,
 }

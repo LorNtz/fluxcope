@@ -719,7 +719,7 @@ async fn mapping_read_validate_and_explain_leave_all_authoritative_state_unchang
     assert_eq!(read.revision, before.revision);
     assert_eq!(read.config_mode, ConfigMode::Temporary);
     assert_eq!(read.persistence, PersistenceMode::Ephemeral);
-    let proxy = read.settings.proxy.clone().unwrap_or_default();
+    let proxy = before.settings.proxy.clone().unwrap_or_default();
 
     let validation = fixture
         .validate_mapping_settings(proxy.clone())
@@ -746,12 +746,12 @@ async fn mapping_settings_snapshots_hold_worker_admission_until_dropped() {
     let fixture = SettingsRuntimeFixture::temporary().await;
     let first = fixture
         .client()
-        .get_mapping_settings(CancellationToken::new())
+        .get_mapping_settings(Default::default(), CancellationToken::new())
         .await
         .expect("first mapping snapshot");
     let second = fixture
         .client()
-        .get_mapping_settings(CancellationToken::new())
+        .get_mapping_settings(Default::default(), CancellationToken::new())
         .await
         .expect("second mapping snapshot");
     let turns_before_blocked_read = fixture.runtime_turn_count();

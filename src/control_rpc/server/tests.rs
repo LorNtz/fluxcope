@@ -174,7 +174,10 @@ async fn server_dispatches_one_typed_call_then_closes() {
     let response: Value =
         serde_json::from_slice(&read_payload(&mut client_stream).await).expect("response JSON");
 
-    assert_eq!(response["protocol_version"], 1);
+    assert_eq!(
+        response["protocol_version"],
+        crate::control_rpc::protocol::RPC_VERSION
+    );
     assert_eq!(response["request_id"], "request-1");
     assert!(response.get("result").is_some());
     assert!(response.get("error").is_none());

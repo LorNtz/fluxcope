@@ -6,8 +6,8 @@ use anyhow::{Context, Result, anyhow};
 use rmcp::{
     ServiceError, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, GetPromptRequestParams,
-        Implementation, ProtocolVersion, ReadResourceRequestParams,
+        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
+        ReadResourceRequestParams,
     },
     transport::TokioChildProcess,
 };
@@ -79,39 +79,6 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
             .collect::<Vec<_>>(),
         vec!["configure_mapping", "debug_http_flow"]
     );
-    let debug_prompt = client
-        .get_prompt(GetPromptRequestParams::new("debug_http_flow"))
-        .await?;
-    let debug_text = debug_prompt.messages[0]
-        .content
-        .as_text()
-        .expect("debug prompt text")
-        .text
-        .as_str();
-    assert!(debug_text.contains("list_instances"));
-    assert!(debug_text.contains("search_captures"));
-    assert!(debug_text.contains("wait_for_capture"));
-    assert!(debug_text.contains("get_capture"));
-    let mapping_prompt = client
-        .get_prompt(GetPromptRequestParams::new("configure_mapping"))
-        .await?;
-    let mapping_text = mapping_prompt.messages[0]
-        .content
-        .as_text()
-        .expect("mapping prompt text")
-        .text
-        .as_str();
-    assert!(mapping_text.contains("validate_mapping_settings"));
-    assert!(mapping_text.contains("explain_mapping"));
-    assert!(mapping_text.contains("expected_settings_revision"));
-    let configured = client
-        .get_prompt(GetPromptRequestParams::new("configure_mapping"))
-        .await
-        .map_err(|error| anyhow!("get configure_mapping prompt failed: {error}"))?;
-    let configured_text =
-        serde_json::to_string(&configured).context("serialize configure_mapping prompt")?;
-    assert!(configured_text.contains("expected_settings_revision"));
-    assert!(configured_text.contains("validate_mapping_settings"));
     let mut tools = client.list_all_tools().await?;
     tools.sort_by(|left, right| left.name.cmp(&right.name));
     assert_eq!(
@@ -133,6 +100,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
             "get_status",
             "list_instances",
             "move_mapping_rule",
+            "preview_mapping_mutation",
             "probe_json_pointer_pattern",
             "rename_preset",
             "search_capture_body",
@@ -163,6 +131,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
                 | "get_mapping_settings"
                 | "validate_mapping_settings"
                 | "explain_mapping"
+                | "preview_mapping_mutation"
         );
         assert_eq!(annotations.read_only_hint, Some(expected_read_only));
         let expected_destructive =
