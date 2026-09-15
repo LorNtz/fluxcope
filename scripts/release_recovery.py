@@ -45,8 +45,6 @@ def plan(identity: dict, *, bootstrap: bool) -> dict:
         report = snapshot(identity)
         if report['state'] in ('complete', 'rc-complete'):
             return {'operation': 'refresh', 'description': 'Refresh the already completed release report without publishing.'}
-        if not report.get('public_verified'):
-            return {'operation': 'verify-public', 'description': 'Verify the existing immutable public assets without rebuilding or reuploading; then finish stable installation checks if applicable.'}
         if identity['channel'] == 'stable':
             with tempfile.TemporaryDirectory(prefix='fluxcope-recovery-plan-') as temporary:
                 directory = Path(temporary)
@@ -57,6 +55,9 @@ def plan(identity: dict, *, bootstrap: bool) -> dict:
                     pass
                 else:
                     return {'operation': 'verify-installations', 'description': 'Recheck the published registry package and exact tap commit with reviewed master tooling; no publication writes.'}
+        if not report.get('public_verified'):
+            return {'operation': 'verify-public', 'description': 'Verify the existing immutable public assets without rebuilding or reuploading; then finish stable installation checks if applicable.'}
+        if identity['channel'] == 'stable':
             return {'operation': 'stable-installations', 'description': 'Verify published assets, repair the personal tap if needed, and rerun exact registry/Homebrew installation checks.'}
         return {'operation': 'refresh', 'description': 'Refresh the RC result from existing public evidence.'}
     if tag is None:
