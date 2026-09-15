@@ -23,7 +23,6 @@ Normal releases need only version/diff review and merge confirmation. When TUI b
 
 ## One-time account and repository setup
 
-See [the first-release account guide](first-release-setup.md) for the exact GitHub App registration and private-key import steps. Do not send private keys or registry tokens through chat.
 
 1. Install `gh`, `just` and Python 3.11+. Authenticate with `gh auth login --hostname github.com --git-protocol ssh --web`; verify the active account with `gh api user` and repository access with `gh repo view LorNtz/fluxcope --json nameWithOwner,viewerPermission`.
 2. Review all history and branches before making `LorNtz/fluxcope` public. The personal tap is `LorNtz/homebrew-tap`, not `homebrew/core`. Verify both origin URLs point to `git@github.com:LorNtz/fluxcope.git`.
