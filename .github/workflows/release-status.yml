@@ -1,0 +1,84 @@
+name: Release status
+on:
+  workflow_run:
+    workflows: [Release source, Release distribution, Publish Homebrew, Recover release]
+    types: [requested, in_progress, completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing authorized version to observe'
+        type: string
+        required: true
+      pr:
+        description: 'Original merged release PR number'
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  checks: write
+  attestations: read
+concurrency:
+  group: release-result-observer
+  cancel-in-progress: false
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    outputs:
+      archive: ${{ steps.report.outputs.archive }}
+      version: ${{ steps.report.outputs.version }}
+      pr: ${{ steps.report.outputs.pr }}
+    steps:
+      # Never check out workflow_run.head_sha or execute downloaded artifacts.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      - id: report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+          VERSION: ${{ inputs.version }}
+          PR: ${{ inputs.pr }}
+        run: |
+          if [[ -n "$VERSION" ]]; then
+            python3 scripts/release_status.py --version "$VERSION" --pr "$PR"
+          else
+            python3 scripts/release_status.py
+          fi
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-result-${{ github.run_attempt }}
+          path: target/release-result.json
+          if-no-files-found: ignore
+          retention-days: 90
+  archive:
+    needs: report
+    if: needs.report.outputs.archive == 'true'
+    runs-on: ubuntu-24.04
+    environment: release-result
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+      checks: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CRATES_BOOTSTRAPPED: ${{ vars.CRATES_BOOTSTRAPPED }}
+      VERSION: ${{ needs.report.outputs.version }}
+      PR: ${{ needs.report.outputs.pr }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: master
+          persist-credentials: false
+      # Regenerate from verified APIs, so failed-job retries need no old report artifact.
+      - run: python3 scripts/release_status.py --archive prepare --version "$VERSION" --pr "$PR"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: target/release-archive.json
+      - run: python3 scripts/release_status.py --archive publish --version "$VERSION" --pr "$PR"

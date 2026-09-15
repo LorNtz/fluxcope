@@ -192,7 +192,7 @@ impl AppRuntime {
                 status = self.logging_status_rx.recv(), if logging_status_open => {
                     match status {
                         Some(LoggingStatus::Degraded(message)) => {
-                            self.app.append_log(LogRecord::system(format!("ERROR - [wirelens::logging] {message}")));
+                            self.app.append_log(LogRecord::system(format!("ERROR - [fluxcope::logging] {message}")));
                             dirty = true;
                         }
                         None => logging_status_open = false,
@@ -213,7 +213,7 @@ impl AppRuntime {
                                 Ok(()) => "certificate download service stopped".to_string(),
                                 Err(error) => format!("certificate download service disabled: {error:#}"),
                             };
-                            self.app.append_log(LogRecord::system(format!("WARN - [wirelens::runtime] {message}")));
+                            self.app.append_log(LogRecord::system(format!("WARN - [fluxcope::runtime] {message}")));
                             dirty = true;
                         }
                         ServiceKind::Logger => {
@@ -221,7 +221,7 @@ impl AppRuntime {
                                 Ok(()) => "logging service stopped".to_string(),
                                 Err(error) => format!("logging service failed: {error:#}"),
                             };
-                            self.app.append_log(LogRecord::system(format!("ERROR - [wirelens::runtime] {message}")));
+                            self.app.append_log(LogRecord::system(format!("ERROR - [fluxcope::runtime] {message}")));
                             dirty = true;
                         }
                         ServiceKind::BodyPumps => {
@@ -311,7 +311,7 @@ impl AppRuntime {
             }
             if let Ok(LoggingStatus::Degraded(message)) = self.logging_status_rx.try_recv() {
                 self.app.append_log(LogRecord::system(format!(
-                    "ERROR - [wirelens::logging] {message}"
+                    "ERROR - [fluxcope::logging] {message}"
                 )));
                 continue;
             }
@@ -353,7 +353,7 @@ impl AppRuntime {
             || decode != DecodeMetricsSnapshot::default()
         {
             self.app.append_log(LogRecord::system(format!(
-                "WARN - [wirelens::metrics] capture_not_admitted={} capture_memory_pressure={} preview_body_limited={} preview_memory_limited={} metadata_truncated={} decode_rejected={} decode_superseded={} decode_limited={} decode_failed={} log_producer_dropped={} log_tui_dropped={} log_truncated={}",
+                "WARN - [fluxcope::metrics] capture_not_admitted={} capture_memory_pressure={} preview_body_limited={} preview_memory_limited={} metadata_truncated={} decode_rejected={} decode_superseded={} decode_limited={} decode_failed={} log_producer_dropped={} log_tui_dropped={} log_truncated={}",
                 capture.exchanges_not_admitted,
                 capture.memory_pressure,
                 capture.previews_per_body_limited,

@@ -1,10 +1,9 @@
 use std::path::Path;
 
 use hudsucker::{
-    HttpContext, HttpHandler, RequestOrResponse,
-    async_trait::async_trait,
+    Body, HttpContext, HttpHandler, RequestOrResponse,
     hyper::{
-        Body, Method, Request, Response, StatusCode,
+        Method, Request, Response, StatusCode,
         body::Bytes,
         header::{CONTENT_LENGTH, CONTENT_TYPE},
     },
@@ -13,8 +12,8 @@ use tokio::{fs::File, io::AsyncReadExt};
 
 use crate::{
     capture::{
-        BodySide, BodyTaskTracker, CaptureHandle, CapturePublisher, RequestCaptureInput,
-        ResponseCaptureInput, drain_body, tee_body,
+        BodySender, BodySide, BodyTaskTracker, CaptureHandle, CapturePublisher,
+        RequestCaptureInput, ResponseCaptureInput, body_channel, drain_body, tee_body,
     },
     recording::RecordingState,
     request_policy::RequestPolicyStore,
@@ -139,7 +138,6 @@ impl Clone for LogHandler {
     }
 }
 
-#[async_trait]
 impl HttpHandler for LogHandler {
     async fn handle_request(
         &mut self,
@@ -156,7 +154,7 @@ impl HttpHandler for LogHandler {
     async fn handle_error(
         &mut self,
         _ctx: &HttpContext,
-        error: hudsucker::hyper::Error,
+        error: hyper_util::client::legacy::Error,
     ) -> Response<Body> {
         log::error!("Failed to forward request: {error}");
         if let Some(capture) = self.current_request.take() {
@@ -178,14 +176,14 @@ impl HttpHandler for LogHandler {
 }
 
 fn discard_body(mut source: Body, tasks: &BodyTaskTracker) {
-    use hudsucker::hyper::body::HttpBody as _;
+    use http_body_util::BodyExt as _;
 
     let shutdown = tasks.shutdown_token();
     tasks.spawn(async move {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                next = source.data() => match next {
+                next = source.frame() => match next {
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         log::debug!("discarded mapped request body failed: {error}");
@@ -205,7 +203,7 @@ async fn local_file_response(path: &Path, tasks: &BodyTaskTracker) -> Response<B
                 Ok(metadata) => metadata.len(),
                 Err(error) => return local_file_error_response(path, error),
             };
-            let (sender, body) = Body::channel();
+            let (sender, body) = body_channel();
             let shutdown = tasks.shutdown_token();
             tasks.spawn(stream_local_file(file, sender, shutdown));
             Response::builder()
@@ -221,14 +219,14 @@ async fn local_file_response(path: &Path, tasks: &BodyTaskTracker) -> Response<B
 
 async fn stream_local_file(
     mut file: File,
-    mut sender: hudsucker::hyper::body::Sender,
+    mut sender: BodySender,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = tokio::select! {
             _ = shutdown.cancelled() => {
-                sender.abort();
+                sender.abort(std::io::Error::new(std::io::ErrorKind::Interrupted, "body stream interrupted").into());
                 return;
             }
             read = file.read(&mut buffer) => read,
@@ -238,7 +236,7 @@ async fn stream_local_file(
             Ok(read) => {
                 let sent = tokio::select! {
                     _ = shutdown.cancelled() => {
-                        sender.abort();
+                        sender.abort(std::io::Error::new(std::io::ErrorKind::Interrupted, "body stream interrupted").into());
                         return;
                     }
                     sent = sender.send_data(Bytes::copy_from_slice(&buffer[..read])) => sent,
@@ -249,7 +247,10 @@ async fn stream_local_file(
             }
             Err(error) => {
                 log::error!("Failed to stream mapped local file: {error}");
-                sender.abort();
+                sender.abort(
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "body stream interrupted")
+                        .into(),
+                );
                 return;
             }
         }

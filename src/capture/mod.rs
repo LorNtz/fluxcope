@@ -6,7 +6,7 @@ mod store;
 
 use hyper::Method;
 
-pub(crate) use body::{BodyTaskTracker, drain_body, tee_body};
+pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
 pub(crate) use decode::{
     DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
     DecodeResult, start_decode_service,
@@ -85,3 +85,6 @@ fn headers_bytes(headers: &[(String, String)]) -> usize {
         total.saturating_add(name.len()).saturating_add(value.len())
     })
 }
+
+#[cfg(test)]
+pub(crate) use body::body_bytes;

@@ -143,20 +143,20 @@ async fn first_response_chunk_is_forwarded_before_source_eof() {
     let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
     let forwarded = forward_request(&mut harness.handler, "https://example.com/").await;
     consume_request_body(forwarded).await;
-    let (mut source, body) = Body::channel();
+    let (mut source, body) = body_channel();
     let mut response = harness.handler.capture_response(Response::new(body));
     source
         .send_data(Bytes::from_static(b"first"))
         .await
         .expect("source should accept first chunk");
 
-    use hudsucker::hyper::body::HttpBody as _;
-    let first = tokio::time::timeout(Duration::from_secs(1), response.body_mut().data())
+    use http_body_util::BodyExt as _;
+    let first = tokio::time::timeout(Duration::from_secs(1), response.body_mut().frame())
         .await
         .expect("forwarded chunk must not wait for EOF")
         .expect("response should contain a chunk")
         .expect("chunk should be forwarded");
-    assert_eq!(first.as_ref(), b"first");
+    assert_eq!(first.into_data().expect("data frame").as_ref(), b"first");
     drop(source);
     drop(response);
     harness.finish().await;
@@ -181,7 +181,7 @@ async fn recording_off_preserves_mapping_without_publishing_capture() {
         "http://b.test.com/some/api?x=1"
     );
     assert_eq!(
-        hudsucker::hyper::body::to_bytes(forwarded.into_body())
+        crate::capture::body_bytes(forwarded.into_body())
             .await
             .expect("body should forward")
             .as_ref(),
@@ -208,7 +208,7 @@ async fn unmatched_prefilter_request_forwards_bodies_without_publishing_capture(
         RequestOrResponse::Response(_) => panic!("unmatched request should forward"),
     };
     assert_eq!(
-        hudsucker::hyper::body::to_bytes(forwarded.into_body())
+        crate::capture::body_bytes(forwarded.into_body())
             .await
             .expect("request body should forward")
             .as_ref(),
@@ -218,7 +218,7 @@ async fn unmatched_prefilter_request_forwards_bodies_without_publishing_capture(
         .handler
         .capture_response(test_response(200, "response payload"));
     assert_eq!(
-        hudsucker::hyper::body::to_bytes(response.into_body())
+        crate::capture::body_bytes(response.into_body())
             .await
             .expect("response body should forward")
             .as_ref(),
@@ -231,10 +231,10 @@ async fn unmatched_prefilter_request_forwards_bodies_without_publishing_capture(
 #[tokio::test]
 async fn prefilter_matches_explicit_default_https_port_without_changing_captured_url() {
     let mut harness = Harness::new(
-        prefilter_store(vec![], vec![], vec!["*://*.xiaojukeji.com/*"]),
+        prefilter_store(vec![], vec![], vec!["*://*.example.com/*"]),
         RecordingState::default(),
     );
-    let uri = "https://omgup.xiaojukeji.com:443/api/ministat/x?count=1&e=tech_socket_error";
+    let uri = "https://telemetry.example.com:443/api/ministat/x?count=1&e=tech_socket_error";
 
     let forwarded = match harness
         .handler
@@ -265,7 +265,7 @@ async fn prefilter_matches_effective_url_after_remote_mapping_with_query() {
     );
     let request = request(
         "GET",
-        "https://a.com/interested/orders?client=wirelens",
+        "https://a.com/interested/orders?client=fluxcope",
         Body::empty(),
     );
 
@@ -275,7 +275,7 @@ async fn prefilter_matches_effective_url_after_remote_mapping_with_query() {
     };
     assert_eq!(
         forwarded.uri().to_string(),
-        "http://b.test.com/interested/orders?client=wirelens"
+        "http://b.test.com/interested/orders?client=fluxcope"
     );
     consume_request_body(forwarded).await;
     consume_response_body(harness.handler.capture_response(test_response(200, "ok"))).await;
@@ -283,7 +283,7 @@ async fn prefilter_matches_effective_url_after_remote_mapping_with_query() {
     let capture = harness.next_capture().await;
     assert_eq!(
         capture.summary().request.mapped_uri(),
-        Some("http://b.test.com/interested/orders?client=wirelens")
+        Some("http://b.test.com/interested/orders?client=fluxcope")
     );
     harness.finish().await;
 }
@@ -318,7 +318,7 @@ async fn unmatched_prefilter_request_still_uses_map_local() {
     };
 
     assert_eq!(
-        hudsucker::hyper::body::to_bytes(response.into_body())
+        crate::capture::body_bytes(response.into_body())
             .await
             .expect("mapped response should stream")
             .as_ref(),
@@ -348,7 +348,7 @@ async fn local_mapping_streams_file_and_captures_exact_bytes() {
         RequestOrResponse::Response(response) => response,
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = hudsucker::hyper::body::to_bytes(response.into_body())
+    let body = crate::capture::body_bytes(response.into_body())
         .await
         .expect("mapped response should stream");
     assert_eq!(body.as_ref(), br#"{"ok":true}"#);
@@ -387,7 +387,7 @@ async fn missing_local_file_returns_and_captures_bad_gateway() {
         RequestOrResponse::Response(response) => response,
     };
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let forwarded = hudsucker::hyper::body::to_bytes(response.into_body())
+    let forwarded = crate::capture::body_bytes(response.into_body())
         .await
         .expect("error body should forward");
     assert!(String::from_utf8_lossy(&forwarded).contains("Failed to read mapped local file"));
@@ -414,13 +414,13 @@ async fn forward_request(handler: &mut LogHandler, uri: &str) -> Request<Body> {
 }
 
 async fn consume_request_body(request: Request<Body>) {
-    hudsucker::hyper::body::to_bytes(request.into_body())
+    crate::capture::body_bytes(request.into_body())
         .await
         .expect("request body should forward");
 }
 
 async fn consume_response_body(response: Response<Body>) {
-    hudsucker::hyper::body::to_bytes(response.into_body())
+    crate::capture::body_bytes(response.into_body())
         .await
         .expect("response body should forward");
 }

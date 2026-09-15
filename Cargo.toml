@@ -1,7 +1,17 @@
 [package]
-name = "wirelens"
+name = "fluxcope"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+description = "A terminal HTTP and HTTPS debugging proxy with recording and request mapping"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LorNtz/fluxcope"
+homepage = "https://github.com/LorNtz/fluxcope"
+readme = "README.md"
+keywords = ["proxy", "http", "https", "tui", "debugging"]
+categories = ["command-line-utilities", "development-tools::debugging", "network-programming"]
+include = ["/Cargo.toml", "/Cargo.lock", "/src/**", "/README.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+autobenches = false
 
 [dependencies]
 # TUI
@@ -15,22 +25,25 @@ tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 # Proxy & Networking
-hudsucker = "0.20" # The heavy lifter for MitM
-hyper = { version = "0.14", features = ["client", "http1", "http2"] }
-rcgen = "0.11" # For generating CA and leaf certs
-rustls = "0.21"
+hudsucker = { version = "0.25", default-features = false, features = ["rcgen-ca", "rustls-client", "http2"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = { version = "0.1", features = ["channel"] }
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rustls = "0.23.45"
 
 # Data & Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-http = "0.2"
+http = "1"
 url = "2.5"
 brotli = "8"
 flate2 = "1"
 zstd = "0.13"
 
 # Utilities
+clap = "4.6"
 parking_lot = "0.12" # Faster Mutex/RwLock
 anyhow = "1"
 log = "0.4"
@@ -42,11 +55,19 @@ edtui = { version = "=0.9.9", default-features = false, features = ["arboard", "
 tui-scrollview = "=0.5.1"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
 globset = "0.4"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3"
 
 [[bench]]
 name = "core_paths"
 harness = false
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+# Keep unwinding so the TUI guard restores the terminal on a panic.

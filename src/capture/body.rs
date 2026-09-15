@@ -1,7 +1,12 @@
 use std::{future::Future, time::Duration};
 
 use anyhow::{Result, anyhow};
-use hyper::{Body, body::HttpBody};
+use http_body_util::{
+    BodyExt,
+    channel::{Channel, Sender},
+};
+use hudsucker::Body;
+use hyper::body::Bytes;
 use tokio::time;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -41,85 +46,65 @@ impl BodyTaskTracker {
     }
 }
 
+pub(crate) type BodySender = Sender<Bytes, hudsucker::Error>;
+
+/// Buffer one frame, preserving backpressure and separate abnormal termination.
+pub(crate) fn body_channel() -> (BodySender, Body) {
+    let (sender, body) = Channel::new(1);
+    (sender, Body::from(body.boxed()))
+}
+
 pub(crate) fn tee_body(
     mut source: Body,
     capture: CaptureHandle,
     side: BodySide,
     tasks: &BodyTaskTracker,
 ) -> Body {
-    let (mut sender, destination) = Body::channel();
+    let (mut sender, destination) = body_channel();
     let shutdown = tasks.shutdown_token();
     tasks.spawn(async move {
-        // Hyper 0.14 exposes no receiver-closed future. A downstream drop is
-        // observed on the next send; if the source stalls first, runtime
-        // shutdown is the only observable cancellation. Exchange admission
-        // bounds those otherwise-lingering pumps globally.
+        // The channel has no receiver-closed future. A downstream drop is
+        // observed on send; runtime shutdown cancels a stalled source. Capture
+        // admission bounds the total number of these pumps.
         loop {
             let next = tokio::select! {
                 _ = shutdown.cancelled() => {
                     capture.cancel(side);
-                    sender.abort();
+                    sender.abort(std::io::Error::new(std::io::ErrorKind::Interrupted, "proxy shutdown").into());
                     return;
                 }
-                next = source.data() => next,
+                next = source.frame() => next,
             };
             match next {
-                Some(Ok(chunk)) => {
-                    let candidate = chunk.clone();
+                Some(Ok(frame)) => {
+                    let candidate = frame.data_ref().cloned();
                     let sent = tokio::select! {
                         _ = shutdown.cancelled() => {
                             capture.cancel(side);
-                            sender.abort();
+                            sender.abort(std::io::Error::new(std::io::ErrorKind::Interrupted, "proxy shutdown").into());
                             return;
                         }
-                        sent = sender.send_data(chunk) => sent,
+                        sent = sender.send(frame) => sent,
                     };
                     if sent.is_err() {
                         capture.cancel(side);
                         return;
                     }
-                    capture.append(side, &candidate);
+                    if let Some(candidate) = candidate {
+                        capture.append(side, &candidate);
+                    }
                 }
                 Some(Err(error)) => {
                     capture.fail(side, format!("source body failed: {error}"));
-                    sender.abort();
+                    sender.abort(error);
                     return;
                 }
-                None => break,
-            }
-        }
-
-        let trailers = tokio::select! {
-            _ = shutdown.cancelled() => {
-                capture.cancel(side);
-                sender.abort();
-                return;
-            }
-            trailers = source.trailers() => trailers,
-        };
-        match trailers {
-            Ok(Some(trailers)) => {
-                let sent = tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        capture.cancel(side);
-                        sender.abort();
-                        return;
-                    }
-                    sent = sender.send_trailers(trailers) => sent,
-                };
-                if sent.is_err() {
-                    capture.cancel(side);
+                None => {
+                    capture.complete(side);
                     return;
                 }
             }
-            Ok(None) => {}
-            Err(error) => {
-                capture.fail(side, format!("source trailers failed: {error}"));
-                sender.abort();
-                return;
-            }
         }
-        capture.complete(side);
     });
     destination
 }
@@ -133,10 +118,14 @@ pub(crate) fn drain_body(mut source: Body, capture: CaptureHandle, tasks: &BodyT
                     capture.cancel(BodySide::Request);
                     return;
                 }
-                next = source.data() => next,
+                next = source.frame() => next,
             };
             match next {
-                Some(Ok(chunk)) => capture.append(BodySide::Request, &chunk),
+                Some(Ok(frame)) => {
+                    if let Some(chunk) = frame.data_ref() {
+                        capture.append(BodySide::Request, chunk);
+                    }
+                }
                 Some(Err(error)) => {
                     capture.fail(BodySide::Request, format!("request drain failed: {error}"));
                     return;
@@ -148,6 +137,11 @@ pub(crate) fn drain_body(mut source: Body, capture: CaptureHandle, tasks: &BodyT
             }
         }
     });
+}
+
+#[cfg(test)]
+pub(crate) async fn body_bytes(body: Body) -> Result<Bytes, hudsucker::Error> {
+    Ok(body.collect().await?.to_bytes())
 }
 
 #[cfg(test)]

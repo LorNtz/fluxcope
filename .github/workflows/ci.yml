@@ -1,0 +1,110 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  quality:
+    name: Source quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: python3 scripts/metadata_check.py
+      - run: PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
+      - run: python3 scripts/install_tool.py cargo-deny --directory "$RUNNER_TEMP/fluxcope-tools"
+      - run: cargo-deny --locked check advisories licenses sources
+      - run: python3 scripts/install_tool.py gitleaks --directory "$RUNNER_TEMP/fluxcope-tools"
+      - run: git fetch --unshallow || test "$(git rev-parse --is-shallow-repository)" = false
+      - run: gitleaks git . --log-opts=HEAD --redact --no-banner
+  tests:
+    name: Tests (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: macOS
+            runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --all-targets --all-features --locked
+      - run: cargo build --locked
+      - name: Exercise the binary with isolated state
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          python3 scripts/smoke.py --binary target/debug/fluxcope --version "$VERSION" --target "$TARGET" --report target/smoke.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: smoke-${{ matrix.target }}
+          path: target/smoke.json
+          if-no-files-found: error
+          retention-days: 14
+  package:
+    name: Package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: package-install
+          workspaces: ". -> target/package-install"
+      - name: Check package and conditional exact-package installation
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          BASE_SHA="${PR_BASE:-$BEFORE}"
+          INSTALL=()
+          if [[ "$PR_BRANCH" == release-plz-* || "$PR_BRANCH" == rc/* ]] || [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || git diff --name-only "$BASE_SHA" HEAD | rg -q '^(Cargo\.(toml|lock)|rust-toolchain.toml|scripts/(package_check|dist_artifacts|installer_check)|\.github/workflows/|dist-workspace.toml)'; then
+            INSTALL=(--install)
+          fi
+          python3 scripts/package_check.py "${INSTALL[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cargo-package-${{ github.run_attempt }}
+          path: |
+            target/package/*.crate
+            target/package-report.json
+          if-no-files-found: error
+          retention-days: 30

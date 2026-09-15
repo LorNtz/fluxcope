@@ -26,7 +26,7 @@ async fn tee_forwards_order_and_captures_prefix() {
     let record = capture_rx.recv().await.expect("capture published");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let (mut source_tx, source) = Body::channel();
+    let (mut source_tx, source) = body_channel();
     let destination = tee_body(source, capture, BodySide::Response, &tasks);
     source_tx
         .send_data(Bytes::from_static(b"one"))
@@ -38,7 +38,7 @@ async fn tee_forwards_order_and_captures_prefix() {
         .expect("second chunk sent");
     drop(source_tx);
 
-    let forwarded = hyper::body::to_bytes(destination)
+    let forwarded = crate::capture::body_bytes(destination)
         .await
         .expect("destination body should complete");
 
@@ -70,20 +70,20 @@ async fn first_chunk_arrives_before_source_eof() {
         .expect("capture admitted");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let (mut source_tx, source) = Body::channel();
+    let (mut source_tx, source) = body_channel();
     let mut destination = tee_body(source, capture, BodySide::Response, &tasks);
     source_tx
         .send_data(Bytes::from_static(b"first"))
         .await
         .expect("source chunk sent");
 
-    let first = time::timeout(Duration::from_secs(1), destination.data())
+    let first = time::timeout(Duration::from_secs(1), destination.frame())
         .await
         .expect("first chunk should not wait for EOF")
         .expect("destination should yield data")
         .expect("destination chunk should succeed");
 
-    assert_eq!(first.as_ref(), b"first");
+    assert_eq!(first.into_data().expect("data frame").as_ref(), b"first");
     drop(source_tx);
     drop(destination);
     shutdown.cancel();
@@ -106,7 +106,7 @@ async fn source_error_remains_a_destination_body_error() {
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
     let response = Response::builder()
-        .body(Body::wrap_stream(futures::stream::iter(vec![Err::<
+        .body(Body::from_stream(futures::stream::iter(vec![Err::<
             Bytes,
             io::Error,
         >(
@@ -115,7 +115,7 @@ async fn source_error_remains_a_destination_body_error() {
         .expect("test response should build");
     let destination = tee_body(response.into_body(), capture, BodySide::Response, &tasks);
 
-    assert!(hyper::body::to_bytes(destination).await.is_err());
+    assert!(crate::capture::body_bytes(destination).await.is_err());
     shutdown.cancel();
 }
 
@@ -149,7 +149,7 @@ async fn preview_limit_never_truncates_forwarded_body() {
     let tasks = BodyTaskTracker::new(shutdown.clone());
     let destination = tee_body(Body::from("abcdef"), capture, BodySide::Response, &tasks);
 
-    let forwarded = hyper::body::to_bytes(destination)
+    let forwarded = crate::capture::body_bytes(destination)
         .await
         .expect("body forwards");
     assert_eq!(forwarded.as_ref(), b"abcdef");
@@ -184,8 +184,8 @@ async fn trailers_are_forwarded_unchanged() {
         .expect("capture admitted");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let (mut source_tx, source) = Body::channel();
-    let mut destination = tee_body(source, capture, BodySide::Response, &tasks);
+    let (mut source_tx, source) = body_channel();
+    let destination = tee_body(source, capture, BodySide::Response, &tasks);
     let mut trailers = HeaderMap::new();
     trailers.insert("x-checksum", "ok".parse().expect("header value"));
     source_tx
@@ -194,11 +194,8 @@ async fn trailers_are_forwarded_unchanged() {
         .expect("trailers sent");
     drop(source_tx);
 
-    while destination.data().await.is_some() {}
-    assert_eq!(
-        destination.trailers().await.expect("trailers read"),
-        Some(trailers)
-    );
+    let collected = destination.collect().await.expect("body and trailers read");
+    assert_eq!(collected.trailers(), Some(&trailers));
     shutdown.cancel();
     tasks
         .wait_for_shutdown(Duration::from_secs(1))
@@ -222,7 +219,7 @@ async fn runtime_shutdown_cancels_a_stalled_source_body() {
         .expect("capture admitted");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let (_source_tx, source) = Body::channel();
+    let (_source_tx, source) = body_channel();
     let destination = tee_body(source, capture, BodySide::Response, &tasks);
     shutdown.cancel();
 
@@ -231,7 +228,7 @@ async fn runtime_shutdown_cancels_a_stalled_source_body() {
         .wait_for_shutdown(Duration::from_secs(1))
         .await
         .expect("tasks stop");
-    assert!(hyper::body::to_bytes(destination).await.is_err());
+    assert!(crate::capture::body_bytes(destination).await.is_err());
 }
 
 #[tokio::test]
@@ -250,7 +247,7 @@ async fn runtime_shutdown_cancels_a_backpressured_destination() {
         .expect("capture admitted");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let source = Body::wrap_stream(futures::stream::repeat_with(|| {
+    let source = Body::from_stream(futures::stream::repeat_with(|| {
         Ok::<Bytes, io::Error>(Bytes::from_static(b"chunk"))
     }));
     let destination = tee_body(source, capture, BodySide::Response, &tasks);
