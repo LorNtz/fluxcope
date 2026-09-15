@@ -505,3 +505,17 @@ Date: 2026/09/15 10:58
 - Validation: actionlint; required design and performance configuration review requested.
 
 - Review completion (2026/09/15 11:00): design and performance reviewers found no blockers. Cache scope matches the install target; package verification trades compilation reuse for excluding transient extracted sources. Actionlint and diff checks passed.
+
+### 首版发布：修复 Homebrew 信任并支持安装恢复
+Date: 2026/09/15 12:12
+
+- 目标：完成已发布 0.1.0 的四平台 Homebrew 安装验证，保留原始 tag 和产物。
+- 先锁定 tap commit 并核对 formula，再授予单项信任；增加只读 master 安装恢复 workflow，接入恢复计划及证据观察。
+- 保留 tap 未发布时的原有写入流程；registry 验证复用现有安装逻辑。
+- 正在补齐回归检查与两项独立代码审查。
+
+### 首版安装恢复：回归验证
+Date: 2026/09/15 12:14
+
+- 增加 formula 信任顺序、历史 tap 只读解析、master 控制代码与原始 source 分离、错误 ref/来源拒绝、未发布 tap 恢复路径的回归测试。
+- 45 项 Python 测试、actionlint 和 diff whitespace 检查通过；开始设计及性能独立审查。

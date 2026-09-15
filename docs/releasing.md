@@ -82,3 +82,11 @@ Run `just release-recover VERSION` to inspect the current facts and confirm the 
 A GitHub publication followed by failed installation or result signing remains partial. If an archive job is cancelled before its script starts, the check stays actionable and local waiting ends when that observer run ends. Retry through recovery. A damaged notes report can be re-signed only while independent live evidence still proves every required channel. With expired evidence, use verification/install recovery rather than editing success fields. An older Homebrew release uses its matching historical formula without downgrading a newer tap. If result boundary markers themselves were deleted or duplicated, the tool refuses to guess which human notes to remove: edit the GitHub notes, remove only the damaged `fluxcope-release-result` block while preserving the changelog, then retry recovery.
 
 If fixing source or a tagged workflow requires different bytes, publish a new version. `just release-replace VERSION` records a public reason and explicitly permits a reviewed replacement; it never marks the old release successful or yanks a crate. A checksum disagreement is an integrity conflict and must be resolved before ordinary recovery continues.
+
+### 已发布版本的安装检查恢复
+
+如果 GitHub Release 和 crates.io 已发布，但 Homebrew 或 registry 安装检查失败，修复验证工具后合入 master，再执行 `just release-recover VERSION`。当个人 tap 已包含与不可变 Release 完全相同的 formula 时，恢复计划选择 `verify-installations`：在 master 运行只读 `Verify installations` workflow，重新核验原始 tag、源码、crate 摘要、公开资产和 provenance，再检查四个平台的 Homebrew 安装及 registry 安装。tap 尚未写入时仍选择原有 `stable-installations` 发布流程。
+
+Homebrew CI 先获取并锁定记录的 tap commit，确认 formula 与 Release 快照逐字节一致，然后执行 `brew trust --formula LorNtz/tap/fluxcope` 并安装；不信任整个 tap，也不关闭 Homebrew 的信任检查。普通用户仍使用 README 的 `brew install LorNtz/tap/fluxcope`；Homebrew 会为这个完整名称授予单项信任，参见 [Tap Trust](https://docs.brew.sh/Tap-Trust)。
+
+验证工具的 master 提交与已发布应用的 source SHA 分别记录；安装报告必须仍绑定原始版本和 source SHA。恢复不移动 tag、不覆盖资产、不重复上传 crate。所有检查通过后，状态观察器签署并归档统一结果。

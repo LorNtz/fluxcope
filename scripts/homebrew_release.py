@@ -16,7 +16,7 @@ from dist_artifacts import digest
 from release_evidence import source_package
 from release_gate import dispatch_gate, optional_api, resolve_tag
 from release_source import check_registry
-from release_support import CONFIG, ROOT, ReleaseError, api, output, run
+from release_support import CONFIG, ROOT, ReleaseError, api, git_repository, output, run
 
 TAP = CONFIG['tap']
 TAP_NAME = TAP.replace('/homebrew-', '/')
@@ -63,8 +63,11 @@ def formula_at(ref: str) -> dict | None:
     return result
 
 
-def publish(identity: dict, directory: Path):
-    formula = (directory / 'fluxcope.rb').read_bytes()
+class FormulaUnavailable(ReleaseError):
+    """The requested formula has not been published in the tap."""
+
+
+def resolve_tap_commit(identity: dict, formula: bytes, *, update: bool) -> str:
     repository = api(f'repos/{TAP}')
     if repository['private']:
         raise ReleaseError('Homebrew tap must be public.')
@@ -95,6 +98,8 @@ def publish(identity: dict, directory: Path):
         pass
     elif old and base64.b64decode(old['content']) == formula:
         commit = before
+    elif not update:
+        raise FormulaUnavailable('The exact release formula is not yet present in the tap.')
     else:
         payload = {'message': f"chore: release fluxcope {identity['version']}",
                    'content': base64.b64encode(formula).decode(), 'branch': branch}
@@ -105,6 +110,12 @@ def publish(identity: dict, directory: Path):
     actual = formula_at(commit)
     if actual is None or base64.b64decode(actual['content']) != formula:
         raise ReleaseError('Tap commit does not contain the verified formula.')
+    return commit
+
+
+def publish(identity: dict, directory: Path, *, update: bool = True):
+    formula = (directory / 'fluxcope.rb').read_bytes()
+    commit = resolve_tap_commit(identity, formula, update=update)
     report = {'schema': 1, 'source': identity['source'], 'version': identity['version'],
               'tap': TAP, 'commit': commit, 'formula_sha256': hashlib.sha256(formula).hexdigest()}
     (ROOT / 'target').mkdir(exist_ok=True)
@@ -118,13 +129,26 @@ def install(identity: dict, directory: Path, commit: str, target: str):
         raise ReleaseError('Homebrew installation checks run only on disposable CI machines.')
     if target not in {p['target'] for p in CONFIG['platforms']}:
         raise ReleaseError('Unsupported Homebrew target.')
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise ReleaseError('Homebrew requires an exact tap commit SHA.')
     report = json.loads((directory / f'{target}-smoke.json').read_text())
-    run('brew', 'tap', TAP_NAME, capture=False)
+    # Do not run `brew tap`: it may evaluate an unpinned formula while cloning.
+    # Register the checkout in Homebrew's normal tap path, verify its exact bytes,
+    # then grant trust to this formula alone before any Ruby evaluation.
     tap_path = Path(run('brew', '--repo', TAP_NAME))
+    if not tap_path.exists():
+        tap_path.parent.mkdir(parents=True, exist_ok=True)
+        run('git', 'clone', '--no-checkout', f'https://github.com/{TAP}.git', str(tap_path), capture=False)
+    origin = run('git', '-C', str(tap_path), 'remote', 'get-url', 'origin')
+    if (git_repository(origin) or '').casefold() != TAP.casefold():
+        raise ReleaseError('Homebrew tap checkout has an unexpected origin.')
     run('git', '-C', str(tap_path), 'fetch', 'origin', commit, capture=False)
     run('git', '-C', str(tap_path), 'checkout', '--detach', commit, capture=False)
+    if run('git', '-C', str(tap_path), 'rev-parse', 'HEAD') != commit:
+        raise ReleaseError('Homebrew tap checkout does not match the requested commit.')
     if (tap_path / 'Formula/fluxcope.rb').read_bytes() != (directory / 'fluxcope.rb').read_bytes():
         raise ReleaseError('Tap checkout differs from the immutable formula snapshot.')
+    run('brew', 'trust', '--formula', f'{TAP_NAME}/fluxcope', capture=False)
     run('brew', 'install', f'{TAP_NAME}/fluxcope', capture=False)
     binary = Path(run('brew', '--prefix', f'{TAP_NAME}/fluxcope')) / 'bin/fluxcope'
     if digest(binary) != report['binary_sha256']:

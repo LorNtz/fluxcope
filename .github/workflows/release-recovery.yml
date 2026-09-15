@@ -14,7 +14,7 @@ on:
       operation:
         description: 'Concrete recovery operation shown by just release-recover'
         type: choice
-        options: [refresh, source-rerun, tag-and-distribute, distribute, verify-public, stable-installations, mark-for-replacement]
+        options: [refresh, source-rerun, tag-and-distribute, distribute, verify-public, stable-installations, verify-installations, mark-for-replacement]
         required: true
       reason:
         description: 'Public reason, required only for mark-for-replacement'

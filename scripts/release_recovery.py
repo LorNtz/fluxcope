@@ -5,6 +5,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import tempfile
+
+from homebrew_release import FormulaUnavailable, public_metadata, resolve_tap_commit
 
 from release_evidence import source_package
 from release_gate import optional_api, registry_version, resolve_tag
@@ -12,7 +15,7 @@ from release_source import check_registry, dispatch_distribution, ensure_tag
 from release_status import authorized_version, exact_runs, snapshot
 from release_support import BASE, REPO, ROOT, ReleaseError, api, dispatch, output, repository_path, version
 
-OPERATIONS = {'refresh', 'source-rerun', 'bootstrap-upload', 'tag-and-distribute', 'distribute', 'verify-public', 'stable-installations', 'wait'}
+OPERATIONS = {'refresh', 'source-rerun', 'bootstrap-upload', 'tag-and-distribute', 'distribute', 'verify-public', 'stable-installations', 'verify-installations', 'wait'}
 
 
 def plan(identity: dict, *, bootstrap: bool) -> dict:
@@ -45,6 +48,15 @@ def plan(identity: dict, *, bootstrap: bool) -> dict:
         if not report.get('public_verified'):
             return {'operation': 'verify-public', 'description': 'Verify the existing immutable public assets without rebuilding or reuploading; then finish stable installation checks if applicable.'}
         if identity['channel'] == 'stable':
+            with tempfile.TemporaryDirectory(prefix='fluxcope-recovery-plan-') as temporary:
+                directory = Path(temporary)
+                public_metadata(identity, directory, '')
+                try:
+                    resolve_tap_commit(identity, (directory / 'fluxcope.rb').read_bytes(), update=False)
+                except FormulaUnavailable:
+                    pass
+                else:
+                    return {'operation': 'verify-installations', 'description': 'Recheck the published registry package and exact tap commit with reviewed master tooling; no publication writes.'}
             return {'operation': 'stable-installations', 'description': 'Verify published assets, repair the personal tap if needed, and rerun exact registry/Homebrew installation checks.'}
         return {'operation': 'refresh', 'description': 'Refresh the RC result from existing public evidence.'}
     if tag is None:
@@ -66,6 +78,8 @@ def execute(identity: dict, requested: str, actual: dict):
         dispatch_distribution(identity)
     elif requested == 'verify-public':
         dispatch_distribution(identity, operation='verify')
+    elif requested == 'verify-installations':
+        dispatch('verify-installations.yml', BASE, {'tag': f"v{identity['version']}"})
     elif requested == 'stable-installations':
         dispatch('publish-homebrew.yml', f"v{identity['version']}", {'tag': f"v{identity['version']}"})
     else:
