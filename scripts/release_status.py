@@ -15,7 +15,9 @@ from release_gate import SourceChecksPending, merged_release, optional_api, regi
 from release_publish import expected_assets
 from release_support import BASE, CONFIG, REPO, ROOT, ReleaseError, api, eligible_pr, file_at, output, pages, pr_intent, repository_path, run_jobs, version
 
-WORKFLOWS = ('release-plz.yml', 'release.yml', 'publish-homebrew.yml', 'release-recovery.yml')
+INSTALLATION_WORKFLOWS = ('release.yml', 'publish-homebrew.yml', 'verify-installations.yml')
+MASTER_WORKFLOWS = {'release-recovery.yml': 'Recover ', 'verify-installations.yml': 'Verify v'}
+WORKFLOWS = ('release-plz.yml', *INSTALLATION_WORKFLOWS, 'release-recovery.yml')
 
 
 def authorized_version(value: str, number: int | None = None) -> dict:
@@ -31,19 +33,19 @@ def exact_runs(identity: dict) -> list[dict]:
     result = []
     for filename in WORKFLOWS:
         workflow = api(repository_path(f'actions/workflows/{filename}'))
-        query = '' if filename == 'release-recovery.yml' else f"&head_sha={identity['source']}"
+        query = '' if filename in MASTER_WORKFLOWS else f"&head_sha={identity['source']}"
         runs = api(repository_path(f"actions/workflows/{workflow['id']}/runs?per_page=100{query}"))['workflow_runs']
         for run in runs:
             if run['workflow_id'] != workflow['id'] or run['repository']['full_name'] != REPO:
                 continue
             if filename == 'release-plz.yml':
                 match = run['event'] == 'push' and run['head_branch'] == BASE and run['head_sha'] == identity['source']
-            elif filename == 'release-recovery.yml':
+            elif filename in MASTER_WORKFLOWS:
                 # Recovery is dispatched on trusted master, whose SHA may have
                 # advanced. The strict run name identifies its requested version;
                 # producers still repeat the exact-source authorization gates.
                 match = (run['event'] == 'workflow_dispatch' and run['head_branch'] == BASE
-                         and run['display_title'] == f"Recover {identity['version']}")
+                         and run['display_title'] == f"{MASTER_WORKFLOWS[filename]}{identity['version']}")
             else:
                 match = (run['event'] == 'workflow_dispatch' and run['head_branch'] == f"v{identity['version']}"
                          and run['head_sha'] == identity['source'])
@@ -53,10 +55,10 @@ def exact_runs(identity: dict) -> list[dict]:
 
 
 def homebrew_evidence(identity: dict, runs: list[dict]) -> dict | None:
-    completed = sorted((r for r in runs if r['file'] in ('release.yml', 'publish-homebrew.yml')
+    completed = sorted((r for r in runs if r['file'] in INSTALLATION_WORKFLOWS
                         and r['status'] == 'completed'), key=lambda r: r['id'], reverse=True)
     for run in completed:
-        update_job = successful_job(run, 'update')
+        update_job = successful_job(run, 'gate' if run['file'] == 'verify-installations.yml' else 'update')
         if not update_job:
             continue
         attempt = update_job['evidence_attempt']
@@ -96,7 +98,7 @@ def homebrew_evidence(identity: dict, runs: list[dict]) -> dict | None:
 
 def registry_install_evidence(identity: dict, runs: list[dict]) -> bool:
     for run in sorted(runs, key=lambda r: r['id'], reverse=True):
-        if run['file'] not in ('release.yml', 'publish-homebrew.yml'):
+        if run['file'] not in INSTALLATION_WORKFLOWS:
             continue
         job = successful_job(run, 'Registry installation')
         if not job:
@@ -123,9 +125,10 @@ def successful_job(run: dict, name: str) -> dict | None:
 
 def public_evidence(identity: dict, runs: list[dict], release: dict) -> bool:
     for run in sorted(runs, key=lambda r: r['id'], reverse=True):
-        if run['file'] != 'release.yml':
+        if run['file'] not in ('release.yml', 'verify-installations.yml'):
             continue
-        producer = successful_job(run, 'verify') or successful_job(run, 'publish')
+        producer = (successful_job(run, 'gate') if run['file'] == 'verify-installations.yml'
+                    else successful_job(run, 'verify') or successful_job(run, 'publish'))
         if not producer:
             continue
         try:
@@ -261,10 +264,12 @@ def event_identity(event: dict) -> dict | None:
         if not any(p['merged_at'] and p['merge_commit_sha'] == run['head_sha'] and eligible_pr(p) for p in associated):
             return None
         return merged_release(run['head_sha'])
-    if name == 'release-recovery.yml':
-        if run['head_branch'] != BASE or not run['display_title'].startswith('Recover '):
+    if name in MASTER_WORKFLOWS:
+        prefix = MASTER_WORKFLOWS[name]
+        if (run['event'] != 'workflow_dispatch' or run['head_branch'] != BASE
+                or not run['display_title'].startswith(prefix)):
             return None
-        return authorized_version(version(run['display_title'].removeprefix('Recover ')))
+        return authorized_version(version(run['display_title'].removeprefix(prefix)))
     if not run['head_branch'].startswith('v'):
         return None
     return merged_release(run['head_sha'], expected=version(run['head_branch'][1:]))

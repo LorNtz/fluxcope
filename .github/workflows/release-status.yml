@@ -1,7 +1,7 @@
 name: Release status
 on:
   workflow_run:
-    workflows: [Release source, Release distribution, Publish Homebrew, Recover release]
+    workflows: [Release source, Release distribution, Publish Homebrew, Recover release, Verify installations]
     types: [requested, in_progress, completed]
   workflow_dispatch:
     inputs:

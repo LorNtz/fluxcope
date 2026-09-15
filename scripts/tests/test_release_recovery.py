@@ -78,14 +78,17 @@ class TagAndRecoveryTests(unittest.TestCase):
         self.identity = {'source': 'a' * 40, 'version': '0.1.0', 'channel': 'stable', 'pr': 7}
         self.package = {'sha256': 'b' * 64}
 
-    def plan(self, *, crate=True, tag=None, release=None, active=None, bootstrap=False):
+    def plan(self, *, crate=True, tag=None, release=None, active=None, bootstrap=False, tap=True, public=True):
         with ExitStack() as stack:
             stack.enter_context(patch.object(recovery, 'exact_runs', return_value=active or []))
             stack.enter_context(patch.object(recovery, 'source_package', return_value=(self.package, b'crate')))
             stack.enter_context(patch.object(recovery, 'registry_version', return_value={'checksum': self.package['sha256']} if crate else None))
             stack.enter_context(patch.object(recovery, 'resolve_tag', return_value=tag))
             stack.enter_context(patch.object(recovery, 'optional_api', return_value=release))
-            stack.enter_context(patch.object(recovery, 'snapshot', return_value={'state': 'partial', 'public_verified': True}))
+            stack.enter_context(patch.object(recovery, 'snapshot', return_value={'state': 'partial', 'public_verified': public}))
+            stack.enter_context(patch.object(recovery, 'public_metadata', side_effect=lambda i, d, t: (d / 'fluxcope.rb').write_bytes(b'formula')))
+            stack.enter_context(patch.object(recovery, 'resolve_tap_commit', return_value='c' * 40,
+                                            side_effect=None if tap else recovery.FormulaUnavailable('missing')))
             return recovery.plan(self.identity, bootstrap=bootstrap)
 
     def test_crate_success_missing_tag_does_not_retry_registry_upload(self):
@@ -99,11 +102,24 @@ class TagAndRecoveryTests(unittest.TestCase):
 
     def test_existing_public_release_repairs_installations_without_reuploading_assets(self):
         selected = self.plan(tag=self.identity['source'], release={'draft': False, 'immutable': True})
-        self.assertEqual(selected['operation'], 'stable-installations')
+        self.assertEqual(selected['operation'], 'verify-installations')
         with patch.object(recovery, 'dispatch') as dispatch, patch.object(recovery, 'dispatch_distribution') as distribution:
             recovery.execute(self.identity, selected['operation'], selected)
-            dispatch.assert_called_once_with('publish-homebrew.yml', 'v0.1.0', {'tag': 'v0.1.0'})
+            dispatch.assert_called_once_with('verify-installations.yml', support.BASE, {'tag': 'v0.1.0'})
             distribution.assert_not_called()
+
+    def test_expired_public_report_uses_master_verifier_when_formula_exists(self):
+        selected = self.plan(tag=self.identity['source'], release={'draft': False, 'immutable': True}, public=False)
+        self.assertEqual(selected['operation'], 'verify-installations')
+        selected = self.plan(tag=self.identity['source'], release={'draft': False, 'immutable': True}, public=False, tap=False)
+        self.assertEqual(selected['operation'], 'verify-public')
+
+    def test_missing_tap_formula_retains_authorized_publication_recovery(self):
+        selected = self.plan(tag=self.identity['source'], release={'draft': False, 'immutable': True}, tap=False)
+        self.assertEqual(selected['operation'], 'stable-installations')
+        with patch.object(recovery, 'dispatch') as dispatch:
+            recovery.execute(self.identity, selected['operation'], selected)
+        dispatch.assert_called_once_with('publish-homebrew.yml', 'v0.1.0', {'tag': 'v0.1.0'})
 
     def test_active_run_and_first_upload_do_not_create_duplicate_publications(self):
         self.assertEqual(self.plan(active=[{'id': 123, 'status': 'in_progress', 'html_url': 'run'}])['operation'], 'wait')

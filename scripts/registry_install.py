@@ -11,8 +11,7 @@ from release_source import check_registry
 from release_support import CONFIG, ROOT, ReleaseError, run
 
 
-def main(tag: str):
-    identity = dispatch_gate(tag)
+def install(identity: dict):
     if identity['channel'] != 'stable':
         raise ReleaseError('Registry installation is not applicable to RC releases.')
     package, _ = source_package(identity)
@@ -32,4 +31,4 @@ def main(tag: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tag', required=True)
-    main(parser.parse_args().tag)
+    install(dispatch_gate(parser.parse_args().tag))
