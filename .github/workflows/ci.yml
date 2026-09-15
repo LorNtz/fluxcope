@@ -85,6 +85,9 @@ jobs:
           python-version: '3.14'
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: package-install
+          workspaces: ". -> target/package-install"
       - name: Check package and conditional exact-package installation
         env:
           PR_BRANCH: ${{ github.head_ref }}

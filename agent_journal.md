@@ -497,3 +497,11 @@ Date: 2026/09/15 10:49
 - Updated only rustls 0.23.44 to 0.23.45 and its lockfile checksum, retaining existing features and other dependencies.
 - Both required reviews found no scope, compatibility or resource concerns. Full locked Rust tests and real HTTPS MITM/CA/HTTP/mapping/shutdown smoke passed.
 - Fresh cargo-deny advisories, licenses and sources checks passed without a new exception.
+
+### First release: keep extracted crate sources out of the Package cache
+Date: 2026/09/15 10:58
+
+- Scope the Package job Rust target cache to `target/package-install`, with a new cache key so previous full-target caches cannot restore extracted crate source trees. This removes cache cleanup ENOENT annotations while preserving dependency compilation caching for exact-package installation.
+- Validation: actionlint; required design and performance configuration review requested.
+
+- Review completion (2026/09/15 11:00): design and performance reviewers found no blockers. Cache scope matches the install target; package verification trades compilation reuse for excluding transient extracted sources. Actionlint and diff checks passed.
