@@ -484,3 +484,16 @@ Date: 2026/09/15 10:41
 - Enabled immutable releases, private vulnerability reporting, secret scanning/push protection, squash-only merging and default read-only Actions tokens.
 - Created six environments restricted to master or version tags, configured source App 4947987 and tap App 4948017, and supplied precise private-key import instructions.
 - Both required reviewers confirmed this identity/configuration change; metadata and all 39 release tests passed.
+
+### Address first remote CI security finding
+Date: 2026/09/15 10:46
+
+- First public PR CI passed native Linux/macOS application tests and exact package installation; cargo-deny correctly blocked rustls 0.23.44 for newly issued RUSTSEC-2026-0285.
+- Raised the direct dependency minimum to patched rustls 0.23.45 and requested a targeted lockfile update; no advisory exception was added.
+
+### Rustls security patch verified
+Date: 2026/09/15 10:49
+
+- Updated only rustls 0.23.44 to 0.23.45 and its lockfile checksum, retaining existing features and other dependencies.
+- Both required reviews found no scope, compatibility or resource concerns. Full locked Rust tests and real HTTPS MITM/CA/HTTP/mapping/shutdown smoke passed.
+- Fresh cargo-deny advisories, licenses and sources checks passed without a new exception.

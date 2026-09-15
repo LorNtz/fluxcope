@@ -30,7 +30,7 @@ hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = { version = "0.1", features = ["channel"] }
 rcgen = { version = "0.14", features = ["x509-parser"] }
-rustls = "0.23"
+rustls = "0.23.45"
 
 # Data & Serialization
 serde = { version = "1", features = ["derive"] }
