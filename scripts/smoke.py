@@ -58,7 +58,12 @@ class Terminal:
 
     def key(self, value: bytes):
         os.write(self.master, value)
-        self.drain(0.2)
+        # A readable output buffer makes select return immediately. Keep the
+        # intended inter-key interval while draining so Esc + the next key cannot
+        # coalesce into an Alt sequence under a burst of terminal redraws.
+        deadline = time.monotonic() + 0.2
+        while (remaining := deadline - time.monotonic()) > 0:
+            self.drain(min(remaining, 0.05))
 
     def finish(self, expected=0):
         self.wait(lambda: self.process.poll() is not None, 'app shutdown')
