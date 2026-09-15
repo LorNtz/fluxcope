@@ -1,8 +1,10 @@
 # 首次发布：需要维护者完成的账号操作
 
-仓库现已更名为 `LorNtz/fluxcope`，仍为私有。个人公开 tap `LorNtz/homebrew-tap` 已建立，仅含初始 README。首版仍严格以原 `master` 功能为准，不含 MCP。
+仓库现已更名为 `LorNtz/fluxcope`，现已按维护者确认公开现有分支和历史。个人公开 tap `LorNtz/homebrew-tap` 已建立，仅含初始 README。首版仍严格以原 `master` 功能为准，不含 MCP。
 
-## 现在可以完成：创建两个 GitHub App
+## 已完成：创建两个 GitHub App
+
+已确认源码发布 App 为 `fluxcope-release`（ID `4947987`），tap App 为 `fluxcope-tap`（ID `4948017`）。以下保留注册步骤，供核对和以后轮换使用。
 
 这些是一次性账号设置。GitHub App 的注册、安装授权和私钥生成需要你在自己的 GitHub 页面完成。私钥只保留在本机或 GitHub environment secret 中，不要粘贴到聊天或提交到仓库。
 
@@ -10,7 +12,7 @@
 
 打开 <https://github.com/settings/apps/new>，填写：
 
-- **GitHub App name**：`fluxcope-release-lorntz`。如果名称被占用，可以改名，完成后告诉我实际名称。
+- **GitHub App name**：`fluxcope-release`。如果名称被占用，可以改名，完成后告诉我实际名称。
 - **Homepage URL**：`https://github.com/LorNtz/fluxcope`。
 - **Webhook → Active**：取消勾选。本项目不需要 webhook。
 - **Repository permissions → Contents**：Read and write。
@@ -26,7 +28,7 @@
 
 再次打开 <https://github.com/settings/apps/new>：
 
-- 名称：`fluxcope-tap-lorntz`（被占用时可以改名）。
+- 名称：`fluxcope-tap`（被占用时可以改名）。
 - Homepage：`https://github.com/LorNtz/homebrew-tap`。
 - 取消 Webhook Active。
 - Repository permissions 仅给 **Contents: Read and write**，其余保持默认。
@@ -36,21 +38,23 @@
 
 完成后回复两个 **App ID 和实际 App 名称** 即可。不要发送 Client Secret、私钥内容、PAT 或 crates.io token。我会据此核对 bot 身份、配置受限环境，然后给出准确的私钥导入命令。
 
-## 随后完成：导入 GitHub environment secrets
+## 现在执行：导入 GitHub environment secrets
 
-这一节等我确认环境已建立后执行。源码 App 私钥只进入 `release-prepare`、`crates-release` 和 `release-source`；tap App 私钥只进入 `homebrew-release`。这些环境会限制可以使用凭据的分支/tag，不另加每次发布的人工审批。
+六个发布环境及对应分支/tag 限制现已建立，两个 App ID 已配置。现在可以执行下面的私钥导入命令。源码 App 私钥只进入 `release-prepare`、`crates-release` 和 `release-source`；tap App 私钥只进入 `homebrew-release`。这些环境会限制可以使用凭据的分支/tag，不另加每次发布的人工审批。
 
 在终端输入本机私钥路径（路径可以包含空格；不要输入私钥内容）：
 
 ```bash
 read -r -p "源码 App PEM 文件完整路径: " RELEASE_APP_KEY_PATH
 for RELEASE_ENV_NAME in release-prepare crates-release release-source; do
-  gh secret set RELEASE_APP_PRIVATE_KEY --repo LorNtz/fluxcope --env "$RELEASE_ENV_NAME" < "$RELEASE_APP_KEY_PATH" || break
+  gh secret set RELEASE_APP_PRIVATE_KEY --repo LorNtz/fluxcope --env "$RELEASE_ENV_NAME" < "$RELEASE_APP_KEY_PATH" || { echo "导入失败，请停止并报告错误"; break; }
 done
 read -r -p "Tap App PEM 文件完整路径: " TAP_APP_KEY_PATH
 gh secret set TAP_APP_PRIVATE_KEY --repo LorNtz/fluxcope --env homebrew-release < "$TAP_APP_KEY_PATH"
 unset RELEASE_APP_KEY_PATH TAP_APP_KEY_PATH RELEASE_ENV_NAME
 ```
+
+确认源码 App 已安装且仅选择 `fluxcope`，tap App 已安装且仅选择 `homebrew-tap`。完成四次 secret 设置后回复“私钥已导入”，我会只读核对 secret 名称并通过 CI 验证安装身份。
 
 使用 Bash 执行上面的命令；macOS 默认 zsh 的 `read -p` 语义不同，可先运行 `bash`。命令只把私钥通过标准输入交给 GitHub CLI，私钥内容不会进入 shell 命令历史。
 

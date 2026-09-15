@@ -470,3 +470,17 @@ Date: 2026/09/14 23:14
 - Release orchestration tests: 39 passed; actionlint and release metadata checks passed.
 - Give the unprivileged Linux container build a writable isolated process home; host credentials are not mounted.
 - History secret scan of both remote branches plus the app preparation commit found no leaks; retained detailed privacy findings outside Git for the visibility decision.
+
+### First-release account identities
+Date: 2026/09/15 10:37
+
+- Applied the maintainer-confirmed source App login fluxcope-release[bot] and recorded both App IDs in the one-time setup guide.
+- Maintainer explicitly authorized publication of the existing repository history and MCP feature branch; the first app version still excludes MCP code.
+
+### Public repository and constrained release environments
+Date: 2026/09/15 10:41
+
+- Made LorNtz/fluxcope public after the maintainer confirmed the complete existing history scope.
+- Enabled immutable releases, private vulnerability reporting, secret scanning/push protection, squash-only merging and default read-only Actions tokens.
+- Created six environments restricted to master or version tags, configured source App 4947987 and tap App 4948017, and supplied precise private-key import instructions.
+- Both required reviewers confirmed this identity/configuration change; metadata and all 39 release tests passed.

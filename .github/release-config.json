@@ -6,7 +6,7 @@
   "tap": "LorNtz/homebrew-tap",
   "release_authors": [
     "LorNtz",
-    "fluxcope-release-lorntz[bot]"
+    "fluxcope-release[bot]"
   ],
   "source_checks": [
     "Source quality",
