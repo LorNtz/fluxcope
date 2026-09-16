@@ -73,7 +73,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_build.py prepare --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json"
-      - run: rustup show active-toolchain
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: ${{ runner.temp }}/candidate -> target
