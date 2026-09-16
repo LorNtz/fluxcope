@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +13,20 @@ from test_preview_identity import current_run
 
 
 class ClientTests(unittest.TestCase):
+    def test_cli_normalizes_all_proxy_without_overriding_explicit_choices(self):
+        for environment, expected in (
+            ({'ALL_PROXY': 'http://proxy:7890'}, {'http_proxy': 'http://proxy:7890', 'https_proxy': 'http://proxy:7890'}),
+            ({'all_proxy': 'http://proxy:7890', 'HTTP_PROXY': 'http://other', 'https_proxy': ''}, {'https_proxy': ''}),
+            ({'ALL_PROXY': 'socks5://proxy:7890'}, {}),
+            ({}, {}),
+        ):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True), \
+                    patch('sys.argv', ['preview.py', 'status', '123']), \
+                    patch.object(preview, 'verify_local_repository'), \
+                    patch.object(preview, 'select_run', return_value=current_run()), patch.object(preview, 'status'):
+                preview.main()
+                self.assertEqual({key: os.environ[key] for key in ('http_proxy', 'https_proxy') if key in os.environ}, expected)
+
     def test_reuses_only_active_or_unexpired_publications(self):
         active = {**current_run(), 'status': 'in_progress'}
         self.assertTrue(preview.reusable(active))

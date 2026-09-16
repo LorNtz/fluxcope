@@ -65,6 +65,10 @@ Fixing source or controller code requires a new preview, and published bytes are
 never replaced. Expired evidence or downloads require a new ID. No scheduled builds
 or automatic promotion to stable occur.
 
+The local helper respects `HTTP_PROXY`/`HTTPS_PROXY` (including lowercase forms)
+and uses an HTTP(S) `ALL_PROXY` as a fallback when a protocol-specific setting is absent.
+This applies only to the command and its children; it does not change shell or system settings.
+
 One-time preview setup: create the `preview-release` environment with a custom
 **branch** policy allowing only `master`; import the existing source App ID/key
 as `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`. Retain existing immutable release

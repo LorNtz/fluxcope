@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 from dist_artifacts import digest, extract_binary
 from preview_artifacts import BUNDLE, download_asset, download_public, provenance, release_for
@@ -260,6 +261,14 @@ def main():
         child = sub.add_parser(name)
         child.add_argument('id', nargs=None if name == 'retry' else '?')
     args = parser.parse_args()
+    # urllib and Go's HTTP client do not use ALL_PROXY for HTTPS themselves.
+    # Normalize it for this helper and its children, preserving explicit choices.
+    proxy = os.environ.get('all_proxy') or os.environ.get('ALL_PROXY')
+    if proxy and urlsplit(proxy).scheme in ('http', 'https'):
+        for scheme in ('http', 'https'):
+            key = f'{scheme}_proxy'
+            if key not in os.environ and key.upper() not in os.environ:
+                os.environ[key] = proxy
     verify_local_repository()
     if args.command == 'publish':
         publish(args.profile, args.new)
