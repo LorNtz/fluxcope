@@ -42,21 +42,35 @@ def binary_contract(binary: Path, target: str):
             raise ReleaseError('ELF has unresolved runtime dependencies.')
 
 
-def verify_archive(archive: Path, target: str, value: str, report: Path):
+def extract_binary(archive: Path, binary: Path):
+    """Extract only the executable from a bounded, regular-file native archive."""
+    with tarfile.open(archive) as compressed:
+        members = []
+        total = 0
+        for member in compressed:
+            total += member.size
+            if (len(members) >= 1000 or total > 512 * 1024 * 1024
+                    or not (member.isfile() or member.isdir())
+                    or Path(member.name).is_absolute() or '..' in Path(member.name).parts):
+                raise ReleaseError('Unexpected archive type, path or expanded size.')
+            members.append(member)
+        if len({m.name for m in members}) != len(members):
+            raise ReleaseError('Duplicate archive member.')
+        binaries = [m for m in members if m.isfile() and Path(m.name).name == 'fluxcope']
+        if len(binaries) != 1 or not binaries[0].mode & 0o111:
+            raise ReleaseError('Expected one executable Fluxcope binary in archive.')
+        with compressed.extractfile(binaries[0]) as source, binary.open('wb') as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        binary.chmod(0o755)
+
+
+def verify_archive(archive: Path, target: str, value: str, report: Path, *, source_root: Path = ROOT):
     checksum = archive.with_name(archive.name + '.sha256').read_text().split()[0]
     if digest(archive) != checksum:
         raise ReleaseError('Archive does not match its native cargo-dist checksum.')
     with tempfile.TemporaryDirectory(prefix='fluxcope-archive-') as directory:
-        with tarfile.open(archive) as compressed:
-            members = compressed.getmembers()
-            if any(m.issym() or m.islnk() or Path(m.name).is_absolute() or '..' in Path(m.name).parts for m in members):
-                raise ReleaseError('Unexpected archive link or path.')
-            binaries = [m for m in members if m.isfile() and Path(m.name).name == 'fluxcope']
-            if len(binaries) != 1 or not binaries[0].mode & 0o111:
-                raise ReleaseError('Expected one executable Fluxcope binary in archive.')
-            binary = Path(directory) / 'fluxcope'
-            binary.write_bytes(compressed.extractfile(binaries[0]).read())
-            binary.chmod(0o755)
+        binary = Path(directory) / 'fluxcope'
+        extract_binary(archive, binary)
         binary_contract(binary, target)
         args = [sys.executable, str(ROOT / 'scripts/smoke.py'), '--binary', str(binary),
                 '--version', value, '--target', target, '--report', str(report)]
@@ -64,8 +78,8 @@ def verify_archive(archive: Path, target: str, value: str, report: Path):
             args += ['--require-macos', '15']
         subprocess.run(args, check=True)
     result = json.loads(report.read_text())
-    result.update(archive=archive.name, archive_sha256=digest(archive), source=run('git', 'rev-parse', 'HEAD'),
-                  dirty=bool(run('git', 'status', '--porcelain')))
+    result.update(archive=archive.name, archive_sha256=digest(archive), source=run('git', 'rev-parse', 'HEAD', cwd=source_root),
+                  dirty=bool(run('git', 'status', '--porcelain', cwd=source_root)))
     report.write_text(json.dumps(result, indent=2) + '\n')
 
 
