@@ -32,8 +32,8 @@ def quality(source: Path, identity: dict, directory: Path):
     clean_source(source, identity)
     run('cargo', 'fmt', '--all', '--', '--check', cwd=source, capture=False)
     run('cargo', 'clippy', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings', cwd=source, capture=False)
-    run('cargo-deny', '--manifest-path', str(source / 'Cargo.toml'), '--locked', 'check',
-        '--config', str(ROOT / 'deny.toml'), 'advisories', 'licenses', 'sources', cwd=source, capture=False)
+    run('cargo-deny', '--manifest-path', str(source / 'Cargo.toml'), '--locked',
+        '--config', str(ROOT / 'deny.toml'), 'check', 'advisories', 'licenses', 'sources', cwd=source, capture=False)
     exceptions = json.loads((ROOT / '.github/advisory-exceptions.json').read_text())
     if any(date.today() > date.fromisoformat(item['expires']) for item in exceptions.values()):
         raise ReleaseError('Dependency advisory exception expired.')
