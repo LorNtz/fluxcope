@@ -15,7 +15,7 @@ from preview_identity import (BASE, CONFIG, REPO, SIGNER, identity_from_run,
 from release_evidence import artifact_files
 from release_gate import optional_api
 from release_publish import checksums
-from release_support import ReleaseError, api, repository_path, run, run_jobs
+from release_support import ReleaseError, api, pages, repository_path, run, run_jobs
 
 LIMIT = 256 * 1024 * 1024
 BUNDLE = 'preview-attestations.jsonl'
@@ -145,8 +145,17 @@ def validate_public_directory(directory: Path, identity: dict) -> dict[str, str]
     return {**sums, 'sha256.sum': digest(directory / 'sha256.sum')}
 
 
-def release_for(identity: dict) -> dict | None:
-    return optional_api(f"releases/tags/{identity['tag']}")
+def release_for(identity: dict, *, include_drafts: bool = False, token: str | None = None) -> dict | None:
+    release = optional_api(f"releases/tags/{identity['tag']}")
+    if release is not None or not include_drafts:
+        return release
+    # GitHub's by-tag endpoint only returns published releases. Draft access
+    # requires a write-capable token, supplied only by trusted publication/cleanup.
+    matches = [item for item in pages(repository_path('releases?per_page=100'), token=token)
+               if item['tag_name'] == identity['tag']]
+    if len(matches) > 1:
+        raise ReleaseError('Multiple releases claim the same preview tag.')
+    return matches[0] if matches else None
 
 
 def resolve_preview_tag(identity: dict) -> str | None:

@@ -66,7 +66,7 @@ def cleanup(identifier: int):
     original = trusted_run(identifier)
     identity = identity_from_run(original)
     previous = read_record(identity)
-    release = release_for(identity)
+    release = release_for(identity, include_drafts=True)
     if previous and previous.get('cleanup') == 'complete':
         return
     if original['status'] != 'completed':
@@ -106,7 +106,7 @@ def cleanup(identifier: int):
         raise ReleaseError('Preview state changed during cleanup.')
     write_record(identity, 'cleanup-pending', cleanup='pending', snapshot=snapshot, former_url=release['html_url'])
     api(repository_path(f"releases/{release['id']}"), method='DELETE')
-    if release_for(identity) is not None or resolve_preview_tag(identity) != snapshot:
+    if release_for(identity, include_drafts=True) is not None or resolve_preview_tag(identity) != snapshot:
         raise ReleaseError('Preview deletion/tag preservation was not confirmed; cleanup remains pending.')
     write_record(identity, 'expired', cleanup='complete', snapshot=snapshot, former_url=release['html_url'],
                  removed_at=datetime.now(timezone.utc).isoformat())

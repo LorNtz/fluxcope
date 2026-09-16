@@ -36,10 +36,11 @@ def api(endpoint: str, *, method: str = "GET", payload: dict | None = None, toke
     args = ["gh", "api", endpoint, "--method", method,
             "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"]
     environment = None
-    # Keep API reads on the workflow's read token. Only explicit writes may use
-    # the short-lived, repository-scoped App token supplied to mutation jobs.
+    # Reads use the workflow token unless a caller explicitly needs another
+    # credential (for example, draft releases require Contents write access).
+    # The implicit App-token fallback remains restricted to mutations.
     write_token = token or os.environ.get('GIT_TOKEN')
-    if method != 'GET' and write_token:
+    if token or (method != 'GET' and write_token):
         environment = {**os.environ, 'GH_TOKEN': write_token}
     if payload is None:
         output = run(*args, env=environment)
@@ -52,8 +53,9 @@ def api(endpoint: str, *, method: str = "GET", payload: dict | None = None, toke
     return json.loads(output) if output.strip() else None
 
 
-def pages(endpoint: str) -> list:
-    output = run("gh", "api", endpoint, "--paginate", "--slurp")
+def pages(endpoint: str, *, token: str | None = None) -> list:
+    environment = {**os.environ, 'GH_TOKEN': token} if token else None
+    output = run("gh", "api", endpoint, "--paginate", "--slurp", env=environment)
     return [item for page in json.loads(output) for item in page]
 
 

@@ -14,6 +14,12 @@ defaults:
 jobs:
   discover:
     runs-on: ubuntu-24.04
+    environment: preview-release
+    # GitHub includes abandoned drafts only for callers with push access.
+    permissions:
+      contents: write
+      actions: read
+      checks: read
     outputs:
       ids: ${{ steps.expired.outputs.ids }}
       any: ${{ steps.expired.outputs.any }}

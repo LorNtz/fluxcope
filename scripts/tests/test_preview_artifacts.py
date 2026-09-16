@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -44,6 +45,49 @@ def refresh_checksums(directory):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_interrupted_draft_resumes_with_scoped_readback_and_no_duplicate_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = fixture(root)
+            draft = {'id': 55, 'tag_name': identity['tag'], 'draft': True, 'prerelease': True,
+                     'assets': [{'name': p.name, 'digest': 'sha256:' + digest(p)} for p in root.iterdir()]}
+            def api(endpoint, **kwargs):
+                if endpoint.endswith('/releases/55') and kwargs.get('method', 'GET') == 'GET':
+                    self.assertEqual(kwargs.get('token'), 'draft-reader')
+                    return draft
+                if '/pulls/' in endpoint:
+                    self.assertNotIn('token', kwargs)
+                return {}
+            with patch.dict(os.environ, {'GIT_TOKEN': 'draft-reader', 'IMMUTABLE_RELEASES_ENABLED': 'true'}), \
+                    patch.object(publisher, 'publication_identity', return_value=(identity, current_run())), \
+                    patch.object(assets, 'provenance'), patch.object(publisher, 'release_for', return_value=draft) as lookup, \
+                    patch.object(publisher, 'validate_pr'), patch.object(publisher, 'ensure_tag'), \
+                    patch.object(publisher, 'resolve_preview_tag', return_value=identity['snapshot']), \
+                    patch.object(publisher, 'api', side_effect=api) as requests, patch.object(publisher, 'run') as upload, \
+                    patch.object(publisher, 'download_public', return_value=({'html_url': 'verified-preview'}, {})):
+                publisher.publish(root)
+                lookup.assert_called_once_with(identity, include_drafts=True, token='draft-reader')
+                upload.assert_not_called()
+                mutations = [call for call in requests.call_args_list if call.kwargs.get('method', 'GET') != 'GET']
+                self.assertEqual(len(mutations), 1)
+                self.assertEqual(mutations[0].kwargs['payload']['draft'], False)
+
+    def test_draft_discovery_is_explicit_and_rejects_ambiguous_tags(self):
+        identity = identity_from_run(current_run())
+        draft = {'id': 55, 'tag_name': identity['tag'], 'draft': True}
+        with patch.object(assets, 'optional_api', return_value=None), \
+                patch.object(assets, 'pages', return_value=[draft]) as listing:
+            self.assertIsNone(assets.release_for(identity))
+            listing.assert_not_called()
+            self.assertEqual(assets.release_for(identity, include_drafts=True, token='draft-reader'), draft)
+            self.assertEqual(listing.call_args.kwargs['token'], 'draft-reader')
+            # Publication can occur between the by-tag request and list response.
+            listing.return_value = [{**draft, 'draft': False}]
+            self.assertFalse(assets.release_for(identity, include_drafts=True)['draft'])
+            listing.return_value = [draft, {**draft, 'id': 56}]
+            with self.assertRaises(ReleaseError):
+                assets.release_for(identity, include_drafts=True)
+
     def test_exact_payload_set_and_controller_attestation(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(assets, 'provenance') as verify:
             root = Path(temporary)
