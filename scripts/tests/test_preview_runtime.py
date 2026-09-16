@@ -7,10 +7,27 @@ from preview_build import require_cache_mode
 import preview_record
 from preview_identity import identity_from_run
 from release_support import ReleaseError
+import release_support
 from test_preview_identity import current_run
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_app_read_credentials_are_explicit_and_never_used_for_other_reads(self):
+        with patch.dict(os.environ, {'GH_TOKEN': 'reader', 'GIT_TOKEN': 'writer'}, clear=True), \
+                patch.object(release_support, 'run', return_value='{}') as command:
+            release_support.api('fixture')
+            self.assertIsNone(command.call_args.kwargs['env'])
+            release_support.api('fixture', method='POST')
+            self.assertEqual(command.call_args.kwargs['env']['GH_TOKEN'], 'writer')
+            release_support.api('fixture', token='draft-reader')
+            self.assertEqual(command.call_args.kwargs['env']['GH_TOKEN'], 'draft-reader')
+            self.assertNotIn('draft-reader', command.call_args.args)
+            command.return_value = '[[], []]'
+            release_support.pages('fixture')
+            self.assertIsNone(command.call_args.kwargs['env'])
+            release_support.pages('fixture', token='draft-reader')
+            self.assertEqual(command.call_args.kwargs['env']['GH_TOKEN'], 'draft-reader')
+
     def test_shell_requires_verified_probe_marker_in_actions(self):
         for mode in ('read', 'none'):
             with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'FLUXCOPE_PREVIEW_CACHE_MODE': mode}, clear=True):

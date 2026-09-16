@@ -80,7 +80,7 @@ def publish(directory: Path):
     sums = validate_public_directory(directory, identity)
     if os.environ.get('IMMUTABLE_RELEASES_ENABLED') != 'true':
         raise ReleaseError('Immutable release setup has not been confirmed.')
-    existing = release_for(identity)
+    existing = release_for(identity, include_drafts=True, token=os.environ['GIT_TOKEN'])
     if existing and not existing['draft']:
         with tempfile.TemporaryDirectory(prefix='fluxcope-preview-public-') as temporary:
             download_public(identity, Path(temporary))
@@ -100,7 +100,7 @@ def publish(directory: Path):
     if len(present) != len(existing['assets']) or not set(present) <= set(sums):
         raise ReleaseError('Draft contains unexpected assets.')
     if any(asset.get('digest') != 'sha256:' + sums[name] for name, asset in present.items()):
-        if not api(repository_path(f"releases/{existing['id']}"))['draft']:
+        if not api(repository_path(f"releases/{existing['id']}"), token=os.environ['GIT_TOKEN'])['draft']:
             raise ReleaseError('Release became public; refusing replacement.')
         for asset in present.values():
             api(repository_path(f"releases/assets/{asset['id']}"), method='DELETE')
@@ -109,7 +109,7 @@ def publish(directory: Path):
     for name in sorted(sums):
         if name not in present:
             run('gh', 'release', 'upload', identity['tag'], str(directory / name), '--repo', REPO, env=environment)
-    reread = api(repository_path(f"releases/{existing['id']}"))
+    reread = api(repository_path(f"releases/{existing['id']}"), token=os.environ['GIT_TOKEN'])
     if ({a['name']: a.get('digest') for a in reread['assets']} != {n: 'sha256:' + s for n, s in sums.items()}
             or resolve_preview_tag(identity) != identity['snapshot']):
         raise ReleaseError('Draft bytes or tag do not match verified publication evidence.')
