@@ -1,5 +1,6 @@
 // Run before candidate code. A toolkit's local save guard is not enforcement.
 const {createHash} = require('node:crypto');
+const {appendFileSync} = require('node:fs');
 async function checkCacheAccess(env = process.env, request = fetch) {
   const mode = env.ACTIONS_CACHE_MODE;
   if (!['read', 'none'].includes(mode)) {
@@ -22,6 +23,8 @@ async function checkCacheAccess(env = process.env, request = fetch) {
   if (!message.startsWith('cache write denied:') || result.ok || result.signed_upload_url || result.signedUploadUrl) {
     throw new Error(`Cache server did not explicitly deny writes (HTTP ${response.status})`);
   }
+  // Runtime cache variables are action-only; shell steps receive this verified result.
+  if (env.GITHUB_ENV) appendFileSync(env.GITHUB_ENV, `FLUXCOPE_PREVIEW_CACHE_MODE=${mode}\n`);
   console.log(`Server denied cache writes with cache-mode=${mode}`);
 }
 

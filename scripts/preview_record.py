@@ -43,10 +43,16 @@ def read_record(identity: dict) -> dict | None:
     if any(record.get(key) != value for key, value in identity.items()):
         raise ReleaseError('Owned preview check has conflicting identity.')
     writer = trusted_writer(int(record['writer_run']))
-    if check['details_url'] != writer['html_url']:
-        raise ReleaseError('Preview result was not written by a trusted workflow.')
-    if record.get('cleanup') and writer['path'] != '.github/workflows/preview-cleanup.yml':
-        raise ReleaseError('Expiry record must originate from the cleanup workflow.')
+    # GitHub rewrites details_url for Actions-owned checks. These records are
+    # status hints; signed public assets remain the authority for execution.
+    if record.get('cleanup'):
+        if (writer['path'] != '.github/workflows/preview-cleanup.yml'
+                or (record['cleanup'], record.get('state')) not in
+                (('pending', 'cleanup-pending'), ('complete', 'expired'))):
+            raise ReleaseError('Invalid preview cleanup record.')
+    elif (writer['id'] != identity['id'] or writer['path'] != '.github/workflows/preview.yml'
+          or writer['event'] != 'workflow_dispatch'):
+        raise ReleaseError('Preview result must reference its original preview workflow.')
     return record
 
 

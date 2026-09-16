@@ -17,8 +17,8 @@ from release_support import CONFIG, ROOT, ReleaseError, output, run
 
 
 def require_cache_mode():
-    if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('ACTIONS_CACHE_MODE') not in ('read', 'none'):
-        raise ReleaseError('GitHub did not enforce read-only preview cache permissions.')
+    if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('FLUXCOPE_PREVIEW_CACHE_MODE') not in ('read', 'none'):
+        raise ReleaseError('The preview cache probe did not verify read-only cache permissions.')
 
 
 def clean_source(source: Path, identity: dict):
