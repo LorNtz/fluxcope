@@ -1,5 +1,7 @@
 # Releasing Fluxcope
 
+<!-- Temporary preview qualification fixture. No application behavior changes. -->
+
 The first release uses the existing `master` TUI and proxy; it excludes the unmerged MCP feature. Archives support macOS 15 on Apple Silicon and Intel, and Linux with glibc 2.28 on ARM64 and x86-64. Standard GitHub-hosted runners replace the originally proposed paid macOS 13 environments.
 
 ## Daily commands
