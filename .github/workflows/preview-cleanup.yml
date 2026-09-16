@@ -1,0 +1,61 @@
+name: Expire branch previews
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  checks: read
+cache-mode: none
+defaults:
+  run:
+    shell: bash
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    outputs:
+      ids: ${{ steps.expired.outputs.ids }}
+      any: ${{ steps.expired.outputs.any }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - id: expired
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_cleanup.py discover
+  delete:
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        id: ${{ fromJSON(needs.discover.outputs.ids) }}
+    runs-on: ubuntu-24.04
+    environment: preview-release
+    concurrency:
+      group: preview-${{ matrix.id }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      checks: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_ID: ${{ matrix.id }}
+        run: python3 scripts/preview_cleanup.py delete --id "$PREVIEW_ID"

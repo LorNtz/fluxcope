@@ -1,0 +1,3 @@
+# Preview source cannot suppress the controller's secret scanning policy.
+[extend]
+useDefault = true

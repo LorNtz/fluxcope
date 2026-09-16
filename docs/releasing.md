@@ -21,6 +21,57 @@ For a specific version, use `just release-prepare 0.2.0` or `just release-prepar
 
 Normal releases need only version/diff review and merge confirmation. When TUI behavior changes, inspect the relevant behavior using the PR's native archive before merging. For the first release, inspect startup, request navigation, detail/body views, settings, logs and certificate download. Automated HTTP/HTTPS, mapping, recording, permissions and shutdown checks remain mandatory.
 
+## Temporary branch previews
+
+For an experiment that may never merge, commit its changes and run `just preview`.
+The helper pushes committed changes, creates/reuses a draft development PR, and
+asks once to publish its exact head. It neither stages local edits nor merges the
+PR. The branch must belong to this repository, target master, and already contain
+the Fluxcope manifest and these helper recipes. Incorporate current master into
+an older feature branch first; merging that branch back is never required.
+
+```sh
+just preview                 # Apple Silicon macOS 15+, by default
+just preview all             # macOS ARM64/Intel and Linux ARM64/x86-64
+just preview linux-x64       # Or macos-arm64, macos-intel, linux-arm64
+just preview-status          # Resume/select previews of the current PR
+just preview-retry RUN_ID    # Retry original failed jobs, retaining source/version
+just preview-run RUN_ID      # Verify provenance, download and launch isolated
+just preview all --new       # Explicit new identity for the same source/profile
+```
+
+Versions are automatic: `0.0.0-preview.RUN_ID`. A protected tag identifies a
+deterministic child snapshot containing only the version and packaging policy
+changes; no version commit is pushed back to your feature branch. The application
+comes from the approved feature commit, while the release workflow comes from
+protected master. Downloads are GitHub prereleases, never Latest, crates.io or
+Homebrew. Publishing requires maintain/admin permission. You may also dispatch
+**Branch preview** on master in Actions with the PR number, full head SHA and profile.
+
+`preview-run` uses `~/.cache/fluxcope/previews/RUN_ID/TARGET/`, with a private HOME,
+separate certificates/settings and an initially available proxy port. It verifies
+the signed manifest and native executable before running. Stable binaries and
+state remain untouched. This state separation is not an OS sandbox. Repeated runs
+reuse that preview's settings; edit its isolated config if its port becomes occupied.
+
+Downloads expire 30 days after publication; daily cleanup can take another 24 hours.
+The protected tag and source stay in Git history. Local copies/settings remain until
+you remove their preview cache directory. Closing a PR cancels an unpublished preview
+when observed by the final publication checks; published previews keep their expiry.
+
+Closing a terminal leaves CI running. Use `preview-status` to resume; inspect a
+failed run before `preview-retry`. Reruns retain the original source and workflow.
+Fixing source or controller code requires a new preview, and published bytes are
+never replaced. Expired evidence or downloads require a new ID. No scheduled builds
+or automatic promotion to stable occur.
+
+One-time preview setup: create the `preview-release` environment with a custom
+**branch** policy allowing only `master`; import the existing source App ID/key
+as `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`. Retain existing immutable release
+and `v*` tag rules. Build/verification jobs enforce `cache-mode: read` and probe
+the cache service for an explicit write denial before executing candidate code;
+if the hosted service does not support this policy, publication remains blocked.
+
 ## One-time account and repository setup
 
 

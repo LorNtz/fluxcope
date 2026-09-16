@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import struct
 import tempfile
 import zipfile
 from urllib.request import urlopen
@@ -16,7 +17,8 @@ class EvidenceUnavailable(ReleaseError):
     """Expected evidence is absent or expired; not an API/authentication failure."""
 
 
-def artifact_files(run: dict, name: str, *, limit: int = 32 * 1024 * 1024) -> dict[str, bytes]:
+def artifact_files(run: dict, name: str, *, limit: int = 32 * 1024 * 1024,
+                   expected_files: dict[str, int] | None = None) -> dict[str, bytes]:
     artifacts = api(repository_path(f"actions/runs/{run['id']}/artifacts?per_page=100"))['artifacts']
     matches = [a for a in artifacts if a['name'] == name and not a['expired']]
     if not matches:
@@ -33,6 +35,19 @@ def artifact_files(run: dict, name: str, *, limit: int = 32 * 1024 * 1024) -> di
             raise ReleaseError('Could not download verified CI artifact: ' + result.stderr.decode(errors='replace'))
         if downloaded.tell() > limit:
             raise ReleaseError('Downloaded artifact exceeds its size limit.')
+        # ZipFile materializes the central directory at construction. Bound its
+        # entry count first, including empty members, and reject unnecessary ZIP64.
+        downloaded.seek(max(0, downloaded.tell() - 65557))
+        tail = downloaded.read()
+        end = tail.rfind(b'PK\x05\x06')
+        if end < 0 or len(tail) - end < 22:
+            raise ReleaseError('Artifact has no valid ZIP directory.')
+        header = struct.unpack('<4s4H2LH', tail[end:end + 22])
+        max_members = len(expected_files) + 16 if expected_files is not None else 1024
+        if (header[4] > max_members or header[1] or header[2]
+                or header[5] == 0xffffffff or header[6] == 0xffffffff
+                or tail[max(0, end - 20):end - 16] == b'PK\x06\x07'):
+            raise ReleaseError('Artifact ZIP directory exceeds its member/format bounds.')
         downloaded.seek(0)
         with zipfile.ZipFile(downloaded) as archive:
             members = archive.infolist()
@@ -41,6 +56,9 @@ def artifact_files(run: dict, name: str, *, limit: int = 32 * 1024 * 1024) -> di
                 raise ReleaseError('Duplicate artifact member or excessive uncompressed size.')
             if any(Path(n).is_absolute() or '..' in Path(n).parts for n in names):
                 raise ReleaseError('Artifact includes an unsafe path.')
+            if expected_files is not None and (set(names) != set(expected_files)
+                    or any(m.file_size > expected_files[m.filename] for m in members if not m.is_dir())):
+                raise ReleaseError('Artifact members differ from the expected names or per-file size limits.')
             return {n: archive.read(n) for n in names}
 
 

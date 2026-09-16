@@ -85,9 +85,9 @@ def pull_requests(state: str = "open") -> list:
     return pages(repository_path(f"pulls?state={state}&base={BASE}&per_page=100"))
 
 
-def feature_pr(*, resume: bool) -> dict:
+def feature_pr(*, resume: bool, draft: bool = False) -> dict:
     branch = run("git", "symbolic-ref", "--quiet", "--short", "HEAD")
-    if branch == BASE or release_branch(branch):
+    if branch == BASE or release_branch(branch) or (draft and branch.startswith(('preview/', 'refs/'))):
         raise ReleaseError("Use a feature branch for pr/ship; use just release for an existing release PR.")
     head = run("git", "rev-parse", "HEAD")
     dirty = run("git", "status", "--short", "--untracked-files=all")
@@ -111,10 +111,11 @@ def feature_pr(*, resume: bool) -> dict:
         return api(repository_path(f"pulls/{selected['number']}"))
     subjects = run("git", "log", "--format=%s", f"origin/{BASE}..{head}").splitlines()
     suggestion = subjects[0] if len(subjects) == 1 and CONVENTIONAL.fullmatch(subjects[0]) else ""
-    if not sys.stdin.isatty():
+    if not draft and not sys.stdin.isatty():
         raise ReleaseError("The branch was pushed. Run just pr interactively to review its PR title.")
     print("Committed changes:\n" + safe_text("\n".join(subjects)))
-    title = input(f"Conventional Commit PR title{f' [{suggestion}]' if suggestion else ''}: ").strip() or suggestion
+    title = ((suggestion or f'chore: preview {safe_text(branch)}') if draft else
+             input(f"Conventional Commit PR title{f' [{suggestion}]' if suggestion else ''}: ").strip() or suggestion)
     if not CONVENTIONAL.fullmatch(title):
         raise ReleaseError("Use a Conventional Commit title, e.g. feat: add request mapping.")
     body = "## Changes\n\n" + "\n".join(f"- {subject}" for subject in subjects) + "\n\n## Validation\n\nSee CI checks for the exact PR head.\n"
@@ -122,7 +123,7 @@ def feature_pr(*, resume: bool) -> dict:
         path = Path(directory) / "body.md"
         path.write_text(body)
         run("gh", "pr", "create", "--repo", REPO, "--base", BASE, "--head", branch,
-            "--title", title, "--body-file", str(path), capture=False)
+            "--title", title, "--body-file", str(path), *(['--draft'] if draft else []), capture=False)
     matches = [p for p in pull_requests() if p["head"].get("repo")
                and p["head"]["repo"]["full_name"] == REPO and p["head"]["ref"] == branch]
     return choose(matches, lambda p: f"#{p['number']} {p['title']}")

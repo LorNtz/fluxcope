@@ -1,0 +1,5 @@
+name: Verify preview cache permissions
+description: Fail closed unless GitHub reports read-only or disabled cache access.
+runs:
+  using: node24
+  main: index.js

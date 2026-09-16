@@ -54,3 +54,19 @@ release-bootstrap version pr:
 # Explicitly permit a reviewed replacement for an incomplete version; never marks it successful.
 release-replace version:
     @python3 scripts/release.py replace "$1"
+
+# Push/create a draft PR and publish an isolated branch preview (default: macOS ARM64).
+preview *args:
+    @python3 scripts/preview.py publish "$@"
+
+# Follow a branch preview; omit the ID to select one for this PR.
+preview-status id='':
+    @python3 scripts/preview.py status "$1"
+
+# Resume the original failed preview jobs without selecting a newer source.
+preview-retry id:
+    @python3 scripts/preview.py retry "$1"
+
+# Verify and run a preview with its own settings, certificates and proxy port.
+preview-run id='':
+    @python3 scripts/preview.py run "$1"

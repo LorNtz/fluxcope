@@ -1,0 +1,283 @@
+name: Branch preview
+run-name: 'Preview #${{ inputs.pr }} ${{ inputs.source_sha }} ${{ inputs.profile }}'
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open same-repository development PR number (draft is allowed)
+        required: true
+        type: string
+      source_sha:
+        description: Exact approved development commit (full 40-character SHA)
+        required: true
+        type: string
+      profile:
+        description: Native platforms to verify and publish
+        required: true
+        type: choice
+        default: macos-arm64
+        options: [macos-arm64, macos-intel, linux-arm64, linux-x64, all]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+cache-mode: none
+defaults:
+  run:
+    shell: bash
+env:
+  RUSTUP_TOOLCHAIN: 1.98.0
+  MACOSX_DEPLOYMENT_TARGET: '15.0'
+jobs:
+  gate:
+    name: Preview gate
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.identity.outputs.matrix }}
+      snapshot: ${{ steps.identity.outputs.snapshot }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_build.py gate --identity "$RUNNER_TEMP/identity.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-identity-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/identity.json
+          if-no-files-found: error
+          retention-days: 30
+  quality:
+    name: Preview quality
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    cache-mode: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_build.py prepare --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json"
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: ${{ runner.temp }}/candidate -> target
+          save-if: false
+      - run: python3 scripts/install_tool.py cargo-deny --directory "$RUNNER_TEMP/preview-tools"
+      - run: python3 scripts/install_tool.py gitleaks --directory "$RUNNER_TEMP/preview-tools"
+      - run: python3 scripts/preview_build.py quality --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json" --directory "$RUNNER_TEMP/evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-quality-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/quality.json
+          if-no-files-found: error
+          retention-days: 30
+  build:
+    name: Preview build (${{ matrix.target }})
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.gate.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    cache-mode: read
+    env:
+      TARGET: ${{ matrix.target }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_build.py prepare --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json"
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: ${{ runner.temp }}/candidate -> target
+          key: preview-${{ matrix.target }}
+          save-if: false
+      - run: python3 scripts/install_tool.py cargo-dist --directory "$RUNNER_TEMP/preview-tools"
+      - name: Native macOS tests and archive
+        if: runner.os == 'macOS'
+        run: python3 scripts/preview_build.py build --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json" --target "$TARGET" --directory "$RUNNER_TEMP/evidence"
+      - name: Native Linux tests and archive in glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/candidate,dst=$RUNNER_TEMP/candidate" \
+            --mount "type=bind,src=$RUNNER_TEMP/identity.json,dst=$RUNNER_TEMP/identity.json,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/evidence,dst=$RUNNER_TEMP/evidence" \
+            --mount "type=bind,src=$RUNNER_TEMP/preview-tools,dst=$RUNNER_TEMP/preview-tools,readonly" \
+            --mount "type=bind,src=$HOME/.rustup,dst=/rustup,readonly" \
+            --mount "type=bind,src=$HOME/.cargo/bin,dst=/cargo-bin,readonly" \
+            --workdir "$RUNNER_TEMP/candidate" \
+            --env "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" --env PREVIEW_PHASE=build \
+            --env "PREVIEW_CONTROLLER=$PWD" --env "PREVIEW_SOURCE=$RUNNER_TEMP/candidate" \
+            --env "PREVIEW_TOOLS=$RUNNER_TEMP/preview-tools" --env "PREVIEW_IDENTITY=$RUNNER_TEMP/identity.json" \
+            --env "PREVIEW_OUTPUT=$RUNNER_TEMP/evidence" --env "PREVIEW_TARGET=$TARGET" \
+            "$CONTAINER" bash "$PWD/scripts/preview_linux.sh"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-build-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/*
+          if-no-files-found: error
+          retention-days: 7
+  verify:
+    name: Preview verify (${{ matrix.target }})
+    needs: [gate, build]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.gate.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    cache-mode: read
+    env:
+      TARGET: ${{ matrix.target }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/preview_build.py prepare --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json"
+          PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from preview_identity import trusted_run
+          from preview_artifacts import download_evidence, platform_assets
+          target = os.environ['TARGET']
+          current = trusted_run(int(os.environ['GITHUB_RUN_ID']))
+          download_evidence(current, f'Preview build ({target})', f'preview-build-{target}',
+                            platform_assets(target) - {f'{target}-smoke.json'}, Path(os.environ['RUNNER_TEMP']) / 'evidence')
+          PY
+      - name: Fresh macOS executable verification
+        if: runner.os == 'macOS'
+        run: python3 scripts/preview_build.py verify --source "$RUNNER_TEMP/candidate" --identity "$RUNNER_TEMP/identity.json" --target "$TARGET" --directory "$RUNNER_TEMP/evidence"
+      - name: Fresh Linux executable verification in glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/preview-tools"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/candidate,dst=$RUNNER_TEMP/candidate" \
+            --mount "type=bind,src=$RUNNER_TEMP/identity.json,dst=$RUNNER_TEMP/identity.json,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/evidence,dst=$RUNNER_TEMP/evidence" \
+            --workdir "$RUNNER_TEMP/candidate" --env PREVIEW_PHASE=verify \
+            --env "PREVIEW_CONTROLLER=$PWD" --env "PREVIEW_SOURCE=$RUNNER_TEMP/candidate" \
+            --env "PREVIEW_TOOLS=$RUNNER_TEMP/preview-tools" --env "PREVIEW_IDENTITY=$RUNNER_TEMP/identity.json" \
+            --env "PREVIEW_OUTPUT=$RUNNER_TEMP/evidence" --env "PREVIEW_TARGET=$TARGET" \
+            "$CONTAINER" bash "$PWD/scripts/preview_linux.sh"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-verified-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence/*
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    name: Preview publish
+    needs: [gate, quality, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: preview-release
+    concurrency:
+      group: preview-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_publish.py prepare --directory "$RUNNER_TEMP/public"
+      - id: attest
+        if: steps.prepare.outputs.existing != 'true'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            ${{ runner.temp }}/public/*.tar.xz
+            ${{ runner.temp }}/public/preview-manifest.json
+      - if: steps.prepare.outputs.existing != 'true'
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: python3 scripts/preview_publish.py finalize --directory "$RUNNER_TEMP/public" --bundle "$BUNDLE_PATH"
+      - id: app
+        if: steps.prepare.outputs.existing != 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: LorNtz
+          repositories: fluxcope
+          permission-contents: write
+      - if: steps.prepare.outputs.existing != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TOKEN: ${{ steps.app.outputs.token }}
+          IMMUTABLE_RELEASES_ENABLED: ${{ vars.IMMUTABLE_RELEASES_ENABLED }}
+        run: python3 scripts/preview_publish.py publish --directory "$RUNNER_TEMP/public"
+  result:
+    name: Preview result
+    needs: [gate, quality, build, verify, publish]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_record.py
