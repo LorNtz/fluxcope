@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "fluxcope"
-version = "0.1.0"
+version = "0.0.0-preview.35118184170"
 dependencies = [
  "anyhow",
  "brotli",
