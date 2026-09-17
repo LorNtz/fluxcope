@@ -1585,14 +1585,14 @@ fn validate_identifier(field: &str, value: &str) -> Result<(), ControlError> {
 mod tests;
 
 #[cfg(test)]
-mod task9_tests;
+mod capture_wait_tests;
 
 #[cfg(test)]
-mod task10_tests;
+mod body_read_tests;
 #[cfg(test)]
-mod task12_tests;
+mod mapping_tests;
 #[cfg(test)]
-mod task14_tests;
+mod search_extract_tests;
 
 #[cfg(test)]
 mod mapping_preview_tests;

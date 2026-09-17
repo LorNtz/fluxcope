@@ -4375,7 +4375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task14_oversized_public_mapping_is_rejected_before_instance_resolution() {
+    async fn oversized_public_mapping_is_rejected_before_instance_resolution() {
         let registry = FakeRegistry::new(Vec::new());
         let broker = broker(Arc::clone(&registry), FakeProbe::live(&[]));
         let rules = (0..10_000)
@@ -4425,10 +4425,10 @@ mod tests {
         );
     }
 
-    mod task10_tests;
-    mod task11_tests;
-    mod task12_tests;
-    mod task9_tests;
+    mod body_resources;
+    mod capture_wait;
+    mod json_inspection;
+    mod search_extract;
 
     #[test]
     fn every_control_error_code_has_a_stable_public_conversion() {

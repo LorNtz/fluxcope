@@ -625,5 +625,4 @@ where
 }
 
 #[cfg(test)]
-#[path = "task14_mapping_tests.rs"]
-mod task14_mapping_tests;
+mod tests;

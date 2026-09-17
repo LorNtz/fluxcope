@@ -30,7 +30,7 @@ fn client() -> DeclaredClient {
 }
 
 #[test]
-fn task12_private_operations_round_trip_with_strict_boxed_arguments() {
+fn private_operations_round_trip_with_strict_boxed_arguments() {
     let operations = [
         ControlOperation::SearchCaptureBody(Box::new(SearchCaptureBodyRequest {
             capture_id: CaptureSequence::new(9),
@@ -78,7 +78,7 @@ fn task12_private_operations_round_trip_with_strict_boxed_arguments() {
 }
 
 #[test]
-fn task12_private_arguments_reject_unknown_fields_and_invalid_limits() {
+fn private_arguments_reject_unknown_fields_and_invalid_limits() {
     let envelope = json!({
         "protocol_version": super::RPC_VERSION,
         "request_id": "task12-invalid",

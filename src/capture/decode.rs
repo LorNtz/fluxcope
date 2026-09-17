@@ -1645,5 +1645,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "decode/task10_tests.rs"]
-mod task10_tests;
+mod decoder_tests;

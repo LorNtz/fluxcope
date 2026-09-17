@@ -556,8 +556,8 @@ fn invalid_uri(message: impl Into<String>) -> ControlError {
 }
 
 #[cfg(test)]
-mod task10_tests;
+mod content_resource_tests;
 #[cfg(test)]
-mod task11_tests;
+mod json_inspection_tests;
 #[cfg(test)]
-mod task12_tests;
+mod search_extract_tests;

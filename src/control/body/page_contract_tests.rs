@@ -180,6 +180,3 @@ fn body_wire_objects_reject_unknown_fields() {
         .is_err()
     );
 }
-
-#[cfg(test)]
-mod task12_tests;

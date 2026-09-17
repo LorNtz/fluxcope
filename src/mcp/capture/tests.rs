@@ -277,7 +277,7 @@ fn public_query_patterns_use_the_private_compiler_byte_bound() {
 }
 
 #[tokio::test]
-async fn real_broker_transport_advertises_the_task10_public_capture_tools() {
+async fn real_broker_transport_advertises_the_public_capture_tools() {
     let home = tempfile::tempdir().expect("temporary home");
     let broker = Broker::new(home.path()).expect("real broker");
     let (client_transport, server_transport) = duplex(64 * 1024);

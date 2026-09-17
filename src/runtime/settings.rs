@@ -706,8 +706,7 @@ impl fmt::Display for SettingsRevision {
     }
 }
 
-#[cfg(test)]
-#[path = "task14_tests.rs"]
-mod task14_tests;
 #[cfg(all(test, unix))]
 mod test_support;
+#[cfg(test)]
+mod transaction_tests;

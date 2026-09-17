@@ -2,7 +2,7 @@ use std::{io::Write as _, str::FromStr, sync::atomic::AtomicBool};
 
 use serde_json::json;
 
-use super::super::{
+use super::{
     CappedJsonArrayWriter, ExtractSelector, FoldedMatcher, FormComponentDecoder, OriginalBoundary,
     SearchCaptureBodyRequest, SelectionResourceRequest, extract_capture_body,
     find_form_delimiter_with, page_selected_representation, parse_selection_resource_uri,
@@ -286,7 +286,7 @@ fn extraction_rejects_malformed_depth_and_size_limited_json() {
     .expect_err("depth limit");
     assert_eq!(depth.code, ControlErrorCode::JsonDepthLimit);
 
-    let oversized = vec![b' '; super::super::MAX_DECODED_CONTENT_BYTES + 1];
+    let oversized = vec![b' '; super::MAX_DECODED_CONTENT_BYTES + 1];
     let size = extract_capture_body(
         &oversized,
         Some("application/json"),
@@ -350,7 +350,7 @@ fn form_extraction_rejects_wrong_media_type_and_oversized_input() {
     .expect_err("wrong form media type");
     assert_eq!(wrong_media.code, ControlErrorCode::InvalidArgument);
 
-    let oversized = vec![b'x'; super::super::MAX_DECODED_CONTENT_BYTES + 1];
+    let oversized = vec![b'x'; super::MAX_DECODED_CONTENT_BYTES + 1];
     let size = extract_capture_body(
         &oversized,
         Some("application/x-www-form-urlencoded"),
@@ -364,7 +364,7 @@ fn form_extraction_rejects_wrong_media_type_and_oversized_input() {
 
 #[test]
 fn body_search_query_byte_limit_and_covering_resource_window_are_bounded() {
-    let query = "x".repeat(super::super::MAX_BODY_SEARCH_QUERY_BYTES);
+    let query = "x".repeat(super::MAX_BODY_SEARCH_QUERY_BYTES);
     let request = SearchCaptureBodyRequest {
         capture_id: CaptureSequence::new(9),
         capture_revision: 3,
@@ -380,7 +380,7 @@ fn body_search_query_byte_limit_and_covering_resource_window_are_bounded() {
     assert_eq!(error.code, ControlErrorCode::InvalidArgument);
     assert_eq!(
         error.details["maximum_bytes"],
-        json!(super::super::MAX_BODY_SEARCH_QUERY_BYTES)
+        json!(super::MAX_BODY_SEARCH_QUERY_BYTES)
     );
 
     let decoded = format!("prefix{query}suffix");
@@ -399,7 +399,7 @@ fn body_search_query_byte_limit_and_covering_resource_window_are_bounded() {
         .query_pairs()
         .find_map(|(key, value)| (key == "length").then(|| value.parse::<usize>().unwrap()))
         .expect("window length");
-    assert!(length <= super::super::MAX_BODY_PAGE_LENGTH);
+    assert!(length <= super::MAX_BODY_PAGE_LENGTH);
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn form_component_decoding_checks_cancellation_during_one_giant_field() {
     let mut decoder = FormComponentDecoder::default();
     let mut checkpoints = 0usize;
     let error = decoder
-        .decode_with(&input, super::super::MAX_DECODED_CONTENT_BYTES, || {
+        .decode_with(&input, super::MAX_DECODED_CONTENT_BYTES, || {
             checkpoints += 1;
             if checkpoints == 3 {
                 Err(ControlError::cancelled("cancelled component"))
@@ -467,7 +467,7 @@ fn form_component_decoding_checks_cancellation_during_one_giant_field() {
 #[test]
 fn capped_json_array_writer_reserves_closing_byte_and_never_exceeds_capacity() {
     let mut writer = CappedJsonArrayWriter::with_limit(8);
-    assert!(CappedJsonArrayWriter::new().capacity() <= super::super::MAX_INLINE_SELECTION_BYTES);
+    assert!(CappedJsonArrayWriter::new().capacity() <= super::MAX_INLINE_SELECTION_BYTES);
     writer.write_all(b"123456").expect("six payload bytes");
     assert!(writer.write_all(b"7").is_err());
     assert!(writer.len() <= 7);

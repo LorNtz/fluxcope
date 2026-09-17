@@ -330,7 +330,11 @@ fn response_rejects_mismatched_request_id_and_instance_scope() {
     }
 }
 
-fn task8_request(operation: &str, arguments: serde_json::Value, deadline_ms: u64) -> Vec<u8> {
+fn capture_control_request(
+    operation: &str,
+    arguments: serde_json::Value,
+    deadline_ms: u64,
+) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "protocol_version": RPC_VERSION,
         "request_id": "task-8-request",
@@ -344,7 +348,7 @@ fn task8_request(operation: &str, arguments: serde_json::Value, deadline_ms: u64
 }
 
 #[test]
-fn task8_requests_decode_to_operation_specific_typed_arguments() {
+fn requests_decode_to_operation_specific_typed_arguments() {
     let received_at = Instant::now();
     let cases = [
         ("get_status", json!({}), ControlOperation::GetStatus),
@@ -381,16 +385,18 @@ fn task8_requests_decode_to_operation_specific_typed_arguments() {
     ];
 
     for (operation, arguments, expected) in cases {
-        let request =
-            decode_request_payload(&task8_request(operation, arguments, 5_000), received_at)
-                .expect("valid Task 8 request");
+        let request = decode_request_payload(
+            &capture_control_request(operation, arguments, 5_000),
+            received_at,
+        )
+        .expect("valid Task 8 request");
         assert_eq!(request.operation, expected);
         assert_eq!(request.deadline, received_at + Duration::from_secs(5));
     }
 }
 
 #[test]
-fn task8_operations_reject_unknown_missing_and_structurally_malformed_arguments() {
+fn operations_reject_unknown_missing_and_structurally_malformed_arguments() {
     let invalid = [
         ("get_status", json!({"unexpected": true})),
         ("set_recording_enabled", json!({})),
@@ -412,9 +418,11 @@ fn task8_operations_reject_unknown_missing_and_structurally_malformed_arguments(
     ];
 
     for (operation, arguments) in invalid {
-        let error =
-            decode_request_payload(&task8_request(operation, arguments, 1_000), Instant::now())
-                .expect_err("invalid operation arguments");
+        let error = decode_request_payload(
+            &capture_control_request(operation, arguments, 1_000),
+            Instant::now(),
+        )
+        .expect_err("invalid operation arguments");
         assert_eq!(
             error.code,
             ControlErrorCode::InvalidArgument,
@@ -422,13 +430,13 @@ fn task8_operations_reject_unknown_missing_and_structurally_malformed_arguments(
         );
     }
 
-    let mut trailing = task8_request("get_status", json!({}), 1_000);
+    let mut trailing = capture_control_request("get_status", json!({}), 1_000);
     trailing.extend_from_slice(br#" true"#);
     assert_invalid_request(&trailing);
 }
 
 #[test]
-fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
+fn all_ordinary_deadlines_are_clamped_to_thirty_seconds() {
     let received_at = Instant::now();
     for (operation, arguments) in [
         ("get_status", json!({})),
@@ -436,9 +444,11 @@ fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
         ("search_captures", json!({"query": {}})),
         ("get_capture", json!({"capture_id": 1})),
     ] {
-        let request =
-            decode_request_payload(&task8_request(operation, arguments, u64::MAX), received_at)
-                .expect("valid request");
+        let request = decode_request_payload(
+            &capture_control_request(operation, arguments, u64::MAX),
+            received_at,
+        )
+        .expect("valid request");
         assert_eq!(
             request.deadline,
             received_at + Duration::from_secs(30),
@@ -448,7 +458,7 @@ fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
 }
 
 #[test]
-fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
+fn results_have_exact_tagged_shapes_and_repeat_instance_identity() {
     let status = ControlResult::GetStatus {
         local_proxy_url: format!("http://{ENDPOINT}"),
         fluxcope_version: "0.1.0-test".to_owned(),

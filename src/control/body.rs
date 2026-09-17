@@ -1405,4 +1405,7 @@ mod base64_bytes {
 }
 
 #[cfg(test)]
-mod task10_tests;
+mod page_contract_tests;
+
+#[cfg(test)]
+mod search_extract_tests;

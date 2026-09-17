@@ -152,7 +152,7 @@ async fn answer_body_with_headers(
 }
 
 #[tokio::test]
-async fn task12_search_keeps_runtime_authority_for_stale_revision() {
+async fn search_keeps_runtime_authority_for_stale_revision() {
     let (handler, mut receiver, _) = handler();
     let call = tokio::spawn(async move {
         handler
@@ -186,7 +186,7 @@ async fn task12_search_keeps_runtime_authority_for_stale_revision() {
 }
 
 #[tokio::test]
-async fn task12_selected_page_is_exact_utf8_and_builds_concrete_next_uri() {
+async fn selected_page_is_exact_utf8_and_builds_concrete_next_uri() {
     let (handler, mut receiver, admission) = handler();
     let operation = ControlOperation::ReadSelectedBody(Box::new(SelectionContentRequest {
         capture_id: CaptureSequence::new(7),
@@ -229,7 +229,7 @@ async fn task12_selected_page_is_exact_utf8_and_builds_concrete_next_uri() {
 }
 
 #[tokio::test]
-async fn task12_cancellation_during_pinned_snapshot_releases_scheduler_admission() {
+async fn cancellation_during_pinned_snapshot_releases_scheduler_admission() {
     let (handler, mut receiver, admission) = handler();
     let cancelled = CancellationToken::new();
     let worker_cancelled = cancelled.clone();
@@ -281,7 +281,7 @@ async fn task12_cancellation_during_pinned_snapshot_releases_scheduler_admission
 }
 
 #[tokio::test]
-async fn task12_source_preview_limit_rejects_extraction_before_snapshot_without_body_data() {
+async fn source_preview_limit_rejects_extraction_before_snapshot_without_body_data() {
     let (handler, mut receiver, admission) = handler();
     let operation = ControlOperation::ReadSelectedBody(Box::new(SelectionContentRequest {
         capture_id: CaptureSequence::new(7),
@@ -332,7 +332,7 @@ async fn task12_source_preview_limit_rejects_extraction_before_snapshot_without_
 }
 
 #[tokio::test]
-async fn task12_search_marks_prefix_totals_when_decoded_output_is_limited() {
+async fn search_marks_prefix_totals_when_decoded_output_is_limited() {
     let (handler, mut receiver, admission) = handler();
     let operation = ControlOperation::SearchCaptureBody(Box::new(SearchCaptureBodyRequest {
         capture_id: CaptureSequence::new(7),

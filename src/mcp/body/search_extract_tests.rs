@@ -23,7 +23,7 @@ fn required_input(operation: Value) -> Value {
 }
 
 #[test]
-fn task12_inputs_are_closed_and_build_exact_private_operations() {
+fn inputs_are_closed_and_build_exact_private_operations() {
     let search: SearchCaptureBodyInput = serde_json::from_value(required_input(json!({
         "query": "Straße",
         "limit": 50,
@@ -85,7 +85,7 @@ fn task12_inputs_are_closed_and_build_exact_private_operations() {
 }
 
 #[test]
-fn task12_schemas_require_exact_target_and_bound_optional_search_controls() {
+fn schemas_require_exact_target_and_bound_optional_search_controls() {
     let search = serde_json::to_value(schema_for!(SearchCaptureBodyInput)).expect("search schema");
     let extract =
         serde_json::to_value(schema_for!(ExtractCaptureBodyInput)).expect("extract schema");

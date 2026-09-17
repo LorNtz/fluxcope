@@ -37,7 +37,7 @@ fn broker_command(home: &Path) -> Command {
 }
 
 #[tokio::test]
-async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> Result<()> {
+async fn mcp_child_negotiates_earlier_protocol_and_exposes_public_contract() -> Result<()> {
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),

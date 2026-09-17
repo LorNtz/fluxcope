@@ -2800,7 +2800,7 @@ impl RunningPrivateControl {
     }
 }
 #[cfg(test)]
-mod task12_tests;
+mod search_extract_tests;
 
 impl Drop for RunningPrivateControl {
     fn drop(&mut self) {
@@ -2812,13 +2812,13 @@ impl Drop for RunningPrivateControl {
 }
 
 #[cfg(test)]
-mod task8_tests;
+mod capture_control_tests;
 
 #[cfg(test)]
-mod task9_tests;
+mod capture_wait_tests;
 
 #[cfg(test)]
-mod task10_tests;
+mod body_read_tests;
 
 #[cfg(test)]
 mod tests {

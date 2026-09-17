@@ -237,3 +237,63 @@ Date: 2026/09/17 11:09
 Date: 2026/09/17 11:11
 
 - Final verification passed: cargo test --all-features --locked; cargo clippy --all-targets --all-features --locked -- -D warnings; cargo fmt --check; upstream release smoke including HTTP/HTTPS, CA persistence/download, private-state permissions, TUI shutdown/occupied-port behavior; release metadata validation. Live renamed MCP smoke verified 25 tools, isolated preview, stale revision rejection, preserved rules, a 153467-byte whole-response comparison and fluxcope:///_meta.fluxcope. Both reviewers accepted the fixes. All 17 preserved user files remain hash-identical before restoration; recovery ref backup/embedded-mcp-server-pre-fluxcope-rebase-20260917 retained.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:43
+
+- Commit1 organization: moved src/capture/body_work/task10_tests.rs to src/capture/body_work/admission_tests.rs and renamed its #[cfg(test)] parent declaration to admission_tests. Test contents and production behavior unchanged; validation deferred to Main.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:43
+
+- Commit1 organization: moved src/capture/decode/task10_tests.rs to src/capture/decode/decoder_tests.rs, renamed the test module to decoder_tests, and removed the redundant #[path] attribute so Rust default lookup resolves the new file. Existing inline tests and moved test contents unchanged; validation deferred to Main.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:43
+
+- Commit1 MCP body organization: moved task10_tests.rs -> content_resource_tests.rs, task11_tests.rs -> json_inspection_tests.rs, task12_tests.rs -> search_extract_tests.rs and updated body.rs module registrations. Stripped task12_ from the two search/extract test function identifiers only. Preserved module depth, cfg/test attributes, imports, fixtures, bodies, and assertions. No suites split and no validation run (Main owns validation).
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:43
+
+- Commit1 organization: moved src/control/body/task10_tests.rs to src/control/body/page_contract_tests.rs and its nested task12_tests.rs to sibling src/control/body/search_extract_tests.rs. Removed the nested task12_tests declaration, declared both sibling suites under #[cfg(test)] in body.rs, and changed extraction-suite owner import from super::super to super. Test/fixture bodies and production visibility unchanged; validation deferred to Main.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:43
+
+- Commit1 MCP broker organization: moved broker/tests/task9_tests.rs -> capture_wait.rs, task10_tests.rs -> body_resources.rs, task11_tests.rs -> json_inspection.rs, task12_tests.rs -> search_extract.rs and updated registrations inside existing broker::tests. Stripped task14_ from oversized_public_mapping_is_rejected_before_instance_resolution only. Existing nested tests, parent fixtures/import visibility, bodies/assertions and all attributes preserved. No validation run (Main owns validation).
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:44
+
+- Commit1 MCP mapping organization: moved mcp/task14_mapping_tests.rs -> mcp/mapping/tests.rs, removed mapping.rs's obsolete path attribute, and renamed module registration to tests under the unchanged cfg(test). Logical parent remains mcp::mapping, so all super imports remain unchanged. File contents, fixtures, bodies/assertions and attributes preserved byte-for-byte; mapping preview::tests untouched. No validation run (Main owns validation).
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:44
+
+- Commit1/RenameRpcRuntime: renamed protocol task9/task10/task12/task14 suites to capture_wait_tests/body_read_tests/search_extract_tests/mapping_tests, server task9 to capture_wait_tests, and runtime control task8/task9/task10/task12 to capture_control_tests/capture_wait_tests/body_read_tests/search_extract_tests, updating cfg(test) registrations in place. Moved runtime/task14_tests.rs to runtime/settings/transaction_tests.rs and replaced its path override with the transaction_tests module. All ten suite moves preserve logical ownership, imports, test bodies/fixtures, and cfg attributes. No tests/builds/linters/formatters or git staging/commits run.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:44
+
+- Commit1/RenameRpcRuntime: removed taskN_ prefixes exactly from ten test identifiers (three protocol/tests.rs, two protocol/search_extract_tests.rs, five runtime/control/search_extract_tests.rs); renamed private task8_request helper and its four calls to capture_control_request with identifier-only AST edits. Preserved request-ID/client literals, expectation text, assertions, and all fixtures/attributes. The non-prefixed test all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds remains unchanged per the explicit no-other-test-renames contract. No validation commands run.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:46
+
+- Completed three embedded task-number test-name cleanups in protocol, capture-broker transport, and external broker contract tests. Only identifiers changed; all assertions and protocol behavior remain intact.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:47
+
+- Formatted the rename-only module declarations and preserved moved suite contents; compiling and comparing the exact executable inventory before the first commit.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:48
+
+- Fixed seven constant paths exposed by compilation after flattening the extraction suite: super::super became super, still referring to exactly the same body limits. No test inputs or assertions changed.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:49
+
+- Verified the rename-only executable inventory: all 873 tests remain discoverable with exactly the planned semantic module/function names, no missing or added tests. Staged changes are file moves, module/import updates, identifier cleanup, and formatting only.
