@@ -1,11 +1,11 @@
 #![cfg(unix)]
 
 use super::{
-    CaptureSearchAdmission, DetailMaterializationAdmission, RuntimeControlHandler, RuntimeGateway,
+    CaptureSearchAdmission, RuntimeControlHandler, RuntimeGateway,
+    capture_test_support::{BlockingGate, completed_capture, control_context, runtime_fixture},
 };
 use crate::{
-    app::{App, SettingsUiContext},
-    capture::{CaptureRecord, CaptureRetentionPolicy, CaptureSequence, CapturedExchange},
+    capture::{CaptureRecord, CaptureSequence, CapturedExchange},
     control::{
         InstanceRuntimeSnapshot, RuntimeReply, RuntimeRequest,
         capture_query::{
@@ -14,39 +14,16 @@ use crate::{
         },
     },
     control_rpc::{
-        protocol::{
-            ControlErrorCode, ControlOperation, ControlResult, DeclaredClient, InstanceScope,
-        },
-        server::{ControlCallContext, ControlRpcHandler},
+        protocol::{ControlErrorCode, ControlOperation, ControlResult, InstanceScope},
+        server::ControlRpcHandler,
     },
-    instance::InstanceIdentity,
-    logging::LogRetentionPolicy,
-    recording::RecordingState,
     runtime::event_loop::execute_control_request_for_test,
-    settings::{AppSettings, ConfigMode, PersistenceMode, SettingsSession},
+    settings::{ConfigMode, PersistenceMode},
 };
 use hyper::Method;
-use std::{
-    sync::{Arc, Condvar, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-
-fn completed_capture(sequence: u64) -> Arc<CaptureRecord> {
-    CaptureRecord::from_completed(CapturedExchange {
-        sequence: CaptureSequence::new(sequence),
-        method: Method::GET,
-        uri: format!("https://example.test/{sequence}"),
-        mapped_uri: None,
-        local_path: None,
-        status: Some(200),
-        req_headers: vec![("X-Sequence".to_owned(), sequence.to_string())],
-        res_headers: vec![],
-        req_body: None,
-        res_body: None,
-    })
-}
 
 fn completed_capture_with_method(sequence: u64, method: Method) -> Arc<CaptureRecord> {
     CaptureRecord::from_completed(CapturedExchange {
@@ -61,36 +38,6 @@ fn completed_capture_with_method(sequence: u64, method: Method) -> Arc<CaptureRe
         req_body: None,
         res_body: None,
     })
-}
-
-fn runtime_fixture(max_records: usize) -> (InstanceIdentity, App, SettingsSession) {
-    let mut launch = AppSettings::default();
-    launch.recording.start_record_on_launch = false;
-    let settings = SettingsSession::temporary(launch.clone());
-    let app = App::with_runtime_policies(
-        launch,
-        RecordingState::new(false),
-        LogRetentionPolicy::default(),
-        CaptureRetentionPolicy {
-            max_records,
-            max_bytes: usize::MAX,
-        },
-        SettingsUiContext::default(),
-    );
-    let identity =
-        InstanceIdentity::new("127.0.0.1:19028".parse().expect("endpoint")).expect("identity");
-    (identity, app, settings)
-}
-
-fn control_context(request_id: impl Into<String>) -> ControlCallContext {
-    ControlCallContext {
-        request_id: request_id.into(),
-        declared_client: DeclaredClient {
-            name: "task-8-test".to_owned(),
-            version: "1".to_owned(),
-        },
-        deadline: Instant::now() + Duration::from_secs(30),
-    }
 }
 
 #[test]
@@ -285,203 +232,6 @@ async fn accumulated_multi_batch_page_omits_a_row_only_against_remaining_capacit
     assert_eq!(next_cursor, None);
 }
 
-#[test]
-fn recording_setter_reports_previous_and_current_and_never_changes_launch_settings() {
-    let (identity, mut app, settings) = runtime_fixture(10);
-    assert!(!settings.snapshot().recording.start_record_on_launch);
-
-    for (enabled, expected_previous, expected_current) in [
-        (true, false, true),
-        (true, true, true),
-        (false, true, false),
-    ] {
-        let reply = execute_control_request_for_test(
-            &identity,
-            &mut app,
-            &settings,
-            RuntimeRequest::SetRecordingEnabled { enabled },
-        )
-        .expect("recording update");
-        let RuntimeReply::RecordingUpdated(result) = reply else {
-            panic!("expected recording update")
-        };
-        assert_eq!(
-            result.instance,
-            InstanceScope {
-                proxy_endpoint: identity.proxy_endpoint(),
-                run_id: identity.run_id().clone(),
-            }
-        );
-        assert_eq!(result.previous, expected_previous);
-        assert_eq!(result.current, expected_current);
-        assert_eq!(app.is_recording(), expected_current);
-        assert!(
-            !settings.snapshot().recording.start_record_on_launch,
-            "live recording mutation must not rewrite the launch setting"
-        );
-    }
-}
-
-#[test]
-fn capture_detail_uses_current_revision_and_distinguishes_conflict_not_found_and_eviction() {
-    let (identity, mut app, settings) = runtime_fixture(1);
-    let retained = completed_capture(7);
-    let revision = retained.revision();
-    app.add_capture(Arc::clone(&retained));
-
-    let current = execute_control_request_for_test(
-        &identity,
-        &mut app,
-        &settings,
-        RuntimeRequest::GetCapture {
-            capture_id: CaptureSequence::new(7),
-            expected_revision: Some(revision),
-        },
-    )
-    .expect("current detail");
-    let RuntimeReply::CaptureSnapshot(capture) = current else {
-        panic!("expected capture snapshot")
-    };
-    assert_eq!(capture.instance.run_id, identity.run_id().clone());
-    assert_eq!(capture.snapshot.sequence, CaptureSequence::new(7));
-    assert_eq!(capture.snapshot.revision, revision);
-
-    let conflict = execute_control_request_for_test(
-        &identity,
-        &mut app,
-        &settings,
-        RuntimeRequest::GetCapture {
-            capture_id: CaptureSequence::new(7),
-            expected_revision: Some(revision.saturating_add(1)),
-        },
-    )
-    .expect_err("revision conflict");
-    assert_eq!(conflict.code, ControlErrorCode::CaptureRevisionConflict);
-    assert_eq!(conflict.details["current_revision"], revision);
-
-    let missing = execute_control_request_for_test(
-        &identity,
-        &mut app,
-        &settings,
-        RuntimeRequest::GetCapture {
-            capture_id: CaptureSequence::new(99),
-            expected_revision: None,
-        },
-    )
-    .expect_err("missing capture");
-    assert_eq!(missing.code, ControlErrorCode::CaptureNotFound);
-
-    app.add_capture(completed_capture(8));
-    let evicted = execute_control_request_for_test(
-        &identity,
-        &mut app,
-        &settings,
-        RuntimeRequest::GetCapture {
-            capture_id: CaptureSequence::new(7),
-            expected_revision: None,
-        },
-    )
-    .expect_err("retention eviction");
-    assert_eq!(evicted.code, ControlErrorCode::CaptureNotFound);
-}
-#[tokio::test]
-async fn recording_mutation_returns_same_turn_identity_without_a_follow_up_status_request() {
-    let (identity, _, _) = runtime_fixture(1);
-    let scope = InstanceScope {
-        proxy_endpoint: identity.proxy_endpoint(),
-        run_id: identity.run_id().clone(),
-    };
-    let (client, mut receiver) = RuntimeGateway::channel(4);
-    let handler = RuntimeControlHandler::new(client);
-    let call = tokio::spawn({
-        let handler = handler.clone();
-        async move {
-            handler
-                .handle(
-                    control_context("recording-same-turn"),
-                    ControlOperation::SetRecordingEnabled { enabled: true },
-                    CancellationToken::new(),
-                )
-                .await
-        }
-    });
-
-    let command = receiver.recv().await.expect("recording command");
-    assert_eq!(
-        command.request,
-        RuntimeRequest::SetRecordingEnabled { enabled: true }
-    );
-    command
-        .reply
-        .send(Ok(RuntimeReply::RecordingUpdated(
-            crate::control::RecordingUpdate {
-                instance: scope.clone(),
-                previous: false,
-                current: true,
-            },
-        )))
-        .expect("recording reply receiver");
-
-    let ControlResult::SetRecordingEnabled { instance, .. } =
-        call.await.expect("handler task").expect("recording result")
-    else {
-        panic!("expected recording result")
-    };
-    assert_eq!(instance, scope);
-    assert!(
-        receiver.try_recv().is_err(),
-        "recording mutation must not issue a racy follow-up status request"
-    );
-}
-
-#[tokio::test]
-async fn admitted_recording_mutation_observes_its_authoritative_reply_after_cancellation() {
-    let (identity, _, _) = runtime_fixture(1);
-    let scope = InstanceScope {
-        proxy_endpoint: identity.proxy_endpoint(),
-        run_id: identity.run_id().clone(),
-    };
-    let (client, mut receiver) = RuntimeGateway::channel(1);
-    let handler = RuntimeControlHandler::new(client);
-    let cancelled = CancellationToken::new();
-    let mut call = tokio::spawn({
-        let cancelled = cancelled.clone();
-        async move {
-            handler
-                .handle(
-                    control_context("recording-terminal-delivery"),
-                    ControlOperation::SetRecordingEnabled { enabled: true },
-                    cancelled,
-                )
-                .await
-        }
-    });
-
-    let command = receiver.recv().await.expect("recording command");
-    cancelled.cancel();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(25), &mut call)
-            .await
-            .is_err(),
-        "an admitted recording mutation must wait for its authoritative reply"
-    );
-    command
-        .reply
-        .send(Ok(RuntimeReply::RecordingUpdated(
-            crate::control::RecordingUpdate {
-                instance: scope,
-                previous: false,
-                current: true,
-            },
-        )))
-        .expect("recording reply receiver");
-
-    assert!(matches!(
-        call.await.expect("handler task"),
-        Ok(ControlResult::SetRecordingEnabled { current: true, .. })
-    ));
-}
-
 #[tokio::test]
 async fn private_handler_rejects_invalid_search_semantics_before_runtime_dispatch() {
     let (client, mut receiver) = RuntimeGateway::channel(1);
@@ -539,147 +289,6 @@ async fn private_handler_rejects_invalid_search_semantics_before_runtime_dispatc
         receiver.try_recv().is_err(),
         "invalid searches must not reach AppRuntime"
     );
-}
-
-#[tokio::test]
-async fn private_detail_uses_the_identity_returned_with_its_single_runtime_snapshot() {
-    let (identity, _, _) = runtime_fixture(1);
-    let scope = InstanceScope {
-        proxy_endpoint: identity.proxy_endpoint(),
-        run_id: identity.run_id().clone(),
-    };
-    let snapshot = completed_capture(7).snapshot(crate::capture::CaptureSnapshotMode::MetadataOnly);
-    let (client, mut receiver) = RuntimeGateway::channel(2);
-    let handler = RuntimeControlHandler::new(client);
-    let call = tokio::spawn({
-        let handler = handler.clone();
-        async move {
-            handler
-                .handle(
-                    control_context("detail-same-turn"),
-                    ControlOperation::GetCapture {
-                        capture_id: CaptureSequence::new(7),
-                        expected_revision: Some(0),
-                    },
-                    CancellationToken::new(),
-                )
-                .await
-        }
-    });
-
-    let command = receiver.recv().await.expect("detail command");
-    assert!(matches!(command.request, RuntimeRequest::GetCapture { .. }));
-    command
-        .reply
-        .send(Ok(RuntimeReply::CaptureSnapshot(Box::new(
-            crate::control::CaptureSnapshotReply {
-                instance: scope.clone(),
-                snapshot,
-            },
-        ))))
-        .expect("detail reply receiver");
-
-    let ControlResult::GetCapture { instance, capture } =
-        call.await.expect("detail task").expect("detail result")
-    else {
-        panic!("expected detail result")
-    };
-    assert_eq!(instance, scope);
-    assert_eq!(capture.capture_sequence, CaptureSequence::new(7));
-    assert!(
-        receiver.try_recv().is_err(),
-        "detail must not issue a racy status request"
-    );
-}
-
-#[derive(Default)]
-struct BlockingGate {
-    released: Mutex<bool>,
-    changed: Condvar,
-}
-
-impl BlockingGate {
-    fn wait(&self) {
-        let mut released = self.released.lock().expect("gate");
-        while !*released {
-            released = self.changed.wait(released).expect("gate wait");
-        }
-    }
-
-    fn release(&self) {
-        *self.released.lock().expect("gate") = true;
-        self.changed.notify_all();
-    }
-}
-
-#[tokio::test]
-async fn detail_materialization_is_bounded_and_keeps_permits_until_detached_workers_exit() {
-    let admission = Arc::new(DetailMaterializationAdmission::new(4));
-    let gate = Arc::new(BlockingGate::default());
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let mut active = Vec::new();
-    for index in 0..4 {
-        let admission = Arc::clone(&admission);
-        let gate = Arc::clone(&gate);
-        let started = started_tx.clone();
-        let cancelled = CancellationToken::new();
-        let worker_cancelled = cancelled.clone();
-        let task = tokio::spawn(async move {
-            admission
-                .run_blocking(worker_cancelled, move || {
-                    started.send(index).expect("started receiver");
-                    gate.wait();
-                })
-                .await
-        });
-        active.push((cancelled, task));
-    }
-    for _ in 0..4 {
-        started_rx.recv().await.expect("four active details");
-    }
-    assert_eq!(admission.available_permits_for_test(), 0);
-
-    let (detached_cancelled, detached) = active.remove(0);
-    detached_cancelled.cancel();
-    let error = detached
-        .await
-        .expect("cancelled detail task")
-        .expect_err("outer detail future cancelled");
-    assert_eq!(error.code, ControlErrorCode::Cancelled);
-    assert_eq!(
-        admission.available_permits_for_test(),
-        0,
-        "the detached blocking worker must retain its permit"
-    );
-
-    let fifth_admission = Arc::clone(&admission);
-    let fifth_gate = Arc::clone(&gate);
-    let fifth_started = started_tx.clone();
-    let (fifth_attempted_tx, fifth_attempted_rx) = oneshot::channel();
-    let fifth = tokio::spawn(async move {
-        fifth_attempted_tx.send(()).expect("attempted receiver");
-        fifth_admission
-            .run_blocking(CancellationToken::new(), move || {
-                fifth_started.send(4).expect("started receiver");
-                fifth_gate.wait();
-            })
-            .await
-    });
-    fifth_attempted_rx.await.expect("fifth attempted admission");
-    assert!(
-        started_rx.try_recv().is_err(),
-        "a fifth detail worker must wait for admission"
-    );
-
-    gate.release();
-    assert_eq!(started_rx.recv().await, Some(4));
-    fifth
-        .await
-        .expect("fifth detail task")
-        .expect("fifth detail");
-    for (_, task) in active {
-        task.await.expect("detail task").expect("detail result");
-    }
 }
 
 #[tokio::test]

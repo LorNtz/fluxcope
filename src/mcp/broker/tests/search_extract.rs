@@ -17,7 +17,7 @@ use crate::{
 use bytes::Bytes;
 use serde_json::json;
 
-struct Task12DispatchProbe {
+struct SearchExtractDispatchProbe {
     calls: Mutex<Vec<ControlOperation>>,
 }
 
@@ -33,7 +33,7 @@ fn source() -> BodyPageSource {
     }
 }
 
-impl InstanceProbe for Task12DispatchProbe {
+impl InstanceProbe for SearchExtractDispatchProbe {
     fn describe<'a>(
         &'a self,
         descriptor: &'a InstanceDescriptor,
@@ -130,7 +130,7 @@ impl InstanceProbe for Task12DispatchProbe {
 #[tokio::test]
 async fn broker_dispatches_search_extract_and_selected_resource_with_exact_identity() {
     let descriptor = descriptor(19012, RUN_A);
-    let probe = Arc::new(Task12DispatchProbe {
+    let probe = Arc::new(SearchExtractDispatchProbe {
         calls: Mutex::new(Vec::new()),
     });
     let broker = Broker::with_dependencies(

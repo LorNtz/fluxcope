@@ -1645,4 +1645,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod decoder_tests;
+mod content_decode_tests;
+
+#[cfg(test)]
+mod display_decode_tests;
+
+#[cfg(test)]
+mod test_support;

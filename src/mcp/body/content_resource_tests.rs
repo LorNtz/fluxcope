@@ -41,7 +41,7 @@ fn uri(
 }
 
 #[test]
-fn content_template_is_the_exact_task_ten_rfc6570_template() {
+fn content_template_matches_the_exact_rfc6570_contract() {
     assert_eq!(
         CONTENT_RESOURCE_TEMPLATE,
         "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}"

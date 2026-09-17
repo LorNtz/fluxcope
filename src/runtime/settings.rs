@@ -706,6 +706,8 @@ impl fmt::Display for SettingsRevision {
     }
 }
 
+#[cfg(test)]
+mod mapping_read_tests;
 #[cfg(all(test, unix))]
 mod test_support;
 #[cfg(test)]

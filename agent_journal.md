@@ -297,3 +297,58 @@ Date: 2026/09/17 11:48
 Date: 2026/09/17 11:49
 
 - Verified the rename-only executable inventory: all 873 tests remain discoverable with exactly the planned semantic module/function names, no missing or added tests. Staged changes are file moves, module/import updates, identifier cleanup, and formatting only.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:54
+
+- Split settings transaction_tests into 22 transaction lifecycle tests and 3 mapping_read_tests by exact source move, including unchanged wait_until_released helper. Both modules preserve cfg(unix) and original test/Tokio attributes; existing settings::test_support remains unchanged. Reused create_preset via test-only pub(super) visibility in transaction_tests, removed moved-only imports, and registered cfg(test) mapping_read_tests directly in settings.rs. No tests/builds/linters/formatters or git operations run.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:54
+
+- Registered behavioral runtime-control test suites and their scoped capture/body fixture modules under the unchanged production owner; all declarations remain cfg(test), with no production API or runtime logic changes.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:54
+
+- Split capture/decode/decoder_tests.rs into direct-child content_decode_tests (9 codec/limits/cancellation cases) and display_decode_tests (6 TUI display/service/cancellation/admission cases), preserving test attributes and bodies via anchored moves. Shared existing preview/headers/gzip helpers now live in cfg(test) capture/decode/test_support.rs with pub(super) visibility; decode/zlib/raw_deflate/brotli remain content-local and form cancellation helper remains display-local. Replaced obsolete decoder_tests registration with normal cfg(test) module lookup for both suites and support; removed obsolete source file. No validation, formatting, staging, or commits run (Main integrates).
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:54
+
+- Split runtime/control/body_read_tests.rs per approved exact destination mapping: moved 10 unchanged paging/UTF-8/codec cases with local codec helpers to body_paging_tests.rs and 5 unchanged direct cache cases to decoded_body_cache_tests.rs; kept 10 handler/orchestration/scheduler/service/cancellation cases and reply/handler helpers in body_read_tests.rs. Shared existing scope/status/headers/request/key helpers moved once into body_test_support.rs; all files retain Unix gates. Parent module registrations remain owned by Main. No validation/staging/commit performed.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:55
+
+- Split capture_control_tests.rs into capture_search_tests.rs (8 tests), capture_detail_tests.rs (3), and recording_tests.rs (3), retaining test bodies, attributes, and Unix restrictions. Moved reused completed_capture/runtime_fixture/control_context/BlockingGate helpers into Unix test-only capture_test_support.rs with pub(super) access; completed_capture_with_method remains local to search. Removed obsolete source module; Main owns control.rs registration and all validation. No builds/tests/linters/formatters or git staging/commits run.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:55
+
+- Completed body split fixture visibility: only the five actually shared existing helpers (scope, status, headers, request, key) are pub(super) in Unix-gated body_test_support.rs. Codec machinery stays local to paging; context, handler, spawn_read and metadata/snapshot reply machinery stay local to orchestration. No production visibility changed; Main must register body_test_support with #[cfg(test)]. No validation/staging/commit performed.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:56
+
+- Moved the existing shared create_preset fixture into runtime/settings/test_support so mapping-read tests do not depend on the transaction test suite. Both suites import the same unchanged helper; no duplicate fixture or production visibility added.
+
+### Test organization: semantic suites
+Date: 2026/09/17 11:58
+
+- Completed focused suite partitions and final formatting. Shared helpers are scoped to decoder/capture/body fixtures or existing settings test_support; no suite imports another suite as a fixture provider. Preparing exact inventory verification and independent reviews.
+
+### Test organization: semantic suites
+Date: 2026/09/17 12:02
+
+- Final executable inventory matches all 873 original tests under the exact planned semantic names and suite partitions, with none added or removed. All-feature tests, strict all-target/all-feature Clippy and cargo fmt --check passed. Performance review found no fixture-lifetime, allocation, synchronization, cfg or concurrency regressions.
+
+### Test organization: semantic suites
+Date: 2026/09/17 12:03
+
+- Design review confirmed preservation and cohesion, and identified two remaining historical identifiers. Renamed the task-ten resource-template test and Task12DispatchProbe fixture semantically, updating all uses without changing assertions or fixture behavior. Updated the expected final inventory for the one test identifier.
+
+### Test organization: semantic suites
+Date: 2026/09/17 12:06
+
+- Both independent reviews are clean: test bodies/assertions/attributes, owner-private access, fixture lifetimes and concurrency behavior are preserved. After the final naming refinements, all-feature tests, strict Clippy and formatting passed again; exact final inventory remains 873 tests with zero missing or added cases.

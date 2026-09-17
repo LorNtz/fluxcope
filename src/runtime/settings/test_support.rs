@@ -26,6 +26,13 @@ use crate::{
     },
 };
 
+pub(super) fn create_preset(name: &str) -> MappingMutation {
+    MappingMutation::CreatePreset {
+        name: name.to_string(),
+        initial: None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum FailurePoint {
     Compile,

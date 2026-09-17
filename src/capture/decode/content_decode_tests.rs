@@ -1,44 +1,21 @@
 use super::{
-    CancellationReader, ContentDecodePolicy, DecodeClient, DecodeClientState, DecodeContentError,
-    DecodeDisplayMode, DecodeJob, DecodeKey, DecodeMetrics, DecodePolicy, DecodeProgressProbe,
-    decode_content_bytes, decode_job, start_decode_service_with_admission,
+    CancellationReader, ContentDecodePolicy, DecodeContentError, DecodeProgressProbe,
+    decode_content_bytes,
+    test_support::{gzip, headers, preview},
 };
 use crate::{
-    capture::{BodySide, BodyWorkAdmission, CaptureSequence, CapturedBodyPreview, CapturedHeaders},
     control::body::{MAX_CONTENT_ENCODING_LAYERS, MAX_DECODED_CONTENT_BYTES},
     control_rpc::protocol::ControlErrorCode,
 };
 use flate2::{
     Compression,
-    write::{DeflateEncoder, GzEncoder, ZlibEncoder},
+    write::{DeflateEncoder, ZlibEncoder},
 };
-use hyper::body::Bytes;
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
     io::{Read, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-
-fn preview(bytes: Vec<u8>) -> CapturedBodyPreview {
-    CapturedBodyPreview::unbudgeted(Bytes::from(bytes))
-}
-
-fn headers(encoding: Option<&str>, content_type: Option<&str>) -> CapturedHeaders {
-    let mut values = Vec::new();
-    if let Some(encoding) = encoding {
-        values.push(("Content-Encoding".to_owned(), encoding.to_owned()));
-    }
-    if let Some(content_type) = content_type {
-        values.push(("Content-Type".to_owned(), content_type.to_owned()));
-    }
-    CapturedHeaders::unbudgeted(values.into())
-}
 
 fn decode(
     input: Vec<u8>,
@@ -50,12 +27,6 @@ fn decode(
         &ContentDecodePolicy::default(),
         &AtomicBool::new(false),
     )
-}
-
-fn gzip(input: &[u8]) -> Vec<u8> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(input).expect("gzip input");
-    encoder.finish().expect("gzip finish")
 }
 
 fn zlib(input: &[u8]) -> Vec<u8> {
@@ -229,90 +200,6 @@ async fn decompression_checks_cancellation_at_bounded_progress_checkpoints() {
 }
 
 #[test]
-fn tui_decoder_uses_the_shared_content_encoding_layer_limit() {
-    let plain = b"tui payload".to_vec();
-    let mut encoded = plain;
-    for _ in 0..=MAX_CONTENT_ENCODING_LAYERS {
-        encoded = gzip(&encoded);
-    }
-    let content_encoding = std::iter::repeat_n("gzip", MAX_CONTENT_ENCODING_LAYERS + 1)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let key = DecodeKey {
-        sequence: CaptureSequence::new(1),
-        side: BodySide::Response,
-        revision: 1,
-
-        mode: DecodeDisplayMode::Response,
-    };
-
-    let result = decode_job(
-        DecodeJob {
-            key,
-            input: preview(encoded),
-            headers: headers(Some(&content_encoding), Some("text/plain")),
-            body_work: None,
-            cancellation: Arc::new(super::DecodeCancellation::new()),
-        },
-        &DecodePolicy::default(),
-    );
-
-    assert!(
-        result.error.is_some(),
-        "TUI decode must reject the same over-layer chain as MCP"
-    );
-}
-
-#[tokio::test]
-async fn tui_form_field_formatting_observes_bounded_cancellation_checkpoints() {
-    let mut form = b"message=".to_vec();
-    for _ in 0..(64 * 1_024) {
-        form.extend_from_slice(b"%61");
-    }
-    assert_tui_form_formatting_cancelled(form).await;
-}
-
-#[tokio::test]
-async fn tui_form_empty_segment_scan_observes_bounded_cancellation_checkpoints() {
-    assert_tui_form_formatting_cancelled(vec![b'&'; 64 * 1_024]).await;
-}
-
-async fn assert_tui_form_formatting_cancelled(form: Vec<u8>) {
-    let progress = Arc::new(DecodeProgressProbe::new());
-    let policy = DecodePolicy {
-        format_progress_probe: Some(Arc::clone(&progress)),
-        ..DecodePolicy::default()
-    };
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = Arc::clone(&cancelled);
-
-    let worker = tokio::task::spawn_blocking(move || {
-        super::decode_job_cancellable(
-            DecodeJob {
-                key: DecodeKey {
-                    sequence: CaptureSequence::new(2),
-                    side: BodySide::Request,
-                    revision: 1,
-                    mode: DecodeDisplayMode::Request,
-                },
-                input: preview(form),
-                headers: headers(None, Some("application/x-www-form-urlencoded")),
-                body_work: None,
-                cancellation: Arc::new(super::DecodeCancellation::new()),
-            },
-            &policy,
-            &worker_cancelled,
-        )
-    });
-
-    progress.wait_for_checkpoint().await;
-    cancelled.store(true, std::sync::atomic::Ordering::Release);
-    progress.release();
-
-    let result = worker.await.expect("format worker");
-    assert_eq!(result.error.as_deref(), Some("body decode was cancelled"));
-}
-#[test]
 fn codec_input_reader_checks_cancellation_at_thirty_two_kibibyte_boundaries() {
     let cancelled = AtomicBool::new(false);
     let source = vec![b'x'; 64 * 1_024];
@@ -326,74 +213,6 @@ fn codec_input_reader_checks_cancellation_at_thirty_two_kibibyte_boundaries() {
     cancelled.store(true, std::sync::atomic::Ordering::Release);
     let error = reader.read(&mut buffer).expect_err("cancelled codec input");
     assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
-}
-
-#[tokio::test]
-async fn selecting_a_new_tui_body_cancels_the_superseded_worker() {
-    let shutdown = CancellationToken::new();
-    let body_work = Arc::new(BodyWorkAdmission::new());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    let first_active = body_work
-        .try_admit_tui(0)
-        .expect("first queued lease")
-        .acquire_active(deadline, CancellationToken::new())
-        .await
-        .expect("first active lease");
-    let second_active = body_work
-        .try_admit_tui(0)
-        .expect("second queued lease")
-        .acquire_active(deadline, CancellationToken::new())
-        .await
-        .expect("second active lease");
-    let service =
-        start_decode_service_with_admission(DecodePolicy::default(), shutdown.clone(), body_work);
-    let first = DecodeKey {
-        sequence: CaptureSequence::new(1),
-        side: BodySide::Response,
-        revision: 1,
-        mode: DecodeDisplayMode::Response,
-    };
-    let second = DecodeKey {
-        sequence: CaptureSequence::new(2),
-        ..first
-    };
-
-    assert!(service.client.request(
-        first,
-        preview(vec![b'x'; 64 * 1_024]),
-        headers(None, Some("text/plain")),
-    ));
-    let first_cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if let Some(cancelled) = service
-                .client
-                .state
-                .active_cancellations
-                .lock()
-                .get(&first)
-                .cloned()
-            {
-                break cancelled;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first decode becomes active");
-    assert!(service.client.request(
-        second,
-        preview(b"new body".to_vec()),
-        headers(None, Some("text/plain")),
-    ));
-
-    assert!(
-        first_cancelled
-            .flag
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
-    drop((first_active, second_active));
-    shutdown.cancel();
-    service.task.await.expect("service join").expect("service");
 }
 
 #[test]
@@ -415,52 +234,5 @@ fn identity_source_flattening_uses_bounded_progress_checkpoints() {
     assert!(
         (1..=32 * 1_024).contains(&probe.bytes_since_previous_checkpoint()),
         "source copies must expose bounded cancellation checkpoints"
-    );
-}
-
-#[test]
-fn rejected_shared_admission_releases_the_tui_local_byte_reservation() {
-    let body_work = Arc::new(BodyWorkAdmission::new());
-    let held = (0..crate::capture::body_work::QUEUED_BODY_WORK_LIMIT)
-        .map(|_| body_work.try_admit_mcp(0).expect("fill shared queue"))
-        .collect::<Vec<_>>();
-    let (tx, _rx) = mpsc::channel(1);
-    let state = Arc::new(DecodeClientState {
-        pending: parking_lot::Mutex::new(HashSet::new()),
-        desired: parking_lot::Mutex::new(None),
-        active_cancellations: parking_lot::Mutex::new(HashMap::new()),
-        queued_input_bytes: AtomicUsize::new(0),
-    });
-    let client = DecodeClient {
-        tx,
-        state: Arc::clone(&state),
-        policy: Arc::new(DecodePolicy::default()),
-        metrics: Arc::new(DecodeMetrics::default()),
-        body_work,
-    };
-    let key = DecodeKey {
-        sequence: CaptureSequence::new(1),
-        side: BodySide::Response,
-        revision: 1,
-        mode: DecodeDisplayMode::Response,
-    };
-
-    assert!(!client.request(key, preview(b"body".to_vec()), headers(None, None)));
-    assert_eq!(
-        state
-            .queued_input_bytes
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-
-    drop(held);
-    assert!(client.request(key, preview(b"body".to_vec()), headers(None, None)));
-}
-
-#[test]
-fn tui_local_queue_retains_the_thirty_two_mibibyte_backstop() {
-    assert_eq!(
-        DecodePolicy::default().max_queued_input_bytes,
-        32 * 1_024 * 1_024
     );
 }

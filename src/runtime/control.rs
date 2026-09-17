@@ -2812,13 +2812,25 @@ impl Drop for RunningPrivateControl {
 }
 
 #[cfg(test)]
-mod capture_control_tests;
+mod capture_detail_tests;
+#[cfg(test)]
+mod capture_search_tests;
+#[cfg(test)]
+mod capture_test_support;
+#[cfg(test)]
+mod recording_tests;
 
 #[cfg(test)]
 mod capture_wait_tests;
 
 #[cfg(test)]
+mod body_paging_tests;
+#[cfg(test)]
 mod body_read_tests;
+#[cfg(test)]
+mod body_test_support;
+#[cfg(test)]
+mod decoded_body_cache_tests;
 
 #[cfg(test)]
 mod tests {
