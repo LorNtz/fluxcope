@@ -154,21 +154,21 @@ pub(crate) struct RegistryMutationLock {
 }
 
 impl RegistryMutationLock {
-    pub(crate) fn acquire(wirelens_home: &Path) -> io::Result<Self> {
+    pub(crate) fn acquire(fluxcope_home: &Path) -> io::Result<Self> {
         let cancelled = CancellationToken::new();
         Self::acquire_until(
-            wirelens_home,
+            fluxcope_home,
             Instant::now() + REGISTRY_MUTATION_LOCK_TIMEOUT,
             &cancelled,
         )
     }
 
     pub(crate) fn acquire_until(
-        wirelens_home: &Path,
+        fluxcope_home: &Path,
         deadline: Instant,
         cancelled: &CancellationToken,
     ) -> io::Result<Self> {
-        let (file, path) = Self::open_file(wirelens_home)?;
+        let (file, path) = Self::open_file(fluxcope_home)?;
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Self::finish(file, &path),
@@ -192,15 +192,15 @@ impl RegistryMutationLock {
         }
     }
 
-    pub(crate) fn try_acquire(wirelens_home: &Path) -> io::Result<Self> {
-        let (file, path) = Self::open_file(wirelens_home)?;
+    pub(crate) fn try_acquire(fluxcope_home: &Path) -> io::Result<Self> {
+        let (file, path) = Self::open_file(fluxcope_home)?;
         file.try_lock_exclusive()?;
         Self::finish(file, &path)
     }
 
-    fn open_file(wirelens_home: &Path) -> io::Result<(File, PathBuf)> {
-        ensure_owner_only_directory(wirelens_home)?;
-        let run_dir = wirelens_home.join("run");
+    fn open_file(fluxcope_home: &Path) -> io::Result<(File, PathBuf)> {
+        ensure_owner_only_directory(fluxcope_home)?;
+        let run_dir = fluxcope_home.join("run");
         ensure_owner_only_directory(&run_dir)?;
         let path = run_dir.join(".registry-mutation.lock");
         let nofollow = (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32;
@@ -422,18 +422,18 @@ pub(crate) struct RegistryPublisher {
     socket_path: PathBuf,
     listener: Option<UnixListener>,
     published: bool,
-    wirelens_home: PathBuf,
+    fluxcope_home: PathBuf,
     cleanup_attempted: bool,
 }
 
 impl RegistryPublisher {
     pub(crate) fn prepare(
-        wirelens_home: &Path,
+        fluxcope_home: &Path,
         identity: InstanceIdentity,
         settings: &SettingsSession,
     ) -> io::Result<Self> {
-        let _scanner = RegistryScanner::initialize(wirelens_home)?;
-        let run_dir = wirelens_home.join("run");
+        let _scanner = RegistryScanner::initialize(fluxcope_home)?;
+        let run_dir = fluxcope_home.join("run");
         let instances_dir = run_dir.join("instances");
 
         let descriptor_path = instances_dir.join(descriptor_name(identity.proxy_endpoint()));
@@ -478,13 +478,13 @@ impl RegistryPublisher {
             socket_path,
             listener: Some(listener),
             published: false,
-            wirelens_home: wirelens_home.to_path_buf(),
+            fluxcope_home: fluxcope_home.to_path_buf(),
             cleanup_attempted: false,
         })
     }
 
     pub(crate) fn publish(&mut self) -> io::Result<()> {
-        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        let _mutation_lock = RegistryMutationLock::acquire(&self.fluxcope_home)?;
         let parent = self.descriptor_path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "descriptor path has no parent")
         })?;
@@ -568,9 +568,9 @@ impl RegistryPublisher {
         if expected.proxy_endpoint != self.identity.proxy_endpoint() {
             return Ok(false);
         }
-        let _mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        let _mutation_lock = RegistryMutationLock::acquire(&self.fluxcope_home)?;
         observer();
-        let scanner = RegistryScanner::new(&self.wirelens_home)?;
+        let scanner = RegistryScanner::new(&self.fluxcope_home)?;
         let current = match scanner.parse_descriptor(&self.descriptor_path) {
             Ok(descriptor) => descriptor,
             Err(_) => return Ok(false),
@@ -647,7 +647,7 @@ impl RegistryPublisher {
         if self.cleanup_attempted {
             return Ok(());
         }
-        let mutation_lock = RegistryMutationLock::acquire(&self.wirelens_home)?;
+        let mutation_lock = RegistryMutationLock::acquire(&self.fluxcope_home)?;
         self.cleanup_locked(mutation_lock, observer)
     }
 
@@ -664,7 +664,7 @@ impl RegistryPublisher {
             self.cleanup_attempted = true;
             return Ok(());
         }
-        let scanner = RegistryScanner::new(&self.wirelens_home)?;
+        let scanner = RegistryScanner::new(&self.fluxcope_home)?;
         let descriptor = match scanner.parse_descriptor(&self.descriptor_path) {
             Ok(descriptor) => descriptor,
             Err(_) => {
@@ -707,7 +707,7 @@ impl RegistryPublisher {
             self.cleanup_attempted = true;
             return;
         }
-        let Ok(mutation_lock) = RegistryMutationLock::try_acquire(&self.wirelens_home) else {
+        let Ok(mutation_lock) = RegistryMutationLock::try_acquire(&self.fluxcope_home) else {
             return;
         };
         let _ = self.cleanup_locked(mutation_lock, || {});
@@ -742,8 +742,8 @@ impl RegistryPublisher {
         &self.socket_path
     }
 
-    pub(crate) fn wirelens_home(&self) -> &Path {
-        &self.wirelens_home
+    pub(crate) fn fluxcope_home(&self) -> &Path {
+        &self.fluxcope_home
     }
     #[cfg(feature = "benchmark")]
     pub(crate) fn benchmark_disarm_cleanup(&mut self) {
@@ -764,20 +764,20 @@ pub(crate) struct RegistryScanner {
 }
 
 impl RegistryScanner {
-    pub(crate) fn initialize(wirelens_home: &Path) -> io::Result<Self> {
-        Self::initialize_internal(wirelens_home, || {})
+    pub(crate) fn initialize(fluxcope_home: &Path) -> io::Result<Self> {
+        Self::initialize_internal(fluxcope_home, || {})
     }
 
-    fn initialize_internal<O>(wirelens_home: &Path, observer: O) -> io::Result<Self>
+    fn initialize_internal<O>(fluxcope_home: &Path, observer: O) -> io::Result<Self>
     where
         O: FnMut(),
     {
-        ensure_owner_only_directory(wirelens_home)?;
-        let run_root = wirelens_home.join("run");
+        ensure_owner_only_directory(fluxcope_home)?;
+        let run_root = fluxcope_home.join("run");
         let instances_root = run_root.join("instances");
         ensure_owner_only_directory(&run_root)?;
         ensure_owner_only_directory(&instances_root)?;
-        let _mutation_lock = RegistryMutationLock::acquire(wirelens_home)?;
+        let _mutation_lock = RegistryMutationLock::acquire(fluxcope_home)?;
         ensure_registry_index(&instances_root)?;
         reconcile_registry_index(&run_root, &instances_root, observer)?;
         Self::new_from_run_root(&run_root)
@@ -785,17 +785,17 @@ impl RegistryScanner {
 
     #[cfg(test)]
     pub(crate) fn initialize_with_reconciliation_observer<O>(
-        wirelens_home: &Path,
+        fluxcope_home: &Path,
         observer: O,
     ) -> io::Result<Self>
     where
         O: FnMut(),
     {
-        Self::initialize_internal(wirelens_home, observer)
+        Self::initialize_internal(fluxcope_home, observer)
     }
 
-    pub(crate) fn new(wirelens_home: &Path) -> io::Result<Self> {
-        Self::new_from_run_root(&wirelens_home.join("run"))
+    pub(crate) fn new(fluxcope_home: &Path) -> io::Result<Self> {
+        Self::new_from_run_root(&fluxcope_home.join("run"))
     }
 
     fn new_from_run_root(run_root: &Path) -> io::Result<Self> {
@@ -867,14 +867,14 @@ impl RegistryScanner {
     where
         O: FnOnce(),
     {
-        let wirelens_home = self.run_root.parent().ok_or_else(|| {
+        let fluxcope_home = self.run_root.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "registry run root has no Wirelens home parent",
+                "registry run root has no Fluxcope home parent",
             )
         })?;
         let _mutation_lock =
-            RegistryMutationLock::acquire_until(wirelens_home, deadline, cancelled)?;
+            RegistryMutationLock::acquire_until(fluxcope_home, deadline, cancelled)?;
         if cancelled.is_cancelled() || Instant::now() >= deadline {
             return Ok(0);
         }

@@ -251,14 +251,14 @@ mod tests {
 
     #[test]
     fn default_config_lease_rejects_a_concurrent_process_until_release() -> io::Result<()> {
-        const CHILD_MARKER: &str = "WIRELENS_LEASE_CONTENTION_CHILD";
-        const ROOT_ENV: &str = "WIRELENS_LEASE_CONTENTION_ROOT";
+        const CHILD_MARKER: &str = "FLUXCOPE_LEASE_CONTENTION_CHILD";
+        const ROOT_ENV: &str = "FLUXCOPE_LEASE_CONTENTION_ROOT";
         if std::env::var_os(CHILD_MARKER).is_some() {
             let root = PathBuf::from(
                 std::env::var_os(ROOT_ENV)
                     .expect("lease contention child should receive its fixture root"),
             );
-            let lock_path = root.join(".wirelens/run/default-config.lock");
+            let lock_path = root.join(".fluxcope/run/default-config.lock");
             let _lease = DefaultConfigLease::acquire(&lock_path)?;
             fs::write(root.join("ready"), b"ready")?;
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -291,7 +291,7 @@ mod tests {
         child.wait_until_ready(&ready_path)?;
         let lock_path = temporary_home
             .path()
-            .join(".wirelens/run/default-config.lock");
+            .join(".fluxcope/run/default-config.lock");
 
         let error = DefaultConfigLease::acquire(&lock_path)
             .err()
@@ -309,15 +309,15 @@ mod tests {
     fn newly_created_lock_is_chmodded_to_0600_under_restrictive_umask() -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        const CHILD_MARKER: &str = "WIRELENS_RESTRICTIVE_UMASK_CHILD";
-        const ROOT_ENV: &str = "WIRELENS_RESTRICTIVE_UMASK_ROOT";
+        const CHILD_MARKER: &str = "FLUXCOPE_RESTRICTIVE_UMASK_CHILD";
+        const ROOT_ENV: &str = "FLUXCOPE_RESTRICTIVE_UMASK_ROOT";
         if std::env::var_os(CHILD_MARKER).is_some() {
             let root = PathBuf::from(
                 std::env::var_os(ROOT_ENV)
                     .expect("restrictive-umask child should receive its fixture root"),
             );
             let _umask = UmaskGuard::set(rustix::fs::Mode::from_bits_retain(0o200));
-            let lock_path = root.join(".wirelens/run/default-config.lock");
+            let lock_path = root.join(".fluxcope/run/default-config.lock");
 
             let _lease = DefaultConfigLease::acquire(&lock_path)?;
 
@@ -326,9 +326,9 @@ mod tests {
         }
 
         let temporary_home = tempfile::tempdir()?;
-        let wirelens_directory = temporary_home.path().join(".wirelens");
-        fs::create_dir(&wirelens_directory)?;
-        fs::set_permissions(&wirelens_directory, fs::Permissions::from_mode(0o700))?;
+        let fluxcope_directory = temporary_home.path().join(".fluxcope");
+        fs::create_dir(&fluxcope_directory)?;
+        fs::set_permissions(&fluxcope_directory, fs::Permissions::from_mode(0o700))?;
         let output = Command::new(std::env::current_exe()?)
             .args([
                 "--exact",

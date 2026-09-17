@@ -200,15 +200,18 @@ def smoke(binary: Path, version: str):
                 terminal.key(b'q')
                 terminal.finish()
             certificate_digest = hashlib.sha256(ca.read_bytes()).hexdigest()
-            log = (state / 'fluxcope.log').read_text()
+            logs = list((state / 'logs').glob('*.log'))
+            assert len(logs) == 1, 'expected one per-instance log'
+            log_path = logs[0]
+            log = log_path.read_text()
             match = re.search(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', log)
             assert match, 'CA download URL missing'
             # Restart checks persistence and the restricted CA download endpoint.
             with Terminal(binary, home) as terminal:
                 terminal.wait(lambda: ready(proxy) and b'\x1b[?1049h' in terminal.output, 'restart')
-                terminal.wait(lambda: len(re.findall(r'CA certificate download URL:', (state / 'fluxcope.log').read_text())) >= 2,
+                terminal.wait(lambda: len(re.findall(r'CA certificate download URL:', log_path.read_text())) >= 2,
                               'restart CA service')
-                matches = re.findall(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', (state / 'fluxcope.log').read_text())
+                matches = re.findall(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', log_path.read_text())
                 download_port = int(matches[-1])
                 status, pem = request(download_port, '/fluxcope-ca.pem')
                 assert status == 200 and pem == ca.read_bytes()

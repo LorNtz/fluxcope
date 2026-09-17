@@ -44,7 +44,7 @@ fn uri(
 fn content_template_is_the_exact_task_ten_rfc6570_template() {
     assert_eq!(
         CONTENT_RESOURCE_TEMPLATE,
-        "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}"
+        "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}"
     );
 }
 
@@ -63,7 +63,7 @@ fn resource_uri_round_trips_ipv6_endpoint_and_explicit_range_canonically() {
     assert_eq!(
         value.as_str(),
         format!(
-            "wirelens://[::1]:8989/runs/{RUN}/captures/0/revisions/3/bodies/response/content/decoded?offset=8192&length=4096"
+            "fluxcope://[::1]:8989/runs/{RUN}/captures/0/revisions/3/bodies/response/content/decoded?offset=8192&length=4096"
         )
     );
     assert_eq!(
@@ -75,7 +75,7 @@ fn resource_uri_round_trips_ipv6_endpoint_and_explicit_range_canonically() {
 #[test]
 fn parser_defaults_only_missing_offset_and_length() {
     let base = format!(
-        "wirelens://127.0.0.1:8989/runs/{RUN}/captures/0/revisions/3/bodies/request/content/raw"
+        "fluxcope://127.0.0.1:8989/runs/{RUN}/captures/0/revisions/3/bodies/request/content/raw"
     );
     let parsed = BodyResourceUri::parse(&base).expect("defaults");
     assert_eq!(parsed.capture_id(), CaptureSequence::new(0));
@@ -94,7 +94,7 @@ fn parser_defaults_only_missing_offset_and_length() {
 fn parser_accepts_the_full_canonical_capture_id_domain_including_zero() {
     for capture_id in [0_u64, 1, u64::MAX] {
         let value = format!(
-            "wirelens://127.0.0.1:8989/runs/{RUN}/captures/{capture_id}/revisions/0/bodies/request/content/raw"
+            "fluxcope://127.0.0.1:8989/runs/{RUN}/captures/{capture_id}/revisions/0/bodies/request/content/raw"
         );
         assert_eq!(
             BodyResourceUri::parse(&value)
@@ -108,10 +108,10 @@ fn parser_accepts_the_full_canonical_capture_id_domain_including_zero() {
 #[test]
 fn parser_rejects_noncanonical_authorities_paths_and_identity_segments() {
     let valid = format!(
-        "wirelens://127.0.0.1:8989/runs/{RUN}/captures/7/revisions/3/bodies/response/content/decoded"
+        "fluxcope://127.0.0.1:8989/runs/{RUN}/captures/7/revisions/3/bodies/response/content/decoded"
     );
     let invalid = [
-        valid.replacen("wirelens://", "http://", 1),
+        valid.replacen("fluxcope://", "http://", 1),
         valid.replacen("127.0.0.1:8989", "user@127.0.0.1:8989", 1),
         valid.replacen("127.0.0.1:8989", "localhost:8989", 1),
         valid.replacen("127.0.0.1:8989", "127.0.0.1", 1),
@@ -147,7 +147,7 @@ fn parser_rejects_noncanonical_authorities_paths_and_identity_segments() {
 #[test]
 fn parser_rejects_fragments_unknown_duplicate_malformed_and_invalid_query_values() {
     let base = format!(
-        "wirelens://127.0.0.1:8989/runs/{RUN}/captures/7/revisions/3/bodies/response/content/decoded"
+        "fluxcope://127.0.0.1:8989/runs/{RUN}/captures/7/revisions/3/bodies/response/content/decoded"
     );
     let invalid = [
         format!("{base}#fragment"),
@@ -245,7 +245,7 @@ fn raw_resource_base64_encodes_only_the_already_sliced_page_and_emits_exact_meta
     assert!(value.get("text").is_none());
     assert_eq!(value["mimeType"], json!("text/plain; charset=utf-8"));
     assert_eq!(
-        value["_meta"]["wirelens"],
+        value["_meta"]["fluxcope"],
         json!({
             "requested_range": {"offset": 1, "length": 2},
             "actual_range": {"offset": 1, "length": 2},
@@ -283,11 +283,11 @@ fn decoded_utf8_is_text_with_retained_mime_and_decoded_binary_is_blob() {
     assert_eq!(text["mimeType"], json!("text/plain; charset=utf-8"));
     assert!(text.get("blob").is_none());
     assert_eq!(
-        text["_meta"]["wirelens"]["decoded_encoding_chain"],
+        text["_meta"]["fluxcope"]["decoded_encoding_chain"],
         json!(["gzip"])
     );
     assert_eq!(
-        text["_meta"]["wirelens"]["decoded_output_limited"],
+        text["_meta"]["fluxcope"]["decoded_output_limited"],
         json!(true)
     );
 

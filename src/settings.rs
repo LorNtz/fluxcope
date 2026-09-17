@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::{cli::ConfigSelection, instance::DefaultConfigLease};
+use tempfile::NamedTempFile;
 
 const DEFAULT_PROXY_PORT: u16 = 8989;
 const DEFAULT_CERTIFICATE_STORE_DIR: &str = "~/.fluxcope/certificate/";
@@ -640,24 +641,14 @@ fn prepare_settings_temporary(path: &Path, settings: &AppSettings) -> io::Result
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(directory)?;
+    crate::private_fs::ensure_directory(directory)?;
     let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
     if let Some(mut previous) = read_yaml_value(path)? {
         let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
         preserve_semantic_noop_entries(&mut value, &previous, settings)?;
     }
     let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
-    let mut temporary = NamedTempFile::new_in(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    temporary.write_all(content.as_bytes())?;
-    temporary.as_file().sync_all()?;
-    Ok(temporary)
+    crate::private_fs::prepare_file(path, content.as_bytes())
 }
 
 pub struct SettingsManager {
@@ -771,20 +762,10 @@ impl SettingsManager {
     }
 }
 fn write_settings_atomically(path: &Path, settings: &AppSettings) -> io::Result<()> {
-    let directory = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    crate::private_fs::ensure_directory(directory)?;
-
-    let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
-    if let Some(mut previous) = read_yaml_value(path)? {
-        let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
-        preserve_semantic_noop_entries(&mut value, &previous, settings)?;
-    }
-    let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
-
-    crate::private_fs::write_file(path, content.as_bytes())
+    prepare_settings_temporary(path, settings)?
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 #[cfg(feature = "benchmark")]
@@ -799,7 +780,7 @@ fn default_config_path() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".fluxcope/config.yml"))
 }
 fn default_config_lock_path() -> io::Result<PathBuf> {
-    Ok(home_dir()?.join(".wirelens/run/default-config.lock"))
+    Ok(home_dir()?.join(".fluxcope/run/default-config.lock"))
 }
 
 fn reject_default_config_symlink(path: &Path) -> io::Result<()> {

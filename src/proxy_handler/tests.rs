@@ -66,7 +66,7 @@ impl Harness {
 async fn proxy_preserves_both_body_byte_streams_and_records_real_timing_order() {
     let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
     let request_bytes = b"request-one-request-two-request-three";
-    let request_body = Body::wrap_stream(futures::stream::iter(vec![
+    let request_body = Body::from_stream(futures::stream::iter(vec![
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-one-")),
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-two-")),
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-three")),
@@ -81,14 +81,14 @@ async fn proxy_preserves_both_body_byte_streams_and_records_real_timing_order() 
         RequestOrResponse::Response(_) => panic!("request should be forwarded"),
     };
     let after_start = Utc::now();
-    let forwarded_request_bytes = hudsucker::hyper::body::to_bytes(forwarded_request.into_body())
+    let forwarded_request_bytes = crate::capture::body_bytes(forwarded_request.into_body())
         .await
         .expect("request body should forward");
     assert_eq!(forwarded_request_bytes.as_ref(), request_bytes);
 
     tokio::time::sleep(Duration::from_millis(2)).await;
     let response_bytes = b"response-one-response-two-response-three";
-    let response_body = Body::wrap_stream(futures::stream::iter(vec![
+    let response_body = Body::from_stream(futures::stream::iter(vec![
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-one-")),
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-two-")),
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-three")),
@@ -96,7 +96,7 @@ async fn proxy_preserves_both_body_byte_streams_and_records_real_timing_order() 
     let forwarded_response = harness
         .handler
         .capture_response(Response::new(response_body));
-    let forwarded_response_bytes = hudsucker::hyper::body::to_bytes(forwarded_response.into_body())
+    let forwarded_response_bytes = crate::capture::body_bytes(forwarded_response.into_body())
         .await
         .expect("response body should forward");
     assert_eq!(forwarded_response_bytes.as_ref(), response_bytes);

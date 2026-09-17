@@ -172,3 +172,68 @@ Date: 2026/09/17 10:42
 Date: 2026/09/17 10:43
 
 - Integrated legacy CA permissions migration through master private_fs::open_file, which validates ownership/link safety and chmods the same opened file to 0600 before reading. Retained the feature regression checking unchanged certificate/key bytes after migration.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:48
+
+- Completed settings integration: restored NamedTempFile/Write imports required by revision-safe prepared commits, applied master private-directory validation to the shared preparation path, removed duplicate serialization/atomic-write logic, and moved the default settings lease into ~/.fluxcope.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:50
+
+- Reconciled Cargo.lock against the master baseline while retaining rmcp and rmcp-macros 3.1.4 together; preserved master Hudsucker 0.25, Hyper 1 and rustls 0.23.45 rather than downgrading network security dependencies.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:50
+
+- CLI integration: src/main.rs now delegates to the single feature parser and exits through downcast clap::Error::exit(), preserving stdout/exit-0 help/version and stderr/exit-2 usage errors without changing exported run_from. src/cli.rs carries canonical Fluxcope name plus Cargo version/about and upstream settings/network safety help. Owned integration tests now target fluxcope binary/state/URI/meta/audit names and FluxcopeProcess helpers; added installed-binary help/version/no-HOME and clap usage-error regressions. Body fragmentation/timing tests migrated only stream construction/collection to Body::from_stream and crate::capture::body_bytes, preserving assertions. No builds/tests/formatters run per concurrent-validation contract.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:51
+
+- FluxcopeNamespace: applied clean-cutover branding across 33 owned Rust files and benchmark support. Renamed instance home helpers to fluxcope_home_dir/fluxcope_home_from_env and home accessors/locals to fluxcope_home; registry/test roots now .fluxcope. Public/private status DTOs and JSON fixtures now fluxcope_version. Body URI producers, strict parsers, templates, fixtures and _meta metadata now fluxcope:// and fluxcope. Broker/prompts/client identifiers, runtime probe identity (fluxcope-runtime; suffix semantics preserved), audit target fluxcope::mcp_audit, CA fixture PEM names, test env markers and benchmark messages updated. Private RPC/schema versions, tool names, capture semantics and non-owned files untouched. AST helper rename applied, remaining mixed identifiers/literals/comments changed with anchored edits. No validation/build/tests/formatters run per integration ownership.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:51
+
+- Updated the upstream release smoke harness to consume the per-instance log directory instead of obsolete single fluxcope.log; retained its HTTP forwarding, remote mapping, HTTPS MITM/local mapping, CA persistence/download, filesystem permissions, TUI and port-conflict checks. Documented the source-build MCP CLI and namespace in README and Unreleased changelog.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 10:54
+
+- The all-feature regression run exposed a test assumption incompatible with master permission repair. Retained master behavior, changed failed-write preservation coverage to an unsafe hard-linked configuration, and added a regression proving owner-directory repair preserves private modes and persisted settings.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:01
+
+- Added targeted CA regressions for preparation failure leaving no published partial authority and for explicit 0600 output permissions/reload under an isolated restrictive-umask child process. These cover both design-review findings before implementation fixes.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:03
+
+- Aligned isolated CA umask regression with the existing rustix::process::umask test convention after compiler diagnostics identified the incorrect module path.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:04
+
+- Fixed both reproduced CA regressions: shared private_fs::prepare_file validates the destination, explicitly sets 0600, writes and syncs a temporary file without publication; CA prepares all three outputs before any persist. Settings prepared commits reuse the same primitive, removing duplicated I/O and obsolete immediate-write helper. Both targeted regressions failed before this fix.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:06
+
+- Both CA regressions now pass. Independent design and performance reviewers confirmed the staging/permissions fixes and shared settings preparation preserve intended guarantees without new findings. Completed the Fluxcope naming cutover and public CLI/docs integration; final full verification follows.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:08
+
+- All-feature tests passed after CA fixes. Resolved Rust 1.98 clippy result_large_err in the test-only broker serve helper by boxing its large SDK initialization error on failure; preserved full diagnostics and production behavior.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:09
+
+- Addressed remaining Rust 1.98 integration lints: used inspect_err for CLI diagnostic side effects without altering Clap exit behavior, and removed a stale benchmark Method import left by the merge. The isolated MCP proxy exited cleanly with q and exit status 0.
+
+### Fluxcope rebase: integration change
+Date: 2026/09/17 11:11
+
+- Final verification passed: cargo test --all-features --locked; cargo clippy --all-targets --all-features --locked -- -D warnings; cargo fmt --check; upstream release smoke including HTTP/HTTPS, CA persistence/download, private-state permissions, TUI shutdown/occupied-port behavior; release metadata validation. Live renamed MCP smoke verified 25 tools, isolated preview, stale revision rejection, preserved rules, a 153467-byte whole-response comparison and fluxcope:///_meta.fluxcope. Both reviewers accepted the fixes. All 17 preserved user files remain hash-identical before restoration; recovery ref backup/embedded-mcp-server-pre-fluxcope-rebase-20260917 retained.

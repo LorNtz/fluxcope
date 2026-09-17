@@ -187,7 +187,7 @@ fn read_only_file_commit_updates_memory_without_writing() -> io::Result<()> {
 
 #[test]
 fn temporary_commit_is_memory_only_and_creates_no_config_file() -> io::Result<()> {
-    const CHILD_MARKER: &str = "WIRELENS_TEMPORARY_SETTINGS_CHILD";
+    const CHILD_MARKER: &str = "FLUXCOPE_TEMPORARY_SETTINGS_CHILD";
     if std::env::var_os(CHILD_MARKER).is_some() {
         let mut session = SettingsSession::load(&ConfigSelection::Temporary {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -219,13 +219,13 @@ fn temporary_commit_is_memory_only_and_creates_no_config_file() -> io::Result<()
         "temporary settings child failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!home.path().join(".wirelens").exists());
+    assert!(!home.path().join(".fluxcope").exists());
     Ok(())
 }
 
 #[test]
 fn default_owned_session_persists_under_an_isolated_home() -> io::Result<()> {
-    const CHILD_MARKER: &str = "WIRELENS_DEFAULT_SETTINGS_CHILD";
+    const CHILD_MARKER: &str = "FLUXCOPE_DEFAULT_SETTINGS_CHILD";
     if std::env::var_os(CHILD_MARKER).is_some() {
         let mut session = SettingsSession::load(&ConfigSelection::DefaultOwned)
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -254,7 +254,7 @@ fn default_owned_session_persists_under_an_isolated_home() -> io::Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     let saved: AppSettings = serde_yaml::from_str(&fs::read_to_string(
-        home.path().join(".wirelens/config.yml"),
+        home.path().join(".fluxcope/config.yml"),
     )?)
     .map_err(yaml_error)?;
     assert_eq!(saved.server.port, 9101);
@@ -263,7 +263,7 @@ fn default_owned_session_persists_under_an_isolated_home() -> io::Result<()> {
 #[cfg(unix)]
 #[test]
 fn default_owned_rejects_symlink_config_without_touching_target() -> io::Result<()> {
-    const CHILD_MARKER: &str = "WIRELENS_SYMLINK_SETTINGS_CHILD";
+    const CHILD_MARKER: &str = "FLUXCOPE_SYMLINK_SETTINGS_CHILD";
     if std::env::var_os(CHILD_MARKER).is_some() {
         let error = SettingsSession::load(&ConfigSelection::DefaultOwned)
             .err()
@@ -276,12 +276,12 @@ fn default_owned_rejects_symlink_config_without_touching_target() -> io::Result<
     }
 
     let home = tempfile::tempdir()?;
-    let wirelens_directory = home.path().join(".wirelens");
-    fs::create_dir_all(&wirelens_directory)?;
+    let fluxcope_directory = home.path().join(".fluxcope");
+    fs::create_dir_all(&fluxcope_directory)?;
     let target = home.path().join("symlink-target.yml");
     let original = "server:\n  port: 9120\n";
     fs::write(&target, original)?;
-    let config = wirelens_directory.join("config.yml");
+    let config = fluxcope_directory.join("config.yml");
     std::os::unix::fs::symlink(&target, &config)?;
     let output = Command::new(std::env::current_exe()?)
         .args([
@@ -323,7 +323,7 @@ fn persistent_update_atomically_replaces_the_config_file() -> io::Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn failed_atomic_update_preserves_file_and_memory() -> io::Result<()> {
+fn hardlinked_config_update_preserves_file_and_memory() -> io::Result<()> {
     let path = temp_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -331,19 +331,34 @@ fn failed_atomic_update_preserves_file_and_memory() -> io::Result<()> {
     fs::write(&path, "server:\n  port: 9000\n")?;
     let mut manager = SettingsManager::load_from_path(&path)?;
     let previous_file = fs::read_to_string(&path)?;
-    let parent = path
-        .parent()
-        .expect("temporary config path should have a parent");
-    let _permissions = DirectoryPermissionsGuard::make_read_only(parent)?;
+    let alias = path.with_file_name("linked-config.yml");
+    fs::hard_link(&path, &alias)?;
 
     let result = manager.set_server_port(9103);
 
     assert!(
         result.is_err(),
-        "read-only directory must reject replacement"
+        "hard-linked configuration must reject replacement"
     );
     assert_eq!(manager.server_port(), 9000);
     assert_eq!(fs::read_to_string(&path)?, previous_file);
+    assert_eq!(fs::read_to_string(alias)?, previous_file);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn persistent_update_repairs_owned_directory_permissions() -> io::Result<()> {
+    let path = temp_config_path();
+    let mut manager = SettingsManager::load_from_path(&path)?;
+    let parent = path.parent().expect("temporary config parent");
+    let _permissions = DirectoryPermissionsGuard::make_read_only(parent)?;
+
+    manager.set_server_port(9103)?;
+
+    assert_eq!(fs::metadata(parent)?.permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(SettingsManager::load_from_path(&path)?.server_port(), 9103);
     Ok(())
 }
 
@@ -383,7 +398,7 @@ fn ephemeral_prepared_commit_never_writes_and_has_explicit_phases() -> io::Resul
 #[cfg(unix)]
 #[test]
 fn persistent_prepare_does_not_replace_target_before_commit() -> io::Result<()> {
-    const CHILD_MARKER: &str = "WIRELENS_PREPARED_SETTINGS_CHILD";
+    const CHILD_MARKER: &str = "FLUXCOPE_PREPARED_SETTINGS_CHILD";
     if std::env::var_os(CHILD_MARKER).is_some() {
         let session = SettingsSession::load(&ConfigSelection::DefaultOwned)
             .map_err(|error| io::Error::other(error.to_string()))?;

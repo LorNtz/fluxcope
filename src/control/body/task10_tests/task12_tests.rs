@@ -16,9 +16,9 @@ use crate::{
 };
 
 const RUN_ID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
-const DECODED_URI: &str = "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/content/decoded";
-const RAW_URI: &str = "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/content/raw";
-const JSON_SELECTION_URI: &str = "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fvalue";
+const DECODED_URI: &str = "fluxcope://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/content/decoded";
+const RAW_URI: &str = "fluxcope://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/content/raw";
+const JSON_SELECTION_URI: &str = "fluxcope://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fvalue";
 
 fn not_cancelled() -> AtomicBool {
     AtomicBool::new(false)
@@ -171,7 +171,7 @@ fn extract_capture_body_preserves_repeated_form_utf8_values_in_order() {
         b"city=%E9%9B%AA&ignored=private&city=&city=Stra%C3%9Fe&city=a+b",
         Some("application/x-www-form-urlencoded"),
         &ExtractSelector::FormField { key: "city".to_owned() },
-        "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/form-field?key=city",
+        "fluxcope://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/form-field?key=city",
         &not_cancelled(),
     )
     .expect("form extraction");
@@ -208,7 +208,7 @@ fn extract_capture_body_inlines_4096_bytes_and_pages_4097_bytes() {
             assert_eq!(
                 result.resource_uri.as_deref(),
                 Some(
-                    "wirelens://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fvalue&offset=0&length=8192"
+                    "fluxcope://127.0.0.1:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fvalue&offset=0&length=8192"
                 )
             );
         }
@@ -217,7 +217,7 @@ fn extract_capture_body_inlines_4096_bytes_and_pages_4097_bytes() {
 
 #[test]
 fn selection_uri_is_canonical_and_round_trips_ipv6_and_encoded_pointer() {
-    let uri = "wirelens://[2001:db8::1]:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fa%7E1b%2F%E9%9B%AA&offset=0&length=8192";
+    let uri = "fluxcope://[2001:db8::1]:8080/runs/AAAAAAAAAAAAAAAAAAAAAA/captures/9/revisions/3/bodies/response/extract/json-pointer?pointer=%2Fa%7E1b%2F%E9%9B%AA&offset=0&length=8192";
     let parsed = parse_selection_resource_uri(uri).expect("canonical selection URI");
 
     assert_eq!(

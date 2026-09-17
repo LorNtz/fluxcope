@@ -347,7 +347,7 @@ impl SelectionResourceRequest {
             .append_pair("length", &self.length.to_string())
             .finish();
         Ok(format!(
-            "wirelens://{}/runs/{}/captures/{capture_id}/revisions/{}/bodies/{side}/extract/{path_kind}?{query}",
+            "fluxcope://{}/runs/{}/captures/{capture_id}/revisions/{}/bodies/{side}/extract/{path_kind}?{query}",
             self.proxy_endpoint, self.run_id, self.capture_revision
         ))
     }
@@ -387,7 +387,7 @@ pub(crate) fn content_resource_base_uri(
         BodyRepresentation::Decoded => "decoded",
     };
     format!(
-        "wirelens://{}/runs/{}/captures/{}/revisions/{capture_revision}/bodies/{side}/content/{representation}",
+        "fluxcope://{}/runs/{}/captures/{}/revisions/{capture_revision}/bodies/{side}/content/{representation}",
         instance.proxy_endpoint,
         instance.run_id,
         capture_id.value(),
@@ -398,7 +398,7 @@ pub(crate) fn parse_selection_resource_uri(
     raw: &str,
 ) -> Result<SelectionResourceRequest, ControlError> {
     let remainder = raw
-        .strip_prefix("wirelens://")
+        .strip_prefix("fluxcope://")
         .ok_or_else(|| invalid_selection_uri("selection resource URI is malformed"))?;
     let (authority, path_and_query) = remainder
         .split_once('/')
@@ -417,7 +417,7 @@ pub(crate) fn parse_selection_resource_uri(
     }
     let url = Url::parse(raw)
         .map_err(|_| invalid_selection_uri("selection resource URI is malformed"))?;
-    if url.scheme() != "wirelens"
+    if url.scheme() != "fluxcope"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()

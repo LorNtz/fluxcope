@@ -192,7 +192,7 @@ pub(crate) fn benchmark_format_endpoint_records(count: usize, payload_bytes: usi
             let arguments = format_args!("endpoint=127.0.0.1:8989 index={index} {payload}");
             let record = Record::builder()
                 .level(Level::Info)
-                .target("wirelens::proxy")
+                .target("fluxcope::proxy")
                 .args(arguments)
                 .build();
             logger.format_record(&record).len()

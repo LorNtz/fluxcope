@@ -196,12 +196,12 @@ async fn thousands_of_tiny_fragments_preserve_forwarding_and_preview_byte_order(
     let record = capture_rx.recv().await.expect("capture published");
     let shutdown = CancellationToken::new();
     let tasks = BodyTaskTracker::new(shutdown.clone());
-    let source = Body::wrap_stream(futures::stream::iter(
+    let source = Body::from_stream(futures::stream::iter(
         fragments.into_iter().map(Ok::<Bytes, io::Error>),
     ));
     let destination = tee_body(source, capture, BodySide::Response, &tasks);
 
-    let forwarded = hyper::body::to_bytes(destination)
+    let forwarded = crate::capture::body_bytes(destination)
         .await
         .expect("all fragments should forward");
     let snapshot = record.snapshot(CaptureSnapshotMode::WithBodyPreviews);

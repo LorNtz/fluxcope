@@ -56,7 +56,7 @@ impl ControlRpcHandler for BenchmarkHandler {
             ControlOperation::GetStatus => Ok(ControlResult::GetStatus {
                 instance: self.instance.clone(),
                 local_proxy_url: format!("http://{}", self.instance.proxy_endpoint),
-                wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
+                fluxcope_version: env!("CARGO_PKG_VERSION").to_owned(),
                 rpc_version: crate::control_rpc::protocol::RPC_VERSION,
                 config_source: None,
                 config_mode: self.config_mode,
@@ -106,7 +106,7 @@ impl LiveInstanceFixture {
             .to_string()
     }
 
-    pub fn wirelens_home(&self) -> &std::path::Path {
+    pub fn fluxcope_home(&self) -> &std::path::Path {
         self.home.path()
     }
 }

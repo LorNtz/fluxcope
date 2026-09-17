@@ -11,12 +11,11 @@
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use std::{sync::Arc, time::Duration};
 use fluxcope::{
     benchmark_support as support,
     capture::{CaptureSequence, CapturedExchange},
 };
-use hyper::Method;
+use std::{sync::Arc, time::Duration};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
@@ -409,7 +408,7 @@ fn bench_legacy_regressions(c: &mut Criterion) {
 
 fn benchmarks(c: &mut Criterion) {
     if cfg!(debug_assertions) {
-        eprintln!("Wirelens Criterion benchmarks must run with `cargo bench --features benchmark`");
+        eprintln!("Fluxcope Criterion benchmarks must run with `cargo bench --features benchmark`");
         return;
     }
     bench_capture_store_and_tree(c);

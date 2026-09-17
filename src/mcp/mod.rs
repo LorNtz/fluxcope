@@ -26,10 +26,10 @@ pub(crate) async fn run_stdio() -> anyhow::Result<()> {
     use rmcp::ServiceExt as _;
     use tokio_util::sync::CancellationToken;
 
-    let wirelens_home = crate::instance::wirelens_home_dir()
-        .context("failed to resolve Wirelens home directory")?;
-    let broker = broker::Broker::new(&wirelens_home)
-        .context("failed to open the Wirelens instance registry")?;
+    let fluxcope_home = crate::instance::fluxcope_home_dir()
+        .context("failed to resolve Fluxcope home directory")?;
+    let broker = broker::Broker::new(&fluxcope_home)
+        .context("failed to open the Fluxcope instance registry")?;
     let cancelled = CancellationToken::new();
     let (broker, transport) = stdio::session(
         broker,

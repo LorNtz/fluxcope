@@ -177,7 +177,7 @@ async fn execute(
     let transport = ClientTransport::new(reader, writer, state.clone());
     let info = ClientInfo::new(
         ClientCapabilities::default(),
-        Implementation::new("wirelens-cli", env!("CARGO_PKG_VERSION")),
+        Implementation::new("fluxcope-cli", env!("CARGO_PKG_VERSION")),
     );
     let operation = async {
         let client = info.serve(transport).await.map_err(|error| {

@@ -144,13 +144,13 @@ pub(crate) fn local_proxy_url(endpoint: SocketAddr) -> String {
     format!("http://{}", SocketAddr::new(connect_ip, endpoint.port()))
 }
 
-pub(crate) fn wirelens_home_dir() -> io::Result<PathBuf> {
-    wirelens_home_from_env(std::env::var_os("HOME").as_deref())
+pub(crate) fn fluxcope_home_dir() -> io::Result<PathBuf> {
+    fluxcope_home_from_env(std::env::var_os("HOME").as_deref())
 }
 
-pub(crate) fn wirelens_home_from_env(home: Option<&OsStr>) -> io::Result<PathBuf> {
+pub(crate) fn fluxcope_home_from_env(home: Option<&OsStr>) -> io::Result<PathBuf> {
     home.map(PathBuf::from)
-        .map(|path| path.join(".wirelens"))
+        .map(|path| path.join(".fluxcope"))
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

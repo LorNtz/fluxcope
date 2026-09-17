@@ -188,7 +188,7 @@ pub(crate) trait InstanceProbe: Send + Sync + 'static {
                             settings_revision,
                         } => Ok(ControlResult::GetStatus {
                             local_proxy_url: format!("http://{}", instance.proxy_endpoint),
-                            wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
+                            fluxcope_version: env!("CARGO_PKG_VERSION").to_owned(),
                             rpc_version: RPC_VERSION,
                             config_source: descriptor
                                 .config_source()
@@ -360,7 +360,10 @@ impl Broker {
     async fn serve<T, E, A>(
         self,
         transport: T,
-    ) -> Result<rmcp::service::RunningService<RoleServer, Self>, rmcp::service::ServerInitializeError>
+    ) -> Result<
+        rmcp::service::RunningService<RoleServer, Self>,
+        Box<rmcp::service::ServerInitializeError>,
+    >
     where
         T: rmcp::transport::IntoTransport<RoleServer, E, A>,
         E: std::error::Error + Send + Sync + 'static,
@@ -370,7 +373,9 @@ impl Broker {
             rmcp::transport::IntoTransport::into_transport(transport),
             cancelled.clone(),
         );
-        rmcp::ServiceExt::serve_with_ct(self, transport, cancelled).await
+        rmcp::ServiceExt::serve_with_ct(self, transport, cancelled)
+            .await
+            .map_err(Box::new)
     }
 }
 
@@ -396,10 +401,10 @@ fn empty_tool_schema() -> Arc<rmcp::model::JsonObject> {
 
 #[tool_router(router = tool_router)]
 impl Broker {
-    pub(crate) fn new(wirelens_home: &Path) -> io::Result<Self> {
-        let registry = Arc::new(RegistryScanner::initialize(wirelens_home)?);
+    pub(crate) fn new(fluxcope_home: &Path) -> io::Result<Self> {
+        let registry = Arc::new(RegistryScanner::initialize(fluxcope_home)?);
         Ok(Self::with_dependencies(
-            wirelens_home.join("run").join("instances"),
+            fluxcope_home.join("run").join("instances"),
             registry,
             Arc::new(ControlRpcProbe),
         ))
@@ -462,7 +467,7 @@ impl Broker {
             selector,
             requirement,
             DeclaredClient {
-                name: "wirelens-internal".to_owned(),
+                name: "fluxcope-internal".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             deadline,
@@ -1680,7 +1685,7 @@ impl Broker {
 
     #[tool(
         name = "list_instances",
-        description = "List live MCP-enabled Wirelens proxy instances",
+        description = "List live MCP-enabled Fluxcope proxy instances",
         input_schema = empty_tool_schema(),
         annotations(
             read_only_hint = true,
@@ -1707,7 +1712,7 @@ impl Broker {
 
     #[tool(
         name = "get_broker_status",
-        description = "Get bounded Wirelens broker discovery and transport status",
+        description = "Get bounded Fluxcope broker discovery and transport status",
         input_schema = empty_tool_schema(),
         annotations(
             read_only_hint = true,
@@ -1734,7 +1739,7 @@ impl Broker {
 
     #[tool(
         name = "get_status",
-        description = "Get authoritative identity, configuration, recording, mapping, capture-store, worker-resource, metric, warning, and bounded audit status for one Wirelens instance",
+        description = "Get authoritative identity, configuration, recording, mapping, capture-store, worker-resource, metric, warning, and bounded audit status for one Fluxcope instance",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1762,7 +1767,7 @@ impl Broker {
 
     #[tool(
         name = "set_recording_enabled",
-        description = "Explicitly enable or disable live recording for one Wirelens instance",
+        description = "Explicitly enable or disable live recording for one Fluxcope instance",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2389,7 +2394,7 @@ impl ServerHandler for Broker {
                 .enable_prompts()
                 .build(),
         )
-        .with_server_info(Implementation::new("wirelens", env!("CARGO_PKG_VERSION")))
+        .with_server_info(Implementation::new("fluxcope", env!("CARGO_PKG_VERSION")))
         .with_protocol_version(ProtocolVersion::LATEST)
         .with_instructions(
             "Use list_instances first and select an explicit instance when more than one is live.",
@@ -2508,7 +2513,7 @@ fn instance_summary(resolved: ResolvedInstance) -> Result<InstanceSummary, Contr
         },
         local_proxy_url: descriptor.local_proxy_url().to_owned(),
         started_at: descriptor.started_at().to_rfc3339(),
-        wirelens_version: descriptor.binary_version().to_owned(),
+        fluxcope_version: descriptor.binary_version().to_owned(),
         rpc_version: RPC_VERSION,
         config_mode,
         persistence,
@@ -2551,7 +2556,7 @@ fn status_result(result: ControlResult) -> Result<GetStatusResult, ControlError>
     let ControlResult::GetStatus {
         instance,
         local_proxy_url,
-        wirelens_version,
+        fluxcope_version,
         rpc_version,
         config_source,
         config_mode,
@@ -2583,7 +2588,7 @@ fn status_result(result: ControlResult) -> Result<GetStatusResult, ControlError>
             run_id: Some(instance.run_id),
         },
         local_proxy_url,
-        wirelens_version,
+        fluxcope_version,
         rpc_version,
         config_source,
         config_mode,
@@ -3140,7 +3145,7 @@ mod tests {
             "local_proxy_url": format!("http://{endpoint}"),
             "run_id": run_id,
             "started_at": "2026-08-24T00:00:00Z",
-            "socket_path": format!("/tmp/wirelens-mcp-{port}.sock"),
+            "socket_path": format!("/tmp/fluxcope-mcp-{port}.sock"),
             "config_mode": "temporary",
             "persistence": "ephemeral",
             "config_source": null
@@ -3176,7 +3181,7 @@ mod tests {
 
     fn broker(registry: Arc<FakeRegistry>, probe: Arc<FakeProbe>) -> Broker {
         Broker::with_dependencies(
-            PathBuf::from("/test/.wirelens/run/instances"),
+            PathBuf::from("/test/.fluxcope/run/instances"),
             registry,
             probe,
         )
@@ -3698,7 +3703,7 @@ mod tests {
             RUN_A
         );
         assert_eq!(listed.local_proxy_url, "http://127.0.0.1:19001");
-        assert_eq!(listed.wirelens_version, "9.8.7-test");
+        assert_eq!(listed.fluxcope_version, "9.8.7-test");
         assert_eq!(listed.rpc_version, RPC_VERSION);
         assert_eq!(listed.config_mode, ConfigMode::Temporary);
         assert_eq!(listed.persistence, PersistenceMode::Ephemeral);
@@ -3843,7 +3848,7 @@ mod tests {
             vec![ProbeCall {
                 endpoint: target.proxy_endpoint(),
                 client: DeclaredClient {
-                    name: "wirelens-internal".to_owned(),
+                    name: "fluxcope-internal".to_owned(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
             }]
@@ -3936,7 +3941,7 @@ mod tests {
             started: AtomicUsize::new(0),
         });
         let broker = Broker::with_dependencies(
-            PathBuf::from("/test/.wirelens/run/instances"),
+            PathBuf::from("/test/.fluxcope/run/instances"),
             Arc::clone(&registry),
             FakeProbe::live(&[]),
         );
@@ -4002,7 +4007,7 @@ mod tests {
         let probe = FakeProbe::live(std::slice::from_ref(&stale));
         probe.mark_stale_connect(stale.proxy_endpoint());
         let broker = Broker::with_dependencies(
-            PathBuf::from("/test/.wirelens/run/instances"),
+            PathBuf::from("/test/.fluxcope/run/instances"),
             Arc::clone(&registry),
             probe,
         );
@@ -4044,7 +4049,7 @@ mod tests {
         let probe = FakeProbe::live(std::slice::from_ref(&stale));
         probe.mark_stale_connect(stale.proxy_endpoint());
         let broker = Broker::with_dependencies(
-            PathBuf::from("/test/.wirelens/run/instances"),
+            PathBuf::from("/test/.fluxcope/run/instances"),
             Arc::clone(&registry),
             probe,
         );
@@ -4286,7 +4291,7 @@ mod tests {
                 let second = descriptor(19802, RUN_B);
                 let registry = FakeRegistry::new(vec![first.clone(), second.clone()]);
                 let broker = Broker::with_dependencies(
-                    PathBuf::from("/test/.wirelens/run/instances"),
+                    PathBuf::from("/test/.fluxcope/run/instances"),
                     registry,
                     Arc::new(CaptureProbe),
                 );

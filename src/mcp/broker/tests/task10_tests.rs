@@ -138,7 +138,7 @@ impl InstanceProbe for BodyProbe {
 
 fn body_broker(probe: Arc<BodyProbe>) -> Broker {
     Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![probe.descriptor.clone()]),
         probe,
     )
@@ -203,7 +203,7 @@ async fn get_capture_returns_selected_revision_side_links_that_are_readable_cons
     assert_eq!(value["capture"]["capture_sequence"], json!(0));
     assert_eq!(value["capture"]["capture_revision"], json!(0));
     let first = format!(
-        "wirelens://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/request/content/raw?offset=0&length=8192"
+        "fluxcope://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/request/content/raw?offset=0&length=8192"
     );
     assert_eq!(value["body_resources"]["request"]["raw"], first);
     assert_eq!(
@@ -291,7 +291,7 @@ async fn resource_resolution_requires_the_exact_endpoint_generation_without_reta
     });
     let (client, server) = client_for(body_broker(probe)).await;
     let stale_uri = format!(
-        "wirelens://127.0.0.1:19010/runs/{RUN_B}/captures/0/revisions/0/bodies/request/content/raw?offset=0&length=8192"
+        "fluxcope://127.0.0.1:19010/runs/{RUN_B}/captures/0/revisions/0/bodies/request/content/raw?offset=0&length=8192"
     );
     let error = client
         .read_resource(ReadResourceRequestParams::new(stale_uri))
@@ -333,7 +333,7 @@ async fn resource_read_maps_expected_control_errors_to_stable_json_rpc_error_dat
     });
     let (client, server) = client_for(body_broker(probe)).await;
     let uri = format!(
-        "wirelens://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/response/content/decoded?offset=0&length=8192"
+        "fluxcope://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/response/content/decoded?offset=0&length=8192"
     );
     let error = client
         .read_resource(ReadResourceRequestParams::new(uri))
@@ -401,13 +401,13 @@ async fn broker_disconnect_cancels_an_in_flight_private_body_read() {
         saw_cancel: Arc::new(AtomicBool::new(false)),
     });
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![descriptor]),
         Arc::clone(&probe),
     );
     let (client, server) = client_for(broker).await;
     let uri = format!(
-        "wirelens://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/response/content/decoded?offset=0&length=8192"
+        "fluxcope://127.0.0.1:19010/runs/{RUN_A}/captures/0/revisions/0/bodies/response/content/decoded?offset=0&length=8192"
     );
     let peer = client.peer().clone();
     let read = tokio::spawn(async move {

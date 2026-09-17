@@ -16,8 +16,8 @@ pub(crate) enum LoggingStatus {
     Degraded(String),
 }
 
-pub(crate) fn endpoint_log_path(wirelens_home: &Path, endpoint: SocketAddr) -> PathBuf {
-    wirelens_home
+pub(crate) fn endpoint_log_path(fluxcope_home: &Path, endpoint: SocketAddr) -> PathBuf {
+    fluxcope_home
         .join("logs")
         .join(format!("{}.log", endpoint_hash(endpoint)))
 }
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn endpoint_log_paths_are_stable_distinct_and_bounded() {
-        let home = tempfile::tempdir().expect("temporary Wirelens home");
+        let home = tempfile::tempdir().expect("temporary Fluxcope home");
         let first_endpoint = "127.0.0.1:8989".parse().expect("first endpoint");
         let second_endpoint = "127.0.0.1:8990".parse().expect("second endpoint");
 

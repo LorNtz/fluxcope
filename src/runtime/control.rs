@@ -2051,7 +2051,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
                     Ok(ControlResult::GetStatus {
                         instance: snapshot.instance,
                         local_proxy_url,
-                        wirelens_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        fluxcope_version: env!("CARGO_PKG_VERSION").to_owned(),
                         rpc_version: RPC_VERSION,
                         config_source,
                         config_mode: snapshot.config_mode,
@@ -2335,7 +2335,7 @@ impl ExistingDescriptorProbe for ControlRpcDescriptorProbe {
                 ControlOperation::DescribeInstance,
                 deadline,
                 DeclaredClient {
-                    name: "wirelens-runtime".to_owned(),
+                    name: "fluxcope-runtime".to_owned(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
                 cancelled,
@@ -2403,14 +2403,14 @@ impl fmt::Debug for PrivateControlStartup {
 impl PrivateControlStartup {
     pub(super) fn prepare(
         enabled: bool,
-        wirelens_home: &std::path::Path,
+        fluxcope_home: &std::path::Path,
         identity: InstanceIdentity,
         settings: &SettingsSession,
     ) -> std::result::Result<Option<Self>, PrivateControlStartupError> {
         if !enabled {
             return Ok(None);
         }
-        RegistryPublisher::prepare(wirelens_home, identity, settings)
+        RegistryPublisher::prepare(fluxcope_home, identity, settings)
             .map(|publisher| Some(Self { publisher }))
             .map_err(PrivateControlStartupError::ControlBind)
     }
@@ -2650,7 +2650,7 @@ impl RunningPrivateControl {
         if cancelled.is_cancelled() {
             return Err(cancelled_publication_error());
         }
-        let (wirelens_home, endpoint, proposed_run) = {
+        let (fluxcope_home, endpoint, proposed_run) = {
             let publisher = self.publisher.as_ref().ok_or_else(|| {
                 PrivateControlStartupError::Publication(io::Error::new(
                     io::ErrorKind::NotConnected,
@@ -2658,12 +2658,12 @@ impl RunningPrivateControl {
                 ))
             })?;
             (
-                publisher.wirelens_home().to_path_buf(),
+                publisher.fluxcope_home().to_path_buf(),
                 publisher.identity().proxy_endpoint(),
                 publisher.identity().run_id().clone(),
             )
         };
-        let report = RegistryScanner::new(&wirelens_home)
+        let report = RegistryScanner::new(&fluxcope_home)
             .and_then(|scanner| scanner.read_endpoint(endpoint))
             .map_err(PrivateControlStartupError::Publication)?;
         if let Some(existing) = report.candidates.first() {

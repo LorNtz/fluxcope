@@ -93,7 +93,7 @@ async fn broker_dispatches_both_json_tools_with_exact_revision_pinned_operations
         calls: Mutex::new(Vec::new()),
     });
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![descriptor.clone()]),
         Arc::clone(&probe),
     );

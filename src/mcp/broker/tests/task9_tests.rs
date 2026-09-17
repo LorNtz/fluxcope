@@ -83,7 +83,7 @@ async fn wait_for_capture_child_transport_normalizes_timeout_and_returns_unmatch
     let selected = descriptor(19809, RUN_A);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![selected.clone()]),
         Arc::new(ReturningWaitProbe {
             calls: Arc::clone(&calls),
@@ -211,7 +211,7 @@ async fn wait_for_capture_child_disconnect_cancels_and_restores_public_call_perm
     let started = Arc::new(Notify::new());
     let observed = Arc::new(Notify::new());
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![selected.clone()]),
         Arc::new(CancellingWaitProbe {
             started: Arc::clone(&started),
@@ -362,7 +362,7 @@ async fn wait_for_capture_endpoint_replacement_returns_generation_conflict_witho
         wait_targets: Mutex::new(Vec::new()),
     });
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         registry,
         Arc::clone(&probe),
     );

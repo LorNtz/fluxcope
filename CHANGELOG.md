@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional multi-instance MCP control plane with bounded capture inspection, recording controls, scoped mapping reads, typed mutation previews, and revision-safe mapping edits.
+- Managed `fluxcope mcp tools`, `call`, and `read` CLI commands for agents without native MCP integration.
+- Default-owned, read-only-file, and temporary proxy settings modes, with per-instance registry and log isolation.
+
+### Changed
+
+- Integrated the MCP feature with Fluxcope naming and the upgraded HTTP/TLS stack. MCP discovery, resource URIs, metadata, and CLI commands use Fluxcope names; development-era Wirelens state is not migrated automatically.
+
 ## [0.1.0](https://github.com/LorNtz/fluxcope/releases/tag/v0.1.0) - 2026-09-15
 
 ### Added

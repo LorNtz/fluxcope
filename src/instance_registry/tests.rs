@@ -30,7 +30,7 @@ struct RegistryFixture {
 impl RegistryFixture {
     fn new() -> Self {
         Self {
-            home: tempfile::tempdir().expect("temporary Wirelens home"),
+            home: tempfile::tempdir().expect("temporary Fluxcope home"),
         }
     }
 

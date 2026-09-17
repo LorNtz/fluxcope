@@ -451,7 +451,7 @@ fn all_ordinary_task8_deadlines_are_clamped_to_thirty_seconds() {
 fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
     let status = ControlResult::GetStatus {
         local_proxy_url: format!("http://{ENDPOINT}"),
-        wirelens_version: "0.1.0-test".to_owned(),
+        fluxcope_version: "0.1.0-test".to_owned(),
         rpc_version: RPC_VERSION,
         config_source: None,
         instance: instance_scope(),
@@ -486,7 +486,7 @@ fn task8_results_have_exact_tagged_shapes_and_repeat_instance_identity() {
             "operation": "get_status",
             "instance": scope_value(ENDPOINT, RUN_ID),
             "local_proxy_url": format!("http://{ENDPOINT}"),
-            "wirelens_version": "0.1.0-test",
+            "fluxcope_version": "0.1.0-test",
             "rpc_version": RPC_VERSION,
             "config_source": null,
             "config_mode": "temporary",

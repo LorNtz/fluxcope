@@ -400,9 +400,9 @@ fn record_mutation(state: &mut AuditState, call: ControlCallAudit) -> Arc<Mutati
 
 fn persist_mutation_record(record: &MutationAuditRecord) {
     match serde_json::to_string(record) {
-        Ok(record) => log::info!(target: "wirelens::mcp_audit", "{record}"),
+        Ok(record) => log::info!(target: "fluxcope::mcp_audit", "{record}"),
         Err(error) => {
-            log::error!(target: "wirelens::mcp_audit", "failed to serialize MCP mutation audit record: {error}");
+            log::error!(target: "fluxcope::mcp_audit", "failed to serialize MCP mutation audit record: {error}");
         }
     }
 }

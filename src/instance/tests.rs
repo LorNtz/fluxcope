@@ -1,4 +1,4 @@
-use super::{InstanceIdentity, RunId, endpoint_hash, wirelens_home_from_env};
+use super::{InstanceIdentity, RunId, endpoint_hash, fluxcope_home_from_env};
 use std::{
     ffi::OsStr,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -118,11 +118,11 @@ fn endpoint_hash_is_stable_bounded_and_uses_the_canonical_socket_address() {
 }
 
 #[test]
-fn per_user_wirelens_home_is_platform_independent_and_never_uses_cwd() {
+fn per_user_fluxcope_home_is_platform_independent_and_never_uses_cwd() {
     let home =
-        wirelens_home_from_env(Some(OsStr::new("test-user-home"))).expect("per-user Wirelens home");
+        fluxcope_home_from_env(Some(OsStr::new("test-user-home"))).expect("per-user Fluxcope home");
 
-    assert_eq!(home, PathBuf::from("test-user-home").join(".wirelens"));
-    assert!(wirelens_home_from_env(None).is_err());
+    assert_eq!(home, PathBuf::from("test-user-home").join(".fluxcope"));
+    assert!(fluxcope_home_from_env(None).is_err());
     assert_ne!(home, PathBuf::from("."));
 }

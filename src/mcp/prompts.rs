@@ -3,17 +3,17 @@ use rmcp::model::{ErrorData, GetPromptResult, JsonObject, Prompt, PromptMessage,
 const DEBUG_HTTP_FLOW: &str = "debug_http_flow";
 const CONFIGURE_MAPPING: &str = "configure_mapping";
 
-const DEBUG_HTTP_FLOW_TEXT: &str = r#"Debug one HTTP flow with Wirelens using bounded, retention-aware steps:
+const DEBUG_HTTP_FLOW_TEXT: &str = r#"Debug one HTTP flow with Fluxcope using bounded, retention-aware steps:
 1. Call `list_instances`; if several instances are live, make an explicit endpoint/run choice and keep that exact identity on every later call. Inspect discovery diagnostics; use `get_broker_status` when diagnosing connection or resource limits. Empty discovery is not evidence of an empty capture store.
 2. Call `get_status` and confirm recording is enabled and the selected instance has sufficient capture/body capacity. Use `set_recording_enabled` only when the user asked you to change it.
-3. Trigger the target app action outside Wirelens when needed, then call `wait_for_capture` with a narrow query and milestone. Fall back to narrowly paginated `search_captures`; never broad-scan by default.
+3. Trigger the target app action outside Fluxcope when needed, then call `wait_for_capture` with a narrow query and milestone. Fall back to narrowly paginated `search_captures`; never broad-scan by default.
 4. Call `get_capture` for compact request/response metadata. Respect capture retention, body preview truncation, live-stream state, and revision conflicts.
 5. Before reading body windows, locate structure with `find_json_pointers`, `probe_json_pointer_pattern`, `search_capture_body`, or `extract_capture_body`.
 6. Read only the necessary raw or decoded resource page. Treat unsupported decode, non-textual content, and configured decode/output limits as observable results; do not infer missing bytes.
 7. Report the selected instance identity, capture ID/revision, evidence, and any retention, truncation, or decode limitation."#;
 
-const CONFIGURE_MAPPING_TEXT: &str = r#"Configure Wirelens mappings with one revision-safe transaction per requested change:
-1. Prefer native Wirelens MCP tools. Otherwise use `wirelens mcp tools [NAME]`, `wirelens mcp call TOOL --arguments @FILE`, and `wirelens mcp read URI`; do not improvise JSON-RPC pipelines or use a terminal for the broker. The CLI manages initialization, deadlines, output normalization, and shutdown. Discover only needed input schemas.
+const CONFIGURE_MAPPING_TEXT: &str = r#"Configure Fluxcope mappings with one revision-safe transaction per requested change:
+1. Prefer native Fluxcope MCP tools. Otherwise use `fluxcope mcp tools [NAME]`, `fluxcope mcp call TOOL --arguments @FILE`, and `fluxcope mcp read URI`; do not improvise JSON-RPC pipelines or use a terminal for the broker. The CLI manages initialization, deadlines, output normalization, and shutdown. Discover only needed input schemas.
 2. Call `list_instances`; choose one explicit endpoint/run identity and never retarget a supplied run ID. Inspect discovery diagnostics; use `get_broker_status` or `get_status` when relevant to diagnosis, not as mandatory full dumps.
 3. Call `get_mapping_settings`, scoped to the requested `preset` and `table` when known; record `settings_revision`, config mode, persistence, active selection, gates, and scope/omissions. Rule indexes preserve table order, including disabled variants. Do not reconstruct a complete configuration from a scoped result.
 4. Call `preview_mapping_mutation` with the exact instance, `expected_settings_revision`, requested typed `operation`, and affected `urls`. Inspect validation, affected object, gates, and original/effective mapping decisions. Preview changes no state and checks neither file readability nor traffic. Use `validate_mapping_settings` only for an independently prepared complete configuration, or `explain_mapping` for current-state decisions.
@@ -30,7 +30,7 @@ pub(crate) fn list() -> Vec<Prompt> {
         ),
         Prompt::new(
             CONFIGURE_MAPPING,
-            Some("Validate and apply revision-safe Wirelens mapping changes"),
+            Some("Validate and apply revision-safe Fluxcope mapping changes"),
             None,
         ),
     ]

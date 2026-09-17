@@ -7,13 +7,83 @@ use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, process::Command};
 
 fn client(home: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wirelens"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fluxcope"));
     command
         .arg("mcp")
         .env("HOME", home)
         .env_remove("RUST_LOG")
         .kill_on_drop(true);
     command
+}
+
+#[tokio::test]
+async fn help_and_version_exit_successfully_without_home_or_starting_proxy() -> Result<()> {
+    let working_dir = tempfile::tempdir()?;
+    for arguments in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["mcp", "--help"],
+        vec!["mcp", "tools", "--help"],
+        vec!["mcp", "call", "--help"],
+        vec!["mcp", "read", "--help"],
+    ] {
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(env!("CARGO_BIN_EXE_fluxcope"))
+                .args(&arguments)
+                .env_remove("HOME")
+                .env_remove("RUST_LOG")
+                .current_dir(working_dir.path())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty(), "{arguments:?}");
+        let stdout = String::from_utf8(output.stdout)?;
+        if arguments == ["--version"] {
+            assert_eq!(
+                stdout.trim(),
+                concat!("fluxcope ", env!("CARGO_PKG_VERSION"))
+            );
+        } else {
+            assert!(stdout.contains("fluxcope"), "{arguments:?}: {stdout}");
+        }
+    }
+    assert!(std::fs::read_dir(working_dir.path())?.next().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_usage_errors_keep_clap_exit_status_and_stderr_without_home() -> Result<()> {
+    for arguments in [
+        vec!["--not-a-real-option"],
+        vec!["--host", "127.0.0.1", "--port", "0"],
+        vec!["mcp", "call", "list_instances"],
+    ] {
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(env!("CARGO_BIN_EXE_fluxcope"))
+                .args(&arguments)
+                .env_remove("HOME")
+                .env_remove("RUST_LOG")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(
+            String::from_utf8(output.stderr)?.starts_with("error:"),
+            "{arguments:?}"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -145,7 +215,7 @@ async fn protocol_errors_and_unknown_resource_reads_exit_nonzero() -> Result<()>
     assert!(error.contains("unknown"), "{error}");
     assert!(error.contains("protocol_error"), "{error}");
     let read = client(home.path())
-        .args(["read", "wirelens://invalid"])
+        .args(["read", "fluxcope://invalid"])
         .output()
         .await?;
     assert!(!read.status.success());

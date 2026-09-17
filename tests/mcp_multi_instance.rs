@@ -44,17 +44,17 @@ static ACCEPTANCE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 type McpClient = RunningService<RoleClient, ClientInfo>;
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_wirelens")
+    env!("CARGO_BIN_EXE_fluxcope")
 }
 
-struct WirelensProcess {
+struct FluxcopeProcess {
     child: Box<dyn PtyChild + Send + Sync>,
     _master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     output: Arc<Mutex<Vec<u8>>>,
 }
 
-impl WirelensProcess {
+impl FluxcopeProcess {
     fn spawn(home: &Path, arguments: &[String]) -> Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -63,15 +63,15 @@ impl WirelensProcess {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("open Wirelens PTY")?;
+            .context("open Fluxcope PTY")?;
         let reader = pair
             .master
             .try_clone_reader()
-            .context("clone Wirelens PTY reader")?;
+            .context("clone Fluxcope PTY reader")?;
         let writer = pair
             .master
             .take_writer()
-            .context("take Wirelens PTY writer")?;
+            .context("take Fluxcope PTY writer")?;
         let mut command = CommandBuilder::new(binary());
         command.args(arguments);
         command.env("HOME", home);
@@ -80,7 +80,7 @@ impl WirelensProcess {
         let child = pair
             .slave
             .spawn_command(command)
-            .context("spawn Wirelens proxy")?;
+            .context("spawn Fluxcope proxy")?;
         drop(pair.slave);
 
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -104,21 +104,21 @@ impl WirelensProcess {
             if self
                 .child
                 .try_wait()
-                .context("poll Wirelens process")?
+                .context("poll Fluxcope process")?
                 .is_some()
             {
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(20));
         }
-        bail!("Wirelens process did not exit; output: {}", self.output())
+        bail!("Fluxcope process did not exit; output: {}", self.output())
     }
 
     fn stop_gracefully(&mut self) -> Result<()> {
         self.writer
             .write_all(&[3])
-            .context("send Ctrl-C to Wirelens PTY")?;
-        self.writer.flush().context("flush Wirelens PTY")?;
+            .context("send Ctrl-C to Fluxcope PTY")?;
+        self.writer.flush().context("flush Fluxcope PTY")?;
         self.wait_for_exit(Duration::from_secs(5))
     }
 
@@ -130,7 +130,7 @@ impl WirelensProcess {
     }
 }
 
-impl Drop for WirelensProcess {
+impl Drop for FluxcopeProcess {
     fn drop(&mut self) {
         self.kill_and_wait();
     }
@@ -153,16 +153,16 @@ fn drain_pty(mut reader: Box<dyn Read + Send>, output: Arc<Mutex<Vec<u8>>>) {
 
 struct McpHarness {
     brokers: Vec<Option<McpClient>>,
-    proxies: Vec<Option<WirelensProcess>>,
+    proxies: Vec<Option<FluxcopeProcess>>,
     home: TempDir,
 }
 
 impl McpHarness {
     fn new() -> Result<Self> {
         let home = tempfile::tempdir().context("create isolated HOME")?;
-        let wirelens_home = home.path().join(".wirelens");
-        fs::create_dir(&wirelens_home).context("create isolated Wirelens home")?;
-        fs::set_permissions(&wirelens_home, fs::Permissions::from_mode(0o700))?;
+        let fluxcope_home = home.path().join(".fluxcope");
+        fs::create_dir(&fluxcope_home).context("create isolated Fluxcope home")?;
+        fs::set_permissions(&fluxcope_home, fs::Permissions::from_mode(0o700))?;
         Ok(Self {
             brokers: Vec::new(),
             proxies: Vec::new(),
@@ -174,12 +174,12 @@ impl McpHarness {
         self.home.path()
     }
 
-    fn wirelens_home(&self) -> PathBuf {
-        self.home.path().join(".wirelens")
+    fn fluxcope_home(&self) -> PathBuf {
+        self.home.path().join(".fluxcope")
     }
 
     fn default_config_path(&self) -> PathBuf {
-        self.wirelens_home().join("config.yml")
+        self.fluxcope_home().join("config.yml")
     }
 
     fn write_default_config(&self, port: u16) -> Result<PathBuf> {
@@ -195,7 +195,7 @@ impl McpHarness {
     }
 
     fn spawn_proxy(&mut self, arguments: Vec<String>) -> Result<usize> {
-        let process = WirelensProcess::spawn(self.home.path(), &arguments)?;
+        let process = FluxcopeProcess::spawn(self.home.path(), &arguments)?;
         self.proxies.push(Some(process));
         Ok(self.proxies.len() - 1)
     }
@@ -244,7 +244,7 @@ impl McpHarness {
                     .and_then(Option::as_ref)
                     .map_or_else(
                         || "<process unavailable>".to_owned(),
-                        WirelensProcess::output,
+                        FluxcopeProcess::output,
                     );
                 bail!("proxy {port} did not listen; output: {output}");
             }
@@ -258,12 +258,12 @@ impl McpHarness {
             .and_then(Option::as_ref)
             .map_or_else(
                 || "<process unavailable>".to_owned(),
-                WirelensProcess::output,
+                FluxcopeProcess::output,
             )
     }
 
     fn logs(&self) -> String {
-        let logs = self.wirelens_home().join("logs");
+        let logs = self.fluxcope_home().join("logs");
         let mut output = String::new();
         if let Ok(entries) = fs::read_dir(logs) {
             for entry in entries.flatten() {
@@ -277,7 +277,7 @@ impl McpHarness {
         output
     }
 
-    fn proxy_mut(&mut self, index: usize) -> Result<&mut WirelensProcess> {
+    fn proxy_mut(&mut self, index: usize) -> Result<&mut FluxcopeProcess> {
         self.proxies
             .get_mut(index)
             .and_then(Option::as_mut)
@@ -871,7 +871,7 @@ async fn broker_rejects_unsafe_registry_entries_without_losing_live_instances() 
     let broker = harness.start_broker("registry-security").await?;
     wait_for_instance_count(harness.broker(broker)?, 1).await?;
 
-    let instances_dir = harness.wirelens_home().join("run/instances");
+    let instances_dir = harness.fluxcope_home().join("run/instances");
     let wrong_mode_name = format!("{}.json", "a".repeat(64));
     let symlink_name = format!("{}.json", "b".repeat(64));
     let wrong_mode = instances_dir.join(&wrong_mode_name);
@@ -1066,7 +1066,7 @@ async fn official_client_completes_bounded_debugging_and_mapping_workflow() -> R
             .is_some_and(|text| text.contains("traffic-secret"))
     );
     assert_eq!(
-        resource_json["_meta"]["wirelens"]["decoded_encoding_chain"],
+        resource_json["_meta"]["fluxcope"]["decoded_encoding_chain"],
         json!(["gzip"])
     );
 
@@ -1184,7 +1184,7 @@ async fn official_client_completes_bounded_debugging_and_mapping_workflow() -> R
             .as_array()
             .is_some_and(|records| records.len() >= 2)
     );
-    let audit_lines = wait_for_audit_lines(&harness.wirelens_home(), 2).await?;
+    let audit_lines = wait_for_audit_lines(&harness.fluxcope_home(), 2).await?;
     let encoded_audit = audit_lines.join("\n");
     assert!(encoded_audit.contains("create_preset"));
     assert!(encoded_audit.contains("set_active_preset"));
@@ -1205,11 +1205,11 @@ async fn official_client_completes_bounded_debugging_and_mapping_workflow() -> R
     Ok(())
 }
 
-async fn wait_for_audit_lines(wirelens_home: &Path, minimum: usize) -> Result<Vec<String>> {
+async fn wait_for_audit_lines(fluxcope_home: &Path, minimum: usize) -> Result<Vec<String>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let mut audit_lines = Vec::new();
-        let logs = wirelens_home.join("logs");
+        let logs = fluxcope_home.join("logs");
         if let Ok(entries) = fs::read_dir(&logs) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -1220,7 +1220,7 @@ async fn wait_for_audit_lines(wirelens_home: &Path, minimum: usize) -> Result<Ve
                 audit_lines.extend(
                     content
                         .lines()
-                        .filter(|line| line.contains("[wirelens::mcp_audit]"))
+                        .filter(|line| line.contains("[fluxcope::mcp_audit]"))
                         .map(str::to_owned),
                 );
             }

@@ -43,7 +43,7 @@ use crate::{
         CaptureRetentionPolicy, start_decode_service_with_admission,
     },
     cli::{ConfigSelection, McpOverride, ProxyStartup},
-    instance::wirelens_home_dir,
+    instance::fluxcope_home_dir,
     logging::{AppLogger, endpoint_log_path},
     proxy_handler::LogHandler,
     recording::RecordingState,
@@ -86,12 +86,12 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let proxy_addr = proxy_listener_lease
         .local_addr()
         .context("failed to read bound proxy address")?;
-    let wirelens_home = wirelens_home_dir().context("failed to resolve Wirelens home directory")?;
+    let fluxcope_home = fluxcope_home_dir().context("failed to resolve Fluxcope home directory")?;
     #[cfg(unix)]
     let identity = InstanceIdentity::new(proxy_addr)?;
     #[cfg(unix)]
     let prepared_control =
-        PrivateControlStartup::prepare(mcp_enabled, &wirelens_home, identity.clone(), &settings)
+        PrivateControlStartup::prepare(mcp_enabled, &fluxcope_home, identity.clone(), &settings)
             .map_err(anyhow::Error::new)?;
     let policy = RuntimePolicy::default();
     let log_retention = policy.logging.retention;
@@ -109,7 +109,7 @@ pub(crate) async fn run(startup: ProxyStartup) -> Result<()> {
     let shutdown = CancellationToken::new();
 
     let logging = AppLogger::init(
-        endpoint_log_path(&wirelens_home, proxy_addr),
+        endpoint_log_path(&fluxcope_home, proxy_addr),
         policy.logging.clone(),
         shutdown.child_token(),
     )

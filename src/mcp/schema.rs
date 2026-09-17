@@ -52,7 +52,7 @@ pub(crate) struct InstanceSummary {
     pub(crate) instance: InstanceSelector,
     pub(crate) local_proxy_url: String,
     pub(crate) started_at: String,
-    pub(crate) wirelens_version: String,
+    pub(crate) fluxcope_version: String,
     pub(crate) rpc_version: u16,
     #[schemars(with = "String")]
     pub(crate) config_mode: ConfigMode,
@@ -89,7 +89,7 @@ pub(crate) struct ListInstancesResult {
 pub(crate) struct GetStatusResult {
     pub(crate) instance: InstanceSelector,
     pub(crate) local_proxy_url: String,
-    pub(crate) wirelens_version: String,
+    pub(crate) fluxcope_version: String,
     pub(crate) rpc_version: u16,
     pub(crate) config_source: Option<PathBuf>,
     #[schemars(with = "String")]
@@ -324,7 +324,7 @@ mod tests {
                 instance: selector(),
                 local_proxy_url: "http://127.0.0.1:19001".to_owned(),
                 started_at: "2026-08-24T00:00:00Z".to_owned(),
-                wirelens_version: "9.8.7".to_owned(),
+                fluxcope_version: "9.8.7".to_owned(),
                 rpc_version: crate::control_rpc::protocol::RPC_VERSION,
                 config_mode: ConfigMode::Temporary,
                 persistence: PersistenceMode::Ephemeral,
@@ -353,7 +353,7 @@ mod tests {
                     },
                     "local_proxy_url": "http://127.0.0.1:19001",
                     "started_at": "2026-08-24T00:00:00Z",
-                    "wirelens_version": "9.8.7",
+                    "fluxcope_version": "9.8.7",
                     "rpc_version": crate::control_rpc::protocol::RPC_VERSION,
                     "config_mode": "temporary",
                     "persistence": "ephemeral",
@@ -378,7 +378,7 @@ mod tests {
     fn get_status_shape_repeats_resolved_identity_and_current_describe_fields() {
         let result = GetStatusResult {
             local_proxy_url: "http://127.0.0.1:19001".to_owned(),
-            wirelens_version: "0.1.0-test".to_owned(),
+            fluxcope_version: "0.1.0-test".to_owned(),
             rpc_version: crate::control_rpc::protocol::RPC_VERSION,
             config_source: None,
             instance: selector(),
@@ -407,7 +407,7 @@ mod tests {
                     "run_id": RUN_ID
                 },
                 "local_proxy_url": "http://127.0.0.1:19001",
-                "wirelens_version": "0.1.0-test",
+                "fluxcope_version": "0.1.0-test",
                 "rpc_version": crate::control_rpc::protocol::RPC_VERSION,
                 "config_source": null,
                 "config_mode": "temporary",
@@ -488,7 +488,7 @@ mod tests {
                 rpc: 1,
             },
             registry: RegistryStatus {
-                path: PathBuf::from("/home/test/.wirelens/run/instances"),
+                path: PathBuf::from("/home/test/.fluxcope/run/instances"),
                 live_instances: 2,
                 stale_descriptors: 1,
                 rejected_descriptors: 3,

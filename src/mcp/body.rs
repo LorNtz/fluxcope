@@ -196,9 +196,9 @@ pub(crate) struct ExtractCaptureBodyOutput {
     pub(crate) result: ExtractCaptureBodyResult,
 }
 
-pub(super) const CONTENT_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}";
-pub(super) const JSON_POINTER_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}";
-pub(super) const FORM_FIELD_RESOURCE_TEMPLATE: &str = "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}";
+pub(super) const CONTENT_RESOURCE_TEMPLATE: &str = "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}";
+pub(super) const JSON_POINTER_RESOURCE_TEMPLATE: &str = "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}";
+pub(super) const FORM_FIELD_RESOURCE_TEMPLATE: &str = "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SelectionResourceUri(SelectionResourceRequest);
@@ -254,7 +254,7 @@ impl BodyResourceUri {
         let representation_segment = representation_segment(representation);
         let capture_id_value = capture_id.value();
         let uri = format!(
-            "wirelens://{proxy_endpoint}/runs/{run_id}/captures/{capture_id_value}/revisions/{capture_revision}/bodies/{side_segment}/content/{representation_segment}?offset={offset}&length={length}"
+            "fluxcope://{proxy_endpoint}/runs/{run_id}/captures/{capture_id_value}/revisions/{capture_revision}/bodies/{side_segment}/content/{representation_segment}?offset={offset}&length={length}"
         );
         Self {
             uri,
@@ -271,7 +271,7 @@ impl BodyResourceUri {
 
     pub(super) fn parse(raw: &str) -> Result<Self, ControlError> {
         let remainder = raw
-            .strip_prefix("wirelens://")
+            .strip_prefix("fluxcope://")
             .ok_or_else(|| invalid_uri("body resource URI is malformed"))?;
         let (authority, path_and_query) = remainder
             .split_once('/')
@@ -287,7 +287,7 @@ impl BodyResourceUri {
             return Err(invalid_uri("body resource path is not canonical"));
         }
         let url = Url::parse(raw).map_err(|_| invalid_uri("body resource URI is malformed"))?;
-        if url.scheme() != "wirelens"
+        if url.scheme() != "fluxcope"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
@@ -446,7 +446,7 @@ pub(super) fn body_page_resource_contents(
     let next_uri = page
         .next_offset
         .map(|offset| requested.next_page(offset).to_string());
-    let wirelens = json!({
+    let fluxcope = json!({
         "requested_range": page.requested_range,
         "actual_range": page.actual_range,
         "total_bytes": page.total_bytes,
@@ -466,7 +466,7 @@ pub(super) fn body_page_resource_contents(
         "decoded_output_limited": page.source.decoded_output_limited,
     });
     let mut metadata = Map::new();
-    metadata.insert("wirelens".to_owned(), wirelens);
+    metadata.insert("fluxcope".to_owned(), fluxcope);
     let uri = requested.to_string();
     let mut contents = if requested.representation() == BodyRepresentation::Decoded {
         match String::from_utf8(page.content.to_vec()) {
@@ -488,7 +488,7 @@ pub(super) fn selection_page_resource_contents(
 ) -> Result<ResourceContents, ControlError> {
     let next_uri = page.next_uri.clone();
     let request = requested.as_request();
-    let wirelens = json!({
+    let fluxcope = json!({
         "requested_range": page.requested_range,
         "actual_range": page.actual_range,
         "selected_bytes": page.selected_bytes,
@@ -510,7 +510,7 @@ pub(super) fn selection_page_resource_contents(
         "media_type": page.media_type.clone(),
     });
     let mut metadata = Map::new();
-    metadata.insert("wirelens".to_owned(), wirelens);
+    metadata.insert("fluxcope".to_owned(), fluxcope);
     let text = String::from_utf8(page.content.to_vec())
         .map_err(|_| ControlError::internal("selected resource page was not valid UTF-8"))?;
     Ok(ResourceContents::text(text, request.to_uri()?)

@@ -63,12 +63,22 @@ impl CaData {
         let cert_path = cert_dir.join(CA_CERT_FILE);
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
-        private_fs::write_file(&cert_path, &self.cert_der)
-            .with_context(|| format!("failed to persist CA certificate {}", cert_path.display()))?;
-        private_fs::write_file(&key_path, &self.key_der)
-            .with_context(|| format!("failed to persist CA private key {}", key_path.display()))?;
-        private_fs::write_file(&pem_path, self.cert_pem.as_bytes())
-            .with_context(|| format!("failed to persist CA PEM {}", pem_path.display()))?;
+        // A write/sync failure must not publish an incomplete authority.
+        let certificate = private_fs::prepare_file(&cert_path, &self.cert_der)
+            .with_context(|| format!("failed to prepare CA certificate {}", cert_path.display()))?;
+        let key = private_fs::prepare_file(&key_path, &self.key_der)
+            .with_context(|| format!("failed to prepare CA private key {}", key_path.display()))?;
+        let pem = private_fs::prepare_file(&pem_path, self.cert_pem.as_bytes())
+            .with_context(|| format!("failed to prepare CA PEM {}", pem_path.display()))?;
+        for (temporary, destination) in [
+            (certificate, &cert_path),
+            (key, &key_path),
+            (pem, &pem_path),
+        ] {
+            temporary.persist(destination).with_context(|| {
+                format!("failed to publish authority file {}", destination.display())
+            })?;
+        }
         File::open(cert_dir)?.sync_all()?;
         Ok(())
     }
@@ -165,7 +175,6 @@ fn read_owner_only_file(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-
 fn create_ca() -> Result<(Certificate, KeyPair)> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
@@ -188,6 +197,67 @@ fn create_ca() -> Result<(Certificate, KeyPair)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authority_preparation_failure_does_not_publish_partial_files() -> Result<()> {
+        let cert_dir = tempfile::tempdir()?;
+        let pem_filename = "fluxcope-ca.pem";
+        fs::create_dir(cert_dir.path().join(pem_filename))?;
+        let (certificate, key) = create_ca()?;
+        let authority = CaData::from_cert(&certificate, &key)?;
+
+        assert!(authority.save(cert_dir.path(), pem_filename).is_err());
+
+        assert!(!cert_dir.path().join(CA_CERT_FILE).exists());
+        assert!(!cert_dir.path().join(CA_KEY_FILE).exists());
+        fs::remove_dir(cert_dir.path().join(pem_filename))?;
+        let recovered = create_or_load_ca(cert_dir.path(), pem_filename)?;
+        let reloaded = create_or_load_ca(cert_dir.path(), pem_filename)?;
+        assert_eq!(recovered.key_der(), reloaded.key_der());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authority_permissions_survive_restrictive_umask_and_restart() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "FLUXCOPE_CA_RESTRICTIVE_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cert_dir = tempfile::tempdir()?;
+            rustix::process::umask(rustix::fs::Mode::from_bits_retain(0o477));
+            let pem_filename = "fluxcope-ca.pem";
+            let created = create_or_load_ca(cert_dir.path(), pem_filename)?;
+            for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+                assert_eq!(
+                    fs::metadata(cert_dir.path().join(name))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600,
+                    "{name} must remain readable only by its owner",
+                );
+            }
+            let loaded = create_or_load_ca(cert_dir.path(), pem_filename)?;
+            assert_eq!(created.cert_der(), loaded.cert_der());
+            assert_eq!(created.key_der(), loaded.key_der());
+            return Ok(());
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "ca::tests::authority_permissions_survive_restrictive_umask_and_restart",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "CA umask child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_certificate_persistence() {
@@ -235,7 +305,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let cert_dir = tempfile::tempdir().expect("temporary CA directory");
-        let pem_filename = "wirelens-ca.pem";
+        let pem_filename = "fluxcope-ca.pem";
         let original = create_or_load_ca(cert_dir.path(), pem_filename)
             .expect("initial authority creation should succeed");
 
@@ -294,7 +364,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    create_or_load_ca(&cert_path, "wirelens-ca.pem")
+                    create_or_load_ca(&cert_path, "fluxcope-ca.pem")
                 })
             })
             .collect::<Vec<_>>();
@@ -322,7 +392,7 @@ mod tests {
             authorities[0].key_der()
         );
         assert_eq!(
-            fs::read_to_string(cert_dir.path().join("wirelens-ca.pem"))
+            fs::read_to_string(cert_dir.path().join("fluxcope-ca.pem"))
                 .expect("persisted PEM certificate"),
             authorities[0].cert_pem()
         );
@@ -337,7 +407,7 @@ mod tests {
 
         let root = tempfile::tempdir().expect("temporary root");
         let cert_dir = root.path().join("authority");
-        create_or_load_ca(&cert_dir, "wirelens-ca.pem").expect("CA initialization");
+        create_or_load_ca(&cert_dir, "fluxcope-ca.pem").expect("CA initialization");
 
         assert_eq!(
             fs::metadata(&cert_dir)
@@ -350,7 +420,7 @@ mod tests {
         for name in [
             CA_CERT_FILE,
             CA_KEY_FILE,
-            "wirelens-ca.pem",
+            "fluxcope-ca.pem",
             ".ca-init.lock",
         ] {
             let path = cert_dir.join(name);

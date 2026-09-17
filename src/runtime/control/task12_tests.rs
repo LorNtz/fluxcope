@@ -222,7 +222,7 @@ async fn task12_selected_page_is_exact_utf8_and_builds_concrete_next_uri() {
     let next = page.next_uri.as_deref().expect("next URI");
     assert!(next.contains("/extract/json-pointer?pointer=%2Fvalue&offset=3&length=4"));
     assert!(next.contains(&format!(
-        "wirelens://{}/runs/{}/",
+        "fluxcope://{}/runs/{}/",
         instance.proxy_endpoint, instance.run_id
     )));
     assert_eq!(admission.test_snapshot().active, 0);

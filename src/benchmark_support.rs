@@ -209,8 +209,8 @@ pub fn search_body(fixture: &BodyFixture, query: &str, context_bytes: usize) -> 
         query,
         20,
         context_bytes,
-        "wirelens://benchmark/decoded",
-        "wirelens://benchmark/raw",
+        "fluxcope://benchmark/decoded",
+        "fluxcope://benchmark/raw",
         &AtomicBool::new(false),
     )
     .expect("benchmark body search should succeed")
@@ -220,7 +220,7 @@ pub fn search_body(fixture: &BodyFixture, query: &str, context_bytes: usize) -> 
 
 pub fn private_body_page_relay(fixture: &BodyFixture, offset: usize, length: usize) -> usize {
     let window =
-        page_selected_representation(&fixture.bytes, offset, length, "wirelens://benchmark/raw")
+        page_selected_representation(&fixture.bytes, offset, length, "fluxcope://benchmark/raw")
             .expect("benchmark body page should be valid");
     let page = BodyPage {
         content: window.content,
@@ -289,7 +289,7 @@ pub fn decode_page_and_base64(fixture: &DecodedBodyFixture, offset: usize, lengt
         &decoded.bytes,
         offset,
         length,
-        "wirelens://benchmark/decoded",
+        "fluxcope://benchmark/decoded",
     )
     .expect("benchmark decoded page should be valid");
     BASE64_STANDARD.encode(page.content).len()

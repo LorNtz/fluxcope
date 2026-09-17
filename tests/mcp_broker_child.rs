@@ -19,7 +19,7 @@ use tokio::{
 };
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_wirelens")
+    env!("CARGO_BIN_EXE_fluxcope")
 }
 
 fn isolated_home() -> Result<TempDir> {
@@ -41,7 +41,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
     let home = isolated_home()?;
     let client_info = ClientInfo::new(
         ClientCapabilities::default(),
-        Implementation::new("wirelens-child-contract", "7.6.5"),
+        Implementation::new("fluxcope-child-contract", "7.6.5"),
     )
     .with_protocol_version(ProtocolVersion::V_2024_11_05);
     let transport = TokioChildProcess::new(broker_command(home.path()))?;
@@ -518,9 +518,9 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
             .map(|template| template.uri_template.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}",
-            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}",
-            "wirelens://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}",
+            "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/content/{representation}{?offset,length}",
+            "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/json-pointer{?pointer,offset,length}",
+            "fluxcope://{+proxy_endpoint}/runs/{run_id}/captures/{capture_id}/revisions/{capture_revision}/bodies/{side}/extract/form-field{?key,offset,length}",
         ]
     );
     assert!(templates.next_cursor.is_none());
@@ -607,7 +607,7 @@ async fn mcp_child_negotiates_earlier_protocol_and_exposes_task15_contract() -> 
 
     let invalid_resource = client
         .read_resource(ReadResourceRequestParams::new(
-            "http://127.0.0.1:8989/not-a-wirelens-resource",
+            "http://127.0.0.1:8989/not-a-fluxcope-resource",
         ))
         .await
         .expect_err("strict resource URI");

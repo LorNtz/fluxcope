@@ -1,5 +1,7 @@
 # Wirelens MCP and skill improvement notes
 
+> Rebase note (2026-09-17): this document records the pre-rename Wirelens review. Current source builds use `fluxcope`, `~/.fluxcope`, `fluxcope://`, `_meta.fluxcope`, and `fluxcope_version`; see the README for current commands. Historical examples and measurements below retain their original names.
+
 Date: 2026-09-10
 
 Status: Discussion notes and proposed improvements; not an approved implementation specification.

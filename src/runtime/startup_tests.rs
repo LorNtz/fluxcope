@@ -201,7 +201,7 @@ impl ExistingDescriptorProbe for CancellingUnavailableProbe {
 
 #[test]
 fn disabled_mode_prepares_neither_control_socket_nor_descriptor() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19020");
     let prepared = PrivateControlStartup::prepare(false, home.path(), identity, &settings())
         .expect("disabled startup");
@@ -212,7 +212,7 @@ fn disabled_mode_prepares_neither_control_socket_nor_descriptor() {
 
 #[test]
 fn enabled_control_bind_failure_is_a_fatal_startup_error_without_publication() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19021");
     let _socket_owner =
         PrivateControlStartup::prepare(true, home.path(), identity.clone(), &settings())
@@ -234,7 +234,7 @@ fn enabled_control_bind_failure_is_a_fatal_startup_error_without_publication() {
 
 #[tokio::test]
 async fn proxy_and_control_are_ready_before_descriptor_publication() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let proxy =
         bind_proxy_listener("127.0.0.1:0".parse().expect("endpoint")).expect("pre-bind proxy");
     let endpoint = proxy.local_addr().expect("proxy endpoint");
@@ -286,7 +286,7 @@ async fn proxy_and_control_are_ready_before_descriptor_publication() {
 
 #[tokio::test]
 async fn live_same_endpoint_descriptor_is_a_fatal_preflight_conflict() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19022";
     let existing_identity = identity(endpoint);
     let mut existing =
@@ -343,7 +343,7 @@ async fn live_same_endpoint_descriptor_is_a_fatal_preflight_conflict() {
 
 #[tokio::test]
 async fn unavailable_private_probe_replaces_only_the_exact_stale_descriptor() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19023";
     let stale_identity = identity(endpoint);
     let mut stale = RegistryPublisher::prepare(home.path(), stale_identity.clone(), &settings())
@@ -386,7 +386,7 @@ async fn unavailable_private_probe_replaces_only_the_exact_stale_descriptor() {
 
 #[tokio::test]
 async fn generic_unavailable_probe_never_prunes_the_existing_descriptor() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19033";
     let existing_identity = identity(endpoint);
     let existing_run_id = existing_identity.run_id().clone();
@@ -429,7 +429,7 @@ async fn generic_unavailable_probe_never_prunes_the_existing_descriptor() {
 
 #[tokio::test]
 async fn control_service_start_failure_rolls_back_the_unpublished_socket() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19024");
     let (handler, _control_rx) = runtime_handler();
     let prepared = PrivateControlStartup::prepare(true, home.path(), identity, &settings())
@@ -453,7 +453,7 @@ async fn control_service_start_failure_rolls_back_the_unpublished_socket() {
 
 #[tokio::test]
 async fn preflight_conflict_cancels_service_and_removes_unpublished_socket() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19025";
     let existing_identity = identity(endpoint);
     let mut existing =
@@ -494,7 +494,7 @@ async fn preflight_conflict_cancels_service_and_removes_unpublished_socket() {
 
 #[tokio::test]
 async fn atomic_descriptor_publication_failure_is_fatal_and_rolls_back() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19026");
     let (handler, _control_rx) = runtime_handler();
     let prepared = PrivateControlStartup::prepare(true, home.path(), identity, &settings())
@@ -536,7 +536,7 @@ async fn graceful_shutdown_cancels_admitted_calls_before_registry_cleanup() {
         protocol::{ControlOperation, DeclaredClient},
     };
 
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19027");
     let (handler, mut control_rx) = runtime_handler();
     let prepared = PrivateControlStartup::prepare(true, home.path(), identity, &settings())
@@ -598,7 +598,7 @@ async fn graceful_shutdown_cancels_admitted_calls_before_registry_cleanup() {
 
 #[tokio::test]
 async fn cancellation_during_unavailable_probe_never_replaces_the_existing_descriptor() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19028";
     let existing_identity = identity(endpoint);
     let mut existing =
@@ -639,7 +639,7 @@ async fn cancellation_during_unavailable_probe_never_replaces_the_existing_descr
 
 #[tokio::test]
 async fn completion_consumed_while_waiting_for_readiness_can_still_roll_back() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19029");
     let (handler, _control_rx) = runtime_handler();
     let prepared = PrivateControlStartup::prepare(true, home.path(), identity, &settings())
@@ -666,7 +666,7 @@ async fn completion_consumed_while_waiting_for_readiness_can_still_roll_back() {
 
 #[tokio::test]
 async fn service_exit_during_probe_prevents_stale_replacement_and_publication() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let endpoint = "127.0.0.1:19030";
     let existing_identity = identity(endpoint);
     let mut existing =
@@ -714,7 +714,7 @@ async fn service_exit_during_probe_prevents_stale_replacement_and_publication() 
 
 #[tokio::test]
 async fn service_exit_after_publication_is_detected_before_supervision_handoff() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19031");
     let (handler, _control_rx) = runtime_handler();
     let control = ControlledExit::new();
@@ -757,7 +757,7 @@ async fn service_exit_after_publication_is_detected_before_supervision_handoff()
 
 #[tokio::test]
 async fn supervision_handoff_does_not_cancel_the_control_service() {
-    let home = TempDir::new().expect("temporary Wirelens home");
+    let home = TempDir::new().expect("temporary Fluxcope home");
     let identity = identity("127.0.0.1:19032");
     let (handler, _control_rx) = runtime_handler();
     let shutdown = CancellationToken::new();

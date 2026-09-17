@@ -134,7 +134,7 @@ async fn broker_dispatches_search_extract_and_selected_resource_with_exact_ident
         calls: Mutex::new(Vec::new()),
     });
     let broker = Broker::with_dependencies(
-        PathBuf::from("/test/.wirelens/run/instances"),
+        PathBuf::from("/test/.fluxcope/run/instances"),
         FakeRegistry::new(vec![descriptor.clone()]),
         Arc::clone(&probe),
     );
@@ -199,7 +199,7 @@ async fn broker_dispatches_search_extract_and_selected_resource_with_exact_ident
     );
 
     let uri = format!(
-        "wirelens://{}/runs/{}/captures/41/revisions/7/bodies/response/extract/json-pointer?pointer=%2Fvalue&offset=0&length=8192",
+        "fluxcope://{}/runs/{}/captures/41/revisions/7/bodies/response/extract/json-pointer?pointer=%2Fvalue&offset=0&length=8192",
         descriptor.proxy_endpoint(),
         descriptor.run_id(),
     );
@@ -216,7 +216,7 @@ async fn broker_dispatches_search_extract_and_selected_resource_with_exact_ident
     let content = serde_json::to_value(&resource.contents[0]).expect("resource JSON");
     assert_eq!(content["uri"], json!(uri));
     assert_eq!(content["text"], json!(r#"["snow"]"#));
-    assert_eq!(content["_meta"]["wirelens"]["capture_revision"], json!(7));
+    assert_eq!(content["_meta"]["fluxcope"]["capture_revision"], json!(7));
 
     let calls = probe.calls.lock().expect("Task 12 dispatch calls");
     assert!(matches!(

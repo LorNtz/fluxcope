@@ -1,4 +1,4 @@
-pub(crate) const MCP_LOCAL_ACCESS_WARNING: &str = "MCP access is unauthenticated within the current OS user account. Any process running as this user can launch the broker, read raw retained captures from MCP-enabled Wirelens instances, and change their live proxy mappings.";
+pub(crate) const MCP_LOCAL_ACCESS_WARNING: &str = "MCP access is unauthenticated within the current OS user account. Any process running as this user can launch the broker, read raw retained captures from MCP-enabled Fluxcope instances, and change their live proxy mappings.";
 
 pub(crate) mod audit;
 pub(crate) mod body;

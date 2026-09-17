@@ -905,7 +905,7 @@ pub(crate) enum ControlResult {
     GetStatus {
         instance: InstanceScope,
         local_proxy_url: String,
-        wirelens_version: String,
+        fluxcope_version: String,
         rpc_version: u16,
         config_source: Option<PathBuf>,
         config_mode: ConfigMode,
@@ -1182,7 +1182,7 @@ impl ControlError {
     pub(crate) fn no_instances() -> Self {
         Self::new(
             ControlErrorCode::NoInstances,
-            "no live Wirelens instances are available",
+            "no live Fluxcope instances are available",
             true,
             Value::Object(Default::default()),
         )

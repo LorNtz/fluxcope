@@ -42,7 +42,12 @@ impl Default for ProxyStartup {
 }
 
 #[derive(Parser)]
-#[command(name = "wirelens")]
+#[command(
+    name = "fluxcope",
+    version,
+    about,
+    after_help = "Settings: ~/.fluxcope/config.yml\nThe proxy listens on all IPv4 interfaces. Use only on a trusted network or behind a host firewall."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -178,7 +183,7 @@ mod tests {
     #[test]
     fn default_arguments_select_owned_proxy_with_inherited_mcp() {
         assert_eq!(
-            parse_from(["wirelens"]).expect("default args"),
+            parse_from(["fluxcope"]).expect("default args"),
             ProcessMode::Proxy(ProxyStartup {
                 config: ConfigSelection::DefaultOwned,
                 mcp: McpOverride::Inherit,
@@ -196,7 +201,7 @@ mod tests {
     #[test]
     fn config_selects_read_only_proxy() {
         assert_eq!(
-            parse_from(["wirelens", "--config", "x.yml"]).expect("config args"),
+            parse_from(["fluxcope", "--config", "x.yml"]).expect("config args"),
             ProcessMode::Proxy(ProxyStartup {
                 config: ConfigSelection::ReadOnlyFile(PathBuf::from("x.yml")),
                 mcp: McpOverride::Inherit,
@@ -207,28 +212,28 @@ mod tests {
     #[test]
     fn proxy_mcp_overrides_are_explicit_and_mutually_exclusive() {
         assert_eq!(
-            parse_from(["wirelens", "--mcp"]).expect("enabled MCP override"),
+            parse_from(["fluxcope", "--mcp"]).expect("enabled MCP override"),
             ProcessMode::Proxy(ProxyStartup {
                 config: ConfigSelection::DefaultOwned,
                 mcp: McpOverride::Enabled,
             })
         );
         assert_eq!(
-            parse_from(["wirelens", "--no-mcp"]).expect("disabled MCP override"),
+            parse_from(["fluxcope", "--no-mcp"]).expect("disabled MCP override"),
             ProcessMode::Proxy(ProxyStartup {
                 config: ConfigSelection::DefaultOwned,
                 mcp: McpOverride::Disabled,
             })
         );
-        assert!(parse_from(["wirelens", "--mcp", "--no-mcp"]).is_err());
+        assert!(parse_from(["fluxcope", "--mcp", "--no-mcp"]).is_err());
     }
 
     #[test]
     fn temporary_mode_requires_host_and_port() {
-        assert!(parse_from(["wirelens", "--host", "127.0.0.1"]).is_err());
-        assert!(parse_from(["wirelens", "--port", "9100"]).is_err());
+        assert!(parse_from(["fluxcope", "--host", "127.0.0.1"]).is_err());
+        assert!(parse_from(["fluxcope", "--port", "9100"]).is_err());
         assert_eq!(
-            parse_from(["wirelens", "--host", "127.0.0.1", "--port", "9100"])
+            parse_from(["fluxcope", "--host", "127.0.0.1", "--port", "9100"])
                 .expect("temporary args"),
             ProcessMode::Proxy(ProxyStartup {
                 config: ConfigSelection::Temporary {
@@ -244,7 +249,7 @@ mod tests {
     fn config_rejects_bind_overrides_and_temporary_port_zero() {
         assert!(
             parse_from([
-                "wirelens",
+                "fluxcope",
                 "--config",
                 "x.yml",
                 "--host",
@@ -254,20 +259,20 @@ mod tests {
             ])
             .is_err()
         );
-        assert!(parse_from(["wirelens", "--host", "127.0.0.1", "--port", "0"]).is_err());
+        assert!(parse_from(["fluxcope", "--host", "127.0.0.1", "--port", "0"]).is_err());
     }
 
     #[test]
     fn mcp_subcommand_selects_broker() {
         assert_eq!(
-            parse_from(["wirelens", "mcp"]).expect("broker args"),
+            parse_from(["fluxcope", "mcp"]).expect("broker args"),
             ProcessMode::Broker
         );
     }
 
     #[test]
     fn broker_rejects_proxy_flags() {
-        assert!(parse_from(["wirelens", "mcp", "--mcp"]).is_err());
-        assert!(parse_from(["wirelens", "mcp", "--config", "x.yml"]).is_err());
+        assert!(parse_from(["fluxcope", "mcp", "--mcp"]).is_err());
+        assert!(parse_from(["fluxcope", "mcp", "--config", "x.yml"]).is_err());
     }
 }
