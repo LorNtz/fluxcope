@@ -369,3 +369,20 @@ Date: 2026/09/19 12:39
 - Design and performance reviews found no actionable issues.
 
 **Result**: The feature branch no longer needs an advisory exception for the old serial dependency.
+
+### Task: Remove the CI probe fairness test scheduling race
+Date: 2026/09/19 12:44
+
+- Fresh Linux and macOS CI exposed the same existing fairness test race: a single yield did not ensure the targeted registry scan completed before the bulk permit was released.
+- Complete the target scan and explicitly poll its probe future into admission before freeing one bulk slot. Keep the fairness assertion and production broker behavior unchanged.
+
+**Result**: Deterministic test setup prepared; regression checks and reviews pending.
+
+### Task: Validate deterministic probe fairness coverage
+Date: 2026/09/19 12:46
+
+- Full Rust regression suite, formatting, and clippy passed after the test synchronization fix.
+- The repaired fairness test passed 50 consecutive isolated runs.
+- Design and performance reviews confirmed the original fairness coverage and task cleanup are preserved.
+
+**Result**: Ready for fresh Linux/macOS CI and preview publication.

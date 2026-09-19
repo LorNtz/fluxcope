@@ -3883,7 +3883,6 @@ mod tests {
             .collect::<Vec<_>>();
         let target = descriptors.last().expect("target descriptor").clone();
         let target_endpoint = target.proxy_endpoint();
-        let target_run_id = target.run_id().clone();
         let gate = Arc::new(Semaphore::new(0));
         let probe = FakeProbe::gated(&descriptors, Arc::clone(&gate));
         let broker = broker(FakeRegistry::new(descriptors), Arc::clone(&probe));
@@ -3895,24 +3894,27 @@ mod tests {
             tokio::spawn(async move { broker.discover(client(), deadline(), cancelled).await })
         };
         wait_for_active(&probe, 16).await;
-        let targeted = {
+        // Finish the blocking registry read before testing probe queue ordering.
+        let target_scan = broker
+            .scan(
+                Some(target_endpoint),
+                deadline(),
+                targeted_cancelled.clone(),
+            )
+            .await
+            .expect("targeted registry scan");
+        let mut targeted = Box::pin({
             let broker = broker.clone();
             let cancelled = targeted_cancelled.clone();
-            tokio::spawn(async move {
+            async move {
                 broker
-                    .resolve(
-                        InstanceSelector {
-                            proxy_endpoint: Some(target_endpoint),
-                            run_id: Some(target_run_id),
-                        },
-                        SelectorRequirement::SnapshotRead,
-                        deadline(),
-                        cancelled,
-                    )
+                    .probe_scan(target_scan, client(), deadline(), cancelled)
                     .await
-            })
-        };
-        tokio::task::yield_now().await;
+            }
+        });
+        // Poll through admission so the target is queued before a bulk slot opens.
+        assert!(futures::poll!(targeted.as_mut()).is_pending());
+        let targeted = tokio::spawn(targeted);
 
         gate.add_permits(1);
         tokio::time::timeout(Duration::from_millis(100), async {
