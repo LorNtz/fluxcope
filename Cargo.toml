@@ -75,7 +75,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 rmcp = { version = "=3.1.4", default-features = false, features = ["transport-child-process"] }
-portable-pty = "0.8"
+portable-pty = "0.9"
 
 [[bench]]
 name = "core_paths"

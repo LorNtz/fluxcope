@@ -352,3 +352,20 @@ Date: 2026/09/17 12:03
 Date: 2026/09/17 12:06
 
 - Both independent reviews are clean: test bodies/assertions/attributes, owner-private access, fixture lifetimes and concurrency behavior are preserved. After the final naming refinements, all-feature tests, strict Clippy and formatting passed again; exact final inventory remains 873 tests with zero missing or added cases.
+
+### Task: Repair branch preview CI blockers
+Date: 2026/09/19 12:36
+
+- Upgraded the feature branch PTY test dependency to portable-pty 0.9 to remove unmaintained serial; lockfile and regression verification follow.
+
+**Result**: Implementation prepared; validation and design/performance reviews pending.
+
+### Task: Validate the preview PTY dependency upgrade
+Date: 2026/09/19 12:39
+
+- Updated only portable-pty and its affected lockfile dependencies; removed serial, serial-core, serial-unix, serial-windows, ioctl-rs, and termios.
+- Passed cargo test --all-targets --all-features --locked, including all PTY/MCP integration tests.
+- Passed cargo fmt, clippy with warnings denied, and the pinned cargo-deny advisory/license/source gates.
+- Design and performance reviews found no actionable issues.
+
+**Result**: The feature branch no longer needs an advisory exception for the old serial dependency.
