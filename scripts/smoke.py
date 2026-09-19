@@ -152,6 +152,14 @@ def check_permissions(home: Path):
     assert (home / '.fluxcope').stat().st_mode & 0o777 == 0o700
 
 
+def smoke_log(state: Path) -> Path:
+    # The isolated smoke HOME contains one app instance, using either layout.
+    logs = [path for path in (state / 'fluxcope.log', *(state / 'logs').glob('*.log'))
+            if path.is_file()]
+    assert len(logs) == 1, f'expected exactly one app log in {state}, found {len(logs)}'
+    return logs[0]
+
+
 def smoke(binary: Path, version: str):
     with tempfile.TemporaryDirectory(prefix='fluxcope-smoke-') as directory:
         home = Path(directory)
@@ -200,9 +208,7 @@ def smoke(binary: Path, version: str):
                 terminal.key(b'q')
                 terminal.finish()
             certificate_digest = hashlib.sha256(ca.read_bytes()).hexdigest()
-            logs = list((state / 'logs').glob('*.log'))
-            assert len(logs) == 1, 'expected one per-instance log'
-            log_path = logs[0]
+            log_path = smoke_log(state)
             log = log_path.read_text()
             match = re.search(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', log)
             assert match, 'CA download URL missing'
