@@ -152,6 +152,14 @@ def check_permissions(home: Path):
     assert (home / '.fluxcope').stat().st_mode & 0o777 == 0o700
 
 
+def smoke_log(state: Path) -> Path:
+    # The isolated smoke HOME contains one app instance, using either layout.
+    logs = [path for path in (state / 'fluxcope.log', *(state / 'logs').glob('*.log'))
+            if path.is_file()]
+    assert len(logs) == 1, f'expected exactly one app log in {state}, found {len(logs)}'
+    return logs[0]
+
+
 def smoke(binary: Path, version: str):
     with tempfile.TemporaryDirectory(prefix='fluxcope-smoke-') as directory:
         home = Path(directory)
@@ -200,15 +208,16 @@ def smoke(binary: Path, version: str):
                 terminal.key(b'q')
                 terminal.finish()
             certificate_digest = hashlib.sha256(ca.read_bytes()).hexdigest()
-            log = (state / 'fluxcope.log').read_text()
+            log_path = smoke_log(state)
+            log = log_path.read_text()
             match = re.search(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', log)
             assert match, 'CA download URL missing'
             # Restart checks persistence and the restricted CA download endpoint.
             with Terminal(binary, home) as terminal:
                 terminal.wait(lambda: ready(proxy) and b'\x1b[?1049h' in terminal.output, 'restart')
-                terminal.wait(lambda: len(re.findall(r'CA certificate download URL:', (state / 'fluxcope.log').read_text())) >= 2,
+                terminal.wait(lambda: len(re.findall(r'CA certificate download URL:', log_path.read_text())) >= 2,
                               'restart CA service')
-                matches = re.findall(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', (state / 'fluxcope.log').read_text())
+                matches = re.findall(r'CA certificate download URL: http://[^:/]+:(\d+)/fluxcope-ca.pem', log_path.read_text())
                 download_port = int(matches[-1])
                 status, pem = request(download_port, '/fluxcope-ca.pem')
                 assert status == 200 and pem == ca.read_bytes()
