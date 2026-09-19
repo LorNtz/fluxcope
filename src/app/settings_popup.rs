@@ -1,5 +1,12 @@
-use crate::select::SelectState;
-use crate::settings::{AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule};
+use std::sync::Arc;
+
+pub(crate) use crate::settings::mapping_ops::ProxyRuleTable;
+use crate::{
+    select::SelectState,
+    settings::{
+        AppSettings, ConfigMode, SettingsUiContext, mapping_ops::find_mapping_preset_index,
+    },
+};
 use tui_scrollview::ScrollViewState;
 
 use super::settings_draft::SettingsDraft;
@@ -10,7 +17,7 @@ mod field_editor;
 mod navigation;
 mod proxy;
 mod validation;
-use validation::validate_settings;
+pub(crate) use validation::validate_settings;
 
 pub(crate) const PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS: usize = 6;
 
@@ -147,12 +154,6 @@ pub(crate) struct FieldEditState<'a> {
     pub cursor: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProxyRuleTable {
-    Remote,
-    Local,
-}
-
 impl ProxyRuleTable {
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -165,73 +166,6 @@ impl ProxyRuleTable {
         match self {
             Self::Remote => "Edit Map Remote Rule",
             Self::Local => "Edit Map Local Rule",
-        }
-    }
-}
-
-enum EditableRulesMut<'a> {
-    Remote(&'a mut Vec<ProxyMapRemoteRule>),
-    Local(&'a mut Vec<ProxyMapLocalRule>),
-}
-
-impl EditableRulesMut<'_> {
-    fn insert_default(&mut self, index: usize) {
-        match self {
-            Self::Remote(rules) => rules.insert(
-                index.min(rules.len()),
-                ProxyMapRemoteRule {
-                    from: "https://example.com".to_string(),
-                    to: "http://localhost:3000".to_string(),
-                    enable: true,
-                },
-            ),
-            Self::Local(rules) => rules.insert(
-                index.min(rules.len()),
-                ProxyMapLocalRule {
-                    from: "https://example.com".to_string(),
-                    to: "~/mock-response.json".to_string(),
-                    enable: true,
-                },
-            ),
-        }
-    }
-
-    fn remove(&mut self, index: usize) {
-        match self {
-            Self::Remote(rules) if index < rules.len() => {
-                rules.remove(index);
-            }
-            Self::Local(rules) if index < rules.len() => {
-                rules.remove(index);
-            }
-            Self::Remote(_) | Self::Local(_) => {}
-        }
-    }
-
-    fn swap(&mut self, first: usize, second: usize) {
-        match self {
-            Self::Remote(rules) if first < rules.len() && second < rules.len() => {
-                rules.swap(first, second);
-            }
-            Self::Local(rules) if first < rules.len() && second < rules.len() => {
-                rules.swap(first, second);
-            }
-            Self::Remote(_) | Self::Local(_) => {}
-        }
-    }
-
-    fn toggle(&mut self, index: usize) {
-        match self {
-            Self::Remote(rules) => {
-                if let Some(rule) = rules.get_mut(index) {
-                    rule.enable = !rule.enable;
-                }
-            }
-            Self::Local(rules) => {
-                if let Some(rule) = rules.get_mut(index) {
-                    rule.enable = !rule.enable;
-                }
-            }
         }
     }
 }
@@ -267,8 +201,10 @@ impl ProxyWidget {
         if proxy.presets.is_empty() {
             return &Self::EMPTY;
         }
-        let active = proxy.active_preset.as_deref();
-        if active.is_some_and(|active| proxy.presets.iter().any(|preset| preset.name == active)) {
+        let Some(active) = proxy.active_preset.as_deref() else {
+            return &Self::PRESET_ONLY;
+        };
+        if find_mapping_preset_index(proxy, active).is_some() {
             &Self::ACTIVE_PRESET
         } else {
             &Self::PRESET_ONLY
@@ -351,7 +287,7 @@ pub struct ActionDialog {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingsPopupAction {
     None,
-    Save(AppSettings),
+    Save(Arc<AppSettings>),
     Close,
 }
 
@@ -664,6 +600,7 @@ pub struct SettingsPopup {
     pub selected_row: usize,
     pub scroll: ScrollViewState,
     draft: SettingsDraft,
+    context: SettingsUiContext,
     mode: EditMode,
     field_hint: Option<FieldEditHint>,
     scroll_request: Option<SettingsScrollRequest>,
@@ -674,7 +611,12 @@ pub struct SettingsPopup {
 }
 
 impl SettingsPopup {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_context(SettingsUiContext::default())
+    }
+
+    pub(crate) fn with_context(context: SettingsUiContext) -> Self {
         let settings = AppSettings::default();
         Self {
             visible: false,
@@ -682,6 +624,7 @@ impl SettingsPopup {
             topic: SettingsTopic::Server,
             selected_row: 0,
             scroll: ScrollViewState::default(),
+            context,
             draft: SettingsDraft::new(settings),
             mode: EditMode::Browse,
             field_hint: None,
@@ -693,7 +636,7 @@ impl SettingsPopup {
         }
     }
 
-    pub fn open(&mut self, settings: AppSettings) {
+    pub fn open(&mut self, settings: impl Into<Arc<AppSettings>>) {
         self.bump_presentation_revision();
         self.visible = true;
         self.focus = SettingsPaneFocus::Topics;
@@ -746,7 +689,7 @@ impl SettingsPopup {
             message_lines: vec!["You have unsaved setting changes."],
             actions: vec![
                 DialogAction {
-                    label: "Save",
+                    label: self.commit_label(),
                     key_hint: "Enter",
                     kind: DialogActionKind::Save,
                 },
@@ -757,6 +700,21 @@ impl SettingsPopup {
                 },
             ],
         })
+    }
+
+    pub(crate) fn commit_label(&self) -> &'static str {
+        match self.context.persistence {
+            crate::settings::PersistenceMode::Persistent => "Save",
+            crate::settings::PersistenceMode::Ephemeral => "Apply",
+        }
+    }
+
+    pub(crate) fn mode_label(&self) -> &'static str {
+        match self.context.config_mode {
+            ConfigMode::DefaultOwned => "Default config (persistent)",
+            ConfigMode::ReadOnlyFile => "Read-only file (ephemeral)",
+            ConfigMode::Temporary => "Temporary (ephemeral)",
+        }
     }
 
     pub fn mark_saved(&mut self) {

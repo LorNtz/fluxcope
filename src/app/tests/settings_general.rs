@@ -11,6 +11,25 @@ fn settings_popup_tracks_dirty_draft() {
     popup.draft_mut_for_tests().recording.start_record_on_launch = false;
     assert!(popup.is_dirty());
 }
+#[test]
+fn persistent_settings_context_uses_save_commit_label() {
+    let app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::DefaultOwned,
+        persistence: PersistenceMode::Persistent,
+    });
+
+    assert_eq!(app.settings_popup.commit_label(), "Save");
+}
+
+#[test]
+fn ephemeral_settings_context_uses_apply_commit_label() {
+    let app = app_with_settings_context(SettingsUiContext {
+        config_mode: ConfigMode::Temporary,
+        persistence: PersistenceMode::Ephemeral,
+    });
+
+    assert_eq!(app.settings_popup.commit_label(), "Apply");
+}
 
 #[test]
 fn settings_popup_rejects_invalid_remote_rule_url() {
@@ -173,7 +192,7 @@ fn successful_settings_save_closes_popup_focus() {
     let saved = app
         .take_settings_save_request()
         .expect("settings save should be queued");
-    app.finish_settings_save(saved);
+    app.finish_settings_save(saved, crate::runtime::settings::SettingsRevision::INITIAL);
 
     assert!(!app.settings_popup.visible);
     assert!(!app.is_popup_focused(PopupFocus::Settings));
@@ -182,6 +201,28 @@ fn successful_settings_save_closes_popup_focus() {
     app.handle_key_event(key(KeyCode::Char('r')));
 
     assert!(!app.is_recording());
+}
+
+#[test]
+fn tui_save_completion_keeps_the_authoritative_transaction_revision() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .draft_mut_for_tests()
+        .recording
+        .start_record_on_launch = false;
+    let saved = app.settings_popup.draft().clone();
+    let revision = crate::runtime::settings::SettingsRevision::new(2);
+
+    app.apply_settings_transaction_commit_from_origin(
+        std::sync::Arc::new(saved.clone()),
+        revision,
+        crate::runtime::settings::SettingsTransactionOrigin::Tui,
+    )
+    .expect("authoritative transaction commit");
+    app.finish_settings_save(saved, revision);
+
+    assert_eq!(app.settings_revision(), revision);
 }
 
 #[test]
@@ -227,4 +268,85 @@ fn settings_popup_space_toggles_recording_launch_setting() {
     app.handle_key_event(key(KeyCode::Char(' ')));
 
     assert!(!app.settings_popup.draft().recording.start_record_on_launch);
+}
+
+#[test]
+fn settings_revision_starts_at_one_after_settings_load() {
+    let app = App::new(ui_settings(true));
+
+    assert_eq!(
+        app.settings_revision(),
+        crate::runtime::settings::SettingsRevision::INITIAL
+    );
+}
+
+#[test]
+fn external_commit_refreshes_an_open_clean_popup_without_closing_it() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    let mut committed = AppSettings::default();
+    committed.server.port = 9193;
+
+    app.apply_settings_transaction_commit(
+        std::sync::Arc::new(committed),
+        crate::runtime::settings::SettingsRevision::new(2),
+    )
+    .expect("clean popup refresh");
+
+    assert!(app.settings_popup.visible);
+    assert!(!app.settings_popup.is_dirty());
+    assert_eq!(app.settings_popup.draft().server.port, 9193);
+    assert_eq!(
+        app.settings_revision(),
+        crate::runtime::settings::SettingsRevision::new(2)
+    );
+}
+
+#[test]
+fn external_commit_never_overwrites_a_dirty_popup_draft() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup.draft_mut_for_tests().server.port = 9194;
+    let mut committed = AppSettings::default();
+    committed.server.port = 9195;
+
+    let error = app
+        .apply_settings_transaction_commit(
+            std::sync::Arc::new(committed),
+            crate::runtime::settings::SettingsRevision::new(2),
+        )
+        .expect_err("dirty popup must have rejected transaction admission");
+
+    assert_eq!(
+        error.code(),
+        crate::control_rpc::protocol::ControlErrorCode::TuiDraftConflict
+    );
+    assert_eq!(app.settings_popup.draft().server.port, 9194);
+    assert_eq!(
+        app.settings_revision(),
+        crate::runtime::settings::SettingsRevision::INITIAL
+    );
+}
+
+#[test]
+fn pending_transaction_keeps_popup_readable_but_blocks_edits_and_saves() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.set_settings_transaction_pending(true);
+    let before = app.settings_popup.draft().clone();
+
+    focus_settings_content(&mut app);
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Char('9')));
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Char('s')));
+    app.handle_key_event(key(KeyCode::Esc));
+
+    assert!(
+        app.settings_popup.visible,
+        "pending save must reach a terminal result before the popup can close"
+    );
+    assert_eq!(app.settings_popup.draft(), &before);
+    assert!(app.take_settings_save_request().is_none());
+    assert!(app.settings_popup.error().is_some());
 }

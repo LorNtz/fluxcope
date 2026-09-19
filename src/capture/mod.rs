@@ -1,18 +1,37 @@
 mod body;
+mod body_work;
+mod change;
+
 mod decode;
 mod model;
 mod publisher;
 mod store;
 
+#[cfg(any(test, feature = "benchmark"))]
 use hyper::Method;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 pub(crate) use body::{BodySender, BodyTaskTracker, body_channel, drain_body, tee_body};
-pub(crate) use decode::{
-    DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics, DecodeMetricsSnapshot, DecodePolicy,
-    DecodeResult, start_decode_service,
+pub(crate) use change::{
+    CaptureChange, CaptureChangeError, CaptureChangeFeed, CaptureChangeKind,
+    CaptureChangeSubscription,
 };
+
+pub(crate) use body_work::{
+    ACTIVE_BODY_WORK_LIMIT, ActiveBodyWorkLease, BodyWorkAdmission, QUEUED_BODY_INPUT_LIMIT_BYTES,
+    QUEUED_BODY_WORK_LIMIT,
+};
+pub(crate) use decode::{
+    ContentDecodePolicy, DecodeClient, DecodeDisplayMode, DecodeKey, DecodeMetrics,
+    DecodeMetricsSnapshot, DecodePolicy, DecodeResult, DecodedBytes, decode_content_bytes,
+    start_decode_service_with_admission,
+};
+#[cfg(test)]
+pub(crate) use decode::{DecodeService, start_decode_service};
 pub use model::{
-    BodyPreviewLimit, BodySide, BodyStatus, BodyStreamState, CaptureRecord, CaptureSummary,
+    BodyPreviewLimit, BodySide, BodySnapshot, BodyStatus, BodyStreamState, CaptureRecord,
+    CaptureSnapshot, CaptureSnapshotMode, CaptureSummary, CaptureTiming, CapturedBodyChunks,
     CapturedBodyPreview, CapturedHeaders, MetadataTruncation, RequestMetadata, ResponseMetadata,
 };
 pub(crate) use publisher::{
@@ -21,6 +40,7 @@ pub(crate) use publisher::{
 };
 pub(crate) use store::{CaptureRetentionPolicy, CaptureStore};
 
+#[cfg(feature = "benchmark")]
 pub(crate) fn benchmark_ordered_store(captures: Vec<CapturedExchange>) -> usize {
     let mut store = CaptureStore::new(CaptureRetentionPolicy {
         max_records: usize::MAX,
@@ -33,7 +53,10 @@ pub(crate) fn benchmark_ordered_store(captures: Vec<CapturedExchange>) -> usize 
 }
 
 /// Monotonic identity assigned when a request is admitted for capture.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(transparent)]
 pub struct CaptureSequence(u64);
 
 impl CaptureSequence {
@@ -46,6 +69,7 @@ impl CaptureSequence {
     }
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 /// Immutable, completed capture representation used while live streaming is introduced.
 #[derive(Clone, Debug)]
 pub struct CapturedExchange {
@@ -61,6 +85,7 @@ pub struct CapturedExchange {
     pub res_body: Option<String>,
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 impl CapturedExchange {
     pub fn display_uri(&self) -> &str {
         self.mapped_uri.as_deref().unwrap_or(&self.uri)
@@ -80,6 +105,7 @@ impl CapturedExchange {
     }
 }
 
+#[cfg(any(test, feature = "benchmark"))]
 fn headers_bytes(headers: &[(String, String)]) -> usize {
     headers.iter().fold(0_usize, |total, (name, value)| {
         total.saturating_add(name.len()).saturating_add(value.len())

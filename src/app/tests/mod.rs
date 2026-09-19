@@ -6,7 +6,10 @@ use crate::{
         start_decode_service,
     },
     recording::RecordingState,
-    settings::{RecordingPrefilterPatternSettings, RequestListSettings, UiSettings},
+    settings::{
+        ConfigMode, PersistenceMode, RecordingPrefilterPatternSettings, RequestListSettings,
+        UiSettings,
+    },
     ui::RootView,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -21,6 +24,15 @@ fn ui_settings(auto_expand: bool) -> UiSettings {
     UiSettings {
         request_list: RequestListSettings { auto_expand },
     }
+}
+fn app_with_settings_context(context: SettingsUiContext) -> App {
+    App::with_runtime_policies(
+        AppSettings::default(),
+        RecordingState::default(),
+        LogRetentionPolicy::default(),
+        CaptureRetentionPolicy::default(),
+        context,
+    )
 }
 
 fn captured(uri: &str) -> CapturedExchange {
@@ -153,6 +165,8 @@ fn app_with_proxy_presets(active: &str) -> App {
 
 mod body_display;
 mod body_viewer;
+#[cfg(unix)]
+mod control;
 mod focus_input;
 mod request_search;
 mod request_tree;

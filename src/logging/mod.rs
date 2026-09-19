@@ -13,7 +13,7 @@ use log::{Level, Metadata, Record, SetLoggerError};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use writer::LoggingStatus;
+pub(crate) use writer::{LoggingStatus, endpoint_log_path};
 
 const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -176,6 +176,36 @@ impl AppLogger {
         }
         LogRecord::new(message)
     }
+}
+
+#[cfg(feature = "benchmark")]
+pub(crate) fn benchmark_format_endpoint_records(count: usize, payload_bytes: usize) -> usize {
+    let (tx, _rx) = mpsc::channel(1);
+    let logger = AppLogger {
+        tx,
+        max_record_bytes: payload_bytes.saturating_add(256),
+        metrics: Arc::new(LoggingMetrics::default()),
+    };
+    let payload = "x".repeat(payload_bytes);
+    (0..count)
+        .map(|index| {
+            let arguments = format_args!("endpoint=127.0.0.1:8989 index={index} {payload}");
+            let record = Record::builder()
+                .level(Level::Info)
+                .target("fluxcope::proxy")
+                .args(arguments)
+                .build();
+            logger.format_record(&record).len()
+        })
+        .sum()
+}
+
+#[cfg(feature = "benchmark")]
+pub(crate) async fn benchmark_log_rotation(
+    path: &std::path::Path,
+    retained_files: usize,
+) -> std::io::Result<()> {
+    writer::benchmark_rotate(path, retained_files).await
 }
 
 impl log::Log for AppLogger {

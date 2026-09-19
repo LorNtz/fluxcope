@@ -204,6 +204,45 @@ fn settings_popup_mouse_toggles_prefilter_pattern_checkbox() {
 }
 
 #[test]
+fn pending_settings_transaction_blocks_mouse_checkbox_mutation() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Recording);
+    app.settings_popup
+        .draft_mut_for_tests()
+        .recording
+        .prefilter
+        .include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
+        "https://api.example.com/*",
+    )];
+    app.set_settings_transaction_pending(true);
+    let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
+    let content_area = settings_content_test_area(buffer.area);
+    let pattern = find_buffer_text(&buffer, content_area, "https://api.example.com/*")
+        .expect("prefilter pattern should render");
+
+    ui.handle_mouse(
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            pattern.x.saturating_sub(5),
+            pattern.y,
+        ),
+        &mut app,
+    );
+
+    assert!(
+        app.settings_popup
+            .draft()
+            .recording
+            .prefilter
+            .include_url_patterns[0]
+            .enable
+    );
+    assert!(app.settings_popup.error().is_some());
+}
+
+#[test]
 fn settings_popup_mouse_wheel_scrolls_overflowing_prefilter_table() {
     let mut app = App::new(ui_settings(true));
     app.open_settings_popup();

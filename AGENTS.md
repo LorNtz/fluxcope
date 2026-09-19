@@ -1,6 +1,6 @@
 # Project Description
 
-Fluxcope is a terminal UI MITM proxy built with ratatui and hudsucker. The long-term goal is to provide a Charles-like local debugging proxy experience in the terminal: capture HTTP/HTTPS traffic, inspect requests and responses, rewrite requests, map responses to local files, and keep the configuration editable and stable across launches.
+Fluxcope is a terminal UI MITM proxy built with Ratatui and Hudsucker. It provides a Charles-like local debugging workflow and an optional multi-instance MCP control plane for local LLM agents to inspect captured traffic and manage recording and mapping state.
 
 The app currently runs a local proxy on the configured port, forwards HTTP and HTTPS traffic, and records captured request/response pairs while recording is enabled. The main UI has a status bar at the top and a normal workspace below it:
 1. Left request tree:
@@ -18,7 +18,9 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 
 # Current Status
 
-- Proxy startup uses the configured `server.port` and rejects startup when the port is already occupied.
+- Proxy startup binds the configured `server.port` on all IPv4 interfaces and rejects startup when the port is occupied.
+- Process modes support default-owned persistent settings, read-only settings files, and ephemeral temporary proxy settings.
+- The `fluxcope mcp` stdio broker discovers owner-local instances and exposes bounded capture inspection, recording and revision-safe mapping controls, status, audit data, and agent prompts through per-instance Unix control sockets.
 - CA generation/loading uses configurable certificate store settings, and the app can expose the CA PEM through a temporary LAN download server with a QR-code popup opened by `c`.
 - Recording can start enabled or disabled from config, can be toggled with `r`, and recording-off traffic still forwards and applies mapping without storing captures.
 - Request-response matching is tracked per proxy handler instance, so concurrent in-flight requests are captured independently.
@@ -36,7 +38,7 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 - The body editor supports Vim-like navigation, `/` search, visual selection and copy, flash-style visible-text jumping with adaptive labels, and a scoped subset of normal-mode `y` copy actions for common motions plus inner-word/delimiter text objects.
 - Log panel is hidden by default and toggles as a full-workspace panel below the status bar.
 - Persistent settings manager reads and writes YAML at `~/.fluxcope/config.yml`.
-- Supported config currently includes `server.port`, `certificate.store_dir`, `certificate.pem_filename`, `recording.start_record_on_launch`, `ui.request_list.auto_expand`, and optional `proxy` mapping settings.
+- Supported config includes server, certificate, recording and URL prefilter, request-list UI, optional proxy mapping, and disabled-by-default MCP settings.
 - Optional proxy mapping supports enable flags, active presets, map-remote rules, map-local rules, disabled rules, host-level rules, full-path rules, and map-local after map-remote.
 - Config serialization preserves present default-valued entries generically when removing them would be a semantic no-op, and keeps existing YAML mapping order stable where possible.
 
@@ -48,7 +50,7 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 - This is aim to be a serious production-ready project and do not treat it as a demo when implementing features. Every delivery should be a complete feature and don't implement things halfway.
 - For newly added code, do some proper abstractions like traits or generics to provide extensibility, especially at the interface level but avoid over-engineering (like adding a helper function only to take arguments and create a struct with them but without doing anything else). It is encouraged to create helper functions to improve maintainability and readability but avoid splitting a continuous logic into multiple functions, especially those that are unlikely to be reused and require lengthy naming to explain their purpose.
 - Avoid making a file or module overly lengthy. If the newly added code causes this, it is encouraged to perform some idiomatic and appropriate module/file splitting (at this point, adjustments and refactoring of the existing code architecture without breaking are allowed). However, it is not encouraged to rigidly split some highly cohesive code.
-- Do track @agent_journal.md in git history. When you switch branches just bring it across branches.
+- Keep `requirements.md` and `what_i_just_did.md` local-only and out of Git. Track `agent_journal.md` and carry it across branches.
 - After code implementation (remember that plan or doc changes are not included), use subagents to review the changes. Spawn two subagents with their jobs described below. Notice that the main agent will do all the programmatic checkings (cargo test, cargo fmt, clippy and so on) so subagents should not do these again. Wait for all of them, then make appropriate modifications to the change based on the review opinions.
     - One subagent for design pattern and maintainability review, with (and not limited to) these responsibilities:
         - discovering repeating patterns that can be elegantly abstracted and properly encapsulated, and offer design advices as a senior professional engineer

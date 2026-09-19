@@ -48,21 +48,24 @@ async fn selected_streaming_body_progress_refreshes_without_per_chunk_render_eve
     let mut app = App::new(ui_settings(true));
     app.add_capture(record);
     app.detail_panel.select_tab(MainDisplayTab::RequestBody);
-    let key = app.current_body_viewer_key().expect("body key");
+    let initial_key = app.current_body_viewer_key().expect("initial body key");
     assert_eq!(
         app.prepare_current_body_display(std::time::Instant::now()),
         BodyDisplayPreparation::ReadyToRender
     );
     assert_eq!(
-        app.cached_body_text(key),
+        app.cached_body_text(initial_key),
         Some("(Body streaming… 0 bytes observed)")
     );
 
     handle.append(BodySide::Request, b"abc");
 
     assert!(app.refresh_selected_live_body());
+    let updated_key = app.current_body_viewer_key().expect("updated body key");
+    assert_ne!(updated_key, initial_key);
+    assert!(app.cached_body_text(initial_key).is_none());
     assert_eq!(
-        app.cached_body_text(key),
+        app.cached_body_text(updated_key),
         Some("(Body streaming… 3 bytes observed)")
     );
     assert!(!app.refresh_selected_live_body());

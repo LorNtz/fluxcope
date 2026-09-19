@@ -1,14 +1,20 @@
 #[cfg(test)]
 use super::ProxyRow;
 use super::{
-    EditMode, EditableRulesMut, FieldApplyOutcome, FieldEditKind,
-    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, ProxyPresetChoice, ProxyRuleTable, ProxyWidget,
-    RuleEditField, RuleEditorState, SelectCommitEffect, SelectTarget, SettingsPaneFocus,
-    SettingsPopup, SettingsPopupAction, SettingsSelectId, SettingsTableState, SettingsTopic,
+    EditMode, FieldApplyOutcome, FieldEditKind, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS,
+    ProxyPresetChoice, ProxyRuleTable, ProxyWidget, RuleEditField, RuleEditorState,
+    SelectCommitEffect, SelectTarget, SettingsPaneFocus, SettingsPopup, SettingsPopupAction,
+    SettingsSelectId, SettingsTableState, SettingsTopic,
 };
 use crate::{
     select::{SelectCommit, SelectItem, SelectItemRole, SelectOutcome, SelectState},
-    settings::{AppSettings, ProxyPresetSettings},
+    settings::{
+        AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings,
+        mapping_ops::{
+            MappingMutation, MappingMutationErrorKind, apply_mapping_mutation,
+            find_mapping_preset_index,
+        },
+    },
 };
 use crossterm::event::KeyEvent;
 
@@ -213,12 +219,7 @@ impl SettingsPopup {
     }
 
     fn active_proxy_preset_select_id(&self) -> Option<SettingsSelectId> {
-        let proxy = self.draft.proxy.as_ref()?;
-        let active = proxy.active_preset.as_deref()?;
-        proxy
-            .presets
-            .iter()
-            .position(|preset| preset.name == active)
+        active_preset_index(&self.draft)
             .map(|index| SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)))
     }
 
@@ -264,10 +265,19 @@ impl SettingsPopup {
     }
 
     fn apply_proxy_preset_selection(&mut self, index: usize) {
-        if let Some(proxy) = &mut self.draft.proxy
-            && let Some(name) = proxy.presets.get(index).map(|preset| preset.name.clone())
+        let name = self
+            .draft
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.presets.get(index))
+            .map(|preset| preset.name.clone());
+        if let Some(name) = name
+            && apply_mapping_mutation(
+                &mut self.draft,
+                MappingMutation::SetActivePreset { name: Some(name) },
+            )
+            .is_ok()
         {
-            proxy.active_preset = Some(name);
             self.draft.clear_error();
             self.field_hint = None;
             self.reset_table_scrolls();
@@ -400,45 +410,68 @@ impl SettingsPopup {
         from: String,
         to: String,
     ) {
-        match table {
-            ProxyRuleTable::Remote => {
-                if let Some(rule) = self
-                    .active_preset_mut()
-                    .and_then(|preset| preset.map_remote.rules.get_mut(index))
-                {
-                    rule.from = from;
-                    rule.to = to;
-                    self.draft.clear_error();
-                }
-            }
-            ProxyRuleTable::Local => {
-                if let Some(rule) = self
-                    .active_preset_mut()
-                    .and_then(|preset| preset.map_local.rules.get_mut(index))
-                {
-                    rule.from = from;
-                    rule.to = to;
-                    self.draft.clear_error();
-                }
-            }
+        let Some(preset) = self.active_preset_name().map(str::to_string) else {
+            self.draft.set_error("select a proxy preset first");
+            return;
+        };
+        let mutation = match table {
+            ProxyRuleTable::Remote => MappingMutation::UpdateRemoteRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+            ProxyRuleTable::Local => MappingMutation::UpdateLocalRule {
+                preset,
+                index,
+                from,
+                to,
+            },
+        };
+        match apply_mapping_mutation(&mut self.draft, mutation) {
+            Ok(_) => self.draft.clear_error(),
+            Err(error) => self.draft.set_error(error.message),
         }
     }
 
     pub(super) fn toggle_selected_proxy_checkbox(&mut self) {
         match self.selected_proxy_widget() {
             Some(ProxyWidget::MappingEnabled) => {
-                if let Some(proxy) = self.draft.proxy.as_mut() {
-                    proxy.enable = !proxy.enable;
+                if let Some(enabled) = self.draft.proxy.as_ref().map(|proxy| !proxy.enable) {
+                    let _ = apply_mapping_mutation(
+                        &mut self.draft,
+                        MappingMutation::SetGlobalEnabled { enabled },
+                    );
                 }
             }
             Some(ProxyWidget::MapRemoteEnabled) => {
-                if let Some(preset) = self.active_preset_mut() {
-                    preset.map_remote.enable = !preset.map_remote.enable;
+                if let Some((preset, enabled)) = self
+                    .active_proxy_preset()
+                    .map(|preset| (preset.name.clone(), !preset.map_remote.enable))
+                {
+                    let _ = apply_mapping_mutation(
+                        &mut self.draft,
+                        MappingMutation::SetTableEnabled {
+                            preset,
+                            table: ProxyRuleTable::Remote,
+                            enabled,
+                        },
+                    );
                 }
             }
             Some(ProxyWidget::MapLocalEnabled) => {
-                if let Some(preset) = self.active_preset_mut() {
-                    preset.map_local.enable = !preset.map_local.enable;
+                if let Some((preset, enabled)) = self
+                    .active_proxy_preset()
+                    .map(|preset| (preset.name.clone(), !preset.map_local.enable))
+                {
+                    let _ = apply_mapping_mutation(
+                        &mut self.draft,
+                        MappingMutation::SetTableEnabled {
+                            preset,
+                            table: ProxyRuleTable::Local,
+                            enabled,
+                        },
+                    );
                 }
             }
             _ => {
@@ -500,16 +533,42 @@ impl SettingsPopup {
         let inserted = index
             .map_or(current_count, |index| index.saturating_add(1))
             .min(current_count);
-        if let Some(mut rules) = self.editable_rules_mut(table) {
-            rules.insert_default(inserted);
+        if let Some(preset) = self.active_preset_name().map(str::to_string) {
+            let mutation = match table {
+                ProxyRuleTable::Remote => MappingMutation::InsertRemoteRule {
+                    preset,
+                    index: inserted,
+                    rule: ProxyMapRemoteRule {
+                        from: "https://example.com".to_string(),
+                        to: "http://localhost:3000".to_string(),
+                        enable: true,
+                    },
+                },
+                ProxyRuleTable::Local => MappingMutation::InsertLocalRule {
+                    preset,
+                    index: inserted,
+                    rule: ProxyMapLocalRule {
+                        from: "https://example.com".to_string(),
+                        to: "~/mock-response.json".to_string(),
+                        enable: true,
+                    },
+                },
+            };
+            self.apply_proxy_mutation(mutation);
         }
         self.clamp_rule_table_scroll(table);
         inserted
     }
 
     pub(super) fn delete_rule(&mut self, table: ProxyRuleTable, index: usize) {
-        if let Some(mut rules) = self.editable_rules_mut(table) {
-            rules.remove(index);
+        if index < self.rule_count(table)
+            && let Some(preset) = self.active_preset_name().map(str::to_string)
+        {
+            self.apply_proxy_mutation(MappingMutation::DeleteRule {
+                preset,
+                table,
+                index,
+            });
         }
         self.clamp_rule_table_scroll(table);
         self.select_rule(table, index);
@@ -517,23 +576,48 @@ impl SettingsPopup {
 
     pub(super) fn move_rule_up(&mut self, table: ProxyRuleTable, index: usize) {
         if index > 0
-            && let Some(mut rules) = self.editable_rules_mut(table)
+            && index < self.rule_count(table)
+            && let Some(preset) = self.active_preset_name().map(str::to_string)
         {
-            rules.swap(index - 1, index);
+            self.apply_proxy_mutation(MappingMutation::MoveRule {
+                preset,
+                table,
+                from: index,
+                to: index - 1,
+            });
         }
         self.select_rule(table, index.saturating_sub(1));
     }
 
     pub(super) fn move_rule_down(&mut self, table: ProxyRuleTable, index: usize) {
-        if let Some(mut rules) = self.editable_rules_mut(table) {
-            rules.swap(index, index.saturating_add(1));
+        let destination = index.saturating_add(1);
+        if destination < self.rule_count(table)
+            && let Some(preset) = self.active_preset_name().map(str::to_string)
+        {
+            self.apply_proxy_mutation(MappingMutation::MoveRule {
+                preset,
+                table,
+                from: index,
+                to: destination,
+            });
         }
-        self.select_rule(table, index.saturating_add(1));
+        self.select_rule(table, destination);
     }
 
     pub(super) fn toggle_rule(&mut self, table: ProxyRuleTable, index: usize) {
-        if let Some(mut rules) = self.editable_rules_mut(table) {
-            rules.toggle(index);
+        let enabled = self.active_proxy_preset().and_then(|preset| match table {
+            ProxyRuleTable::Remote => preset.map_remote.rules.get(index).map(|rule| !rule.enable),
+            ProxyRuleTable::Local => preset.map_local.rules.get(index).map(|rule| !rule.enable),
+        });
+        if let Some(enabled) = enabled
+            && let Some(preset) = self.active_preset_name().map(str::to_string)
+        {
+            self.apply_proxy_mutation(MappingMutation::SetRuleEnabled {
+                preset,
+                table,
+                index,
+                enabled,
+            });
         }
     }
 
@@ -647,26 +731,18 @@ impl SettingsPopup {
         }
     }
 
-    fn active_preset_index(&self) -> Option<usize> {
-        let proxy = self.draft.proxy.as_ref()?;
-        let active = proxy.active_preset.as_deref()?;
-        proxy
-            .presets
-            .iter()
-            .position(|preset| preset.name == active)
+    fn active_preset_name(&self) -> Option<&str> {
+        active_preset(&self.draft).map(|preset| preset.name.as_str())
     }
 
-    fn active_preset_mut(&mut self) -> Option<&mut ProxyPresetSettings> {
-        let index = self.active_preset_index()?;
-        self.draft.proxy.as_mut()?.presets.get_mut(index)
-    }
-
-    fn editable_rules_mut(&mut self, table: ProxyRuleTable) -> Option<EditableRulesMut<'_>> {
-        let preset = self.active_preset_mut()?;
-        Some(match table {
-            ProxyRuleTable::Remote => EditableRulesMut::Remote(&mut preset.map_remote.rules),
-            ProxyRuleTable::Local => EditableRulesMut::Local(&mut preset.map_local.rules),
-        })
+    fn apply_proxy_mutation(&mut self, mutation: MappingMutation) -> bool {
+        match apply_mapping_mutation(&mut self.draft, mutation) {
+            Ok(_) => true,
+            Err(error) => {
+                self.draft.set_error(error.message);
+                false
+            }
+        }
     }
 
     pub(super) fn selected_proxy_widget(&self) -> Option<ProxyWidget> {
@@ -674,52 +750,38 @@ impl SettingsPopup {
     }
 
     pub(super) fn apply_proxy_preset_name(&mut self, value: String) -> FieldApplyOutcome {
-        let Some(index) = self.active_preset_index() else {
+        let Some(name) = self.active_preset_name().map(str::to_string) else {
             self.set_field_hint(
                 FieldEditKind::ProxyPresetName,
                 "select a proxy preset first",
             );
             return FieldApplyOutcome::KeepEditing;
         };
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            self.set_field_hint(
-                FieldEditKind::ProxyPresetName,
-                "preset name cannot be empty",
-            );
-            return FieldApplyOutcome::KeepEditing;
-        }
-        let duplicate = self.draft.proxy.as_ref().is_some_and(|proxy| {
-            proxy
-                .presets
-                .iter()
-                .enumerate()
-                .any(|(preset_index, preset)| preset_index != index && preset.name == trimmed)
-        });
-        if duplicate {
-            self.set_field_hint(FieldEditKind::ProxyPresetName, "preset name already exists");
-            return FieldApplyOutcome::KeepEditing;
-        }
-
-        if let Some(proxy) = self.draft.proxy.as_mut()
-            && let Some(preset) = proxy.presets.get_mut(index)
-        {
-            let name = trimmed.to_string();
-            let old_name = std::mem::replace(&mut preset.name, name);
-            if proxy.active_preset.as_deref() == Some(old_name.as_str()) {
-                proxy.active_preset = Some(preset.name.clone());
+        match apply_mapping_mutation(
+            &mut self.draft,
+            MappingMutation::RenamePreset {
+                name,
+                new_name: value,
+            },
+        ) {
+            Ok(_) => {
+                self.draft.clear_error();
+                self.clear_field_hint(FieldEditKind::ProxyPresetName);
+                self.clamp_selected_row();
+                FieldApplyOutcome::CloseEditor
             }
-            self.draft.clear_error();
-            self.clear_field_hint(FieldEditKind::ProxyPresetName);
-            self.clamp_selected_row();
-            return FieldApplyOutcome::CloseEditor;
+            Err(error) => {
+                let message = match error.kind {
+                    MappingMutationErrorKind::DuplicatePresetName => "preset name already exists",
+                    MappingMutationErrorKind::InvalidField => "preset name cannot be empty",
+                    MappingMutationErrorKind::ProxyNotFound
+                    | MappingMutationErrorKind::PresetNotFound
+                    | MappingMutationErrorKind::RuleNotFound => "select a proxy preset first",
+                };
+                self.set_field_hint(FieldEditKind::ProxyPresetName, message);
+                FieldApplyOutcome::KeepEditing
+            }
         }
-
-        self.set_field_hint(
-            FieldEditKind::ProxyPresetName,
-            "select a proxy preset first",
-        );
-        FieldApplyOutcome::KeepEditing
     }
 
     #[cfg(test)]
@@ -809,6 +871,10 @@ impl SettingsPopup {
 
 fn active_preset(settings: &AppSettings) -> Option<&ProxyPresetSettings> {
     let proxy = settings.proxy.as_ref()?;
-    let active = proxy.active_preset.as_deref()?;
-    proxy.presets.iter().find(|preset| preset.name == active)
+    active_preset_index(settings).and_then(|index| proxy.presets.get(index))
+}
+
+fn active_preset_index(settings: &AppSettings) -> Option<usize> {
+    let proxy = settings.proxy.as_ref()?;
+    find_mapping_preset_index(proxy, proxy.active_preset.as_deref()?)
 }

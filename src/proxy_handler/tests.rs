@@ -8,7 +8,9 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::{
-    capture::{BodyStreamState, CapturePolicy, CaptureRecord, CaptureSequence},
+    capture::{
+        BodyStreamState, CapturePolicy, CaptureRecord, CaptureSequence, CaptureSnapshotMode,
+    },
     request_policy::RequestPolicy,
     settings::{
         AppSettings, ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule,
@@ -16,6 +18,8 @@ use crate::{
         RecordingPrefilterPatternSettings, RecordingPrefilterSettings,
     },
 };
+use chrono::Utc;
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -59,6 +63,73 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn proxy_preserves_both_body_byte_streams_and_records_real_timing_order() {
+    let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
+    let request_bytes = b"request-one-request-two-request-three";
+    let request_body = Body::from_stream(futures::stream::iter(vec![
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-one-")),
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-two-")),
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"request-three")),
+    ]));
+    let before_start = Utc::now();
+    let forwarded_request = match harness
+        .handler
+        .capture_request(request("POST", "https://example.com/timed", request_body))
+        .await
+    {
+        RequestOrResponse::Request(request) => request,
+        RequestOrResponse::Response(_) => panic!("request should be forwarded"),
+    };
+    let after_start = Utc::now();
+    let forwarded_request_bytes = crate::capture::body_bytes(forwarded_request.into_body())
+        .await
+        .expect("request body should forward");
+    assert_eq!(forwarded_request_bytes.as_ref(), request_bytes);
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let response_bytes = b"response-one-response-two-response-three";
+    let response_body = Body::from_stream(futures::stream::iter(vec![
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-one-")),
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-two-")),
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"response-three")),
+    ]));
+    let forwarded_response = harness
+        .handler
+        .capture_response(Response::new(response_body));
+    let forwarded_response_bytes = crate::capture::body_bytes(forwarded_response.into_body())
+        .await
+        .expect("response body should forward");
+    assert_eq!(forwarded_response_bytes.as_ref(), response_bytes);
+
+    let record = harness.next_capture().await;
+    let snapshot = record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
+    let time_to_response = snapshot
+        .timing
+        .time_to_response
+        .expect("response timing should be populated");
+    let total_duration = snapshot
+        .timing
+        .total_duration
+        .expect("both terminal body streams should populate total duration");
+
+    assert!(snapshot.timing.started_at >= before_start);
+    assert!(snapshot.timing.started_at <= after_start);
+    assert!(time_to_response >= Duration::from_millis(2));
+    assert!(total_duration >= time_to_response);
+    assert_eq!(snapshot.request_body.preview.flatten(), request_bytes);
+    assert_eq!(snapshot.response_body.preview.flatten(), response_bytes);
+    assert_eq!(
+        snapshot.request_body.status.stream,
+        BodyStreamState::Complete
+    );
+    assert_eq!(
+        snapshot.response_body.status.stream,
+        BodyStreamState::Complete
+    );
+    harness.finish().await;
+}
+
+#[tokio::test]
 async fn cloned_handlers_capture_concurrent_requests_independently_in_capture_order() {
     let mut harness = Harness::new(RequestPolicyStore::default(), RecordingState::default());
     let mut slow_handler = harness.handler.clone();
@@ -86,7 +157,7 @@ async fn cloned_handlers_capture_concurrent_requests_independently_in_capture_or
         Some(201)
     );
     assert_eq!(
-        slow.body_preview(BodySide::Response).as_ref().as_ref(),
+        slow.body_preview(BodySide::Response).flatten(),
         b"slow body"
     );
     assert_eq!(fast.sequence(), CaptureSequence::new(1));
@@ -99,7 +170,7 @@ async fn cloned_handlers_capture_concurrent_requests_independently_in_capture_or
         Some(200)
     );
     assert_eq!(
-        fast.body_preview(BodySide::Response).as_ref().as_ref(),
+        fast.body_preview(BodySide::Response).flatten(),
         b"fast body"
     );
     harness.finish().await;
@@ -361,7 +432,7 @@ async fn local_mapping_streams_file_and_captures_exact_bytes() {
         Some(path.to_string_lossy().as_ref())
     );
     assert_eq!(
-        capture.body_preview(BodySide::Response).as_ref().as_ref(),
+        capture.body_preview(BodySide::Response).flatten(),
         br#"{"ok":true}"#
     );
     assert_eq!(summary.response_body.stream, BodyStreamState::Complete);
@@ -396,10 +467,8 @@ async fn missing_local_file_returns_and_captures_bad_gateway() {
         capture.summary().response.as_ref().map(|res| res.status),
         Some(502)
     );
-    assert!(
-        String::from_utf8_lossy(&capture.body_preview(BodySide::Response))
-            .contains("Failed to read mapped local file")
-    );
+    let captured_error = capture.body_preview(BodySide::Response).flatten();
+    assert!(String::from_utf8_lossy(&captured_error).contains("Failed to read mapped local file"));
     harness.finish().await;
 }
 

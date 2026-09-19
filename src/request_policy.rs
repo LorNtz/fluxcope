@@ -51,6 +51,10 @@ impl RequestPolicy {
         }
     }
 
+    pub(crate) fn mapping(&self) -> &MappingEngine {
+        &self.mapping
+    }
+
     pub(crate) fn evaluate(
         &self,
         original_uri: &http::Uri,
