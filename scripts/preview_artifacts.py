@@ -2,42 +2,21 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 from pathlib import Path
 import re
-import tempfile
 from urllib.request import urlopen
 
 from dist_artifacts import digest
-from preview_identity import (BASE, CONFIG, REPO, SIGNER, identity_from_run,
-                              platforms, timestamp, trusted_run)
+from preview_identity import BASE, CONFIG, REPO, SIGNER, timestamp
 from release_evidence import artifact_files
 from release_gate import optional_api
 from release_publish import checksums
 from release_support import ReleaseError, api, pages, repository_path, run, run_jobs
 
-LIMIT = 256 * 1024 * 1024
-BUNDLE = 'preview-attestations.jsonl'
-MANIFEST = 'preview-manifest.json'
-
-
-def platform_assets(target: str) -> set[str]:
-    return {f'fluxcope-{target}.tar.xz', f'fluxcope-{target}.tar.xz.sha256',
-            f'{target}-build-smoke.json', f'{target}-smoke.json', f'{target}-dist-manifest.json'}
-
-
-def payload_assets(identity: dict) -> set[str]:
-    return {'quality.json'} | set().union(*(platform_assets(t) for t in identity['targets']))
-
-
-def public_assets(identity: dict) -> set[str]:
-    return payload_assets(identity) | {MANIFEST, BUNDLE, 'sha256.sum'}
-
-
-def identity_matches(data: dict, identity: dict):
-    if any(data.get(key) != value for key, value in identity.items()):
-        raise ReleaseError('Preview evidence belongs to another source, controller, profile or run.')
+from preview_client.model import (LIMIT, BUNDLE, MANIFEST, INSTALLER, client_asset,
+                                  platform_assets, payload_assets, public_assets,
+                                  identity_matches, validate_manifest)
 
 
 def require_job(current: dict, name: str) -> dict:
@@ -47,11 +26,11 @@ def require_job(current: dict, name: str) -> dict:
     return job
 
 
-def download_evidence(current: dict, job_name: str, artifact_prefix: str, expected: set[str], directory: Path) -> int:
+def download_evidence(current: dict, job_name: str, artifact_prefix: str, expected: set[str], directory: Path, *, limit: int = LIMIT) -> int:
     job = require_job(current, job_name)
     attempt = job['evidence_attempt']
     bounds = {name: LIMIT if name.endswith('.tar.xz') else 2 * 1024 * 1024 for name in expected}
-    files = artifact_files(current, f'{artifact_prefix}-{attempt}', limit=LIMIT, expected_files=bounds)
+    files = artifact_files(current, f'{artifact_prefix}-{attempt}', limit=limit, expected_files=bounds)
     if set(files) != expected:
         raise ReleaseError(f'Unexpected evidence files from {job_name}.')
     directory.mkdir(parents=True, exist_ok=True)
@@ -103,8 +82,16 @@ def assemble(current: dict, identity: dict, directory: Path):
         attempts[f'verify:{target}'] = download_evidence(current, f'Preview verify ({target})',
                                                       f'preview-verified-{target}', platform_assets(target), directory)
     verify_payloads(directory, identity)
-    manifest = {**identity, 'attempts': attempts, 'toolchain': CONFIG['tools'],
-                'files': {name: digest(directory / name) for name in sorted(payload_assets(identity))},
+    for target in identity['targets']:
+        attempts[f'client:{target}'] = download_evidence(current, f'Preview client ({target})',
+            f'preview-client-{target}', {client_asset(target)}, directory)
+    template = (Path(__file__).parent / 'preview-installer.sh.in').read_text()
+    cases = '\n'.join(f'        {target}) checksum={digest(directory / client_asset(target))} ;;'
+                      for target in identity['targets'])
+    (directory / INSTALLER).write_text(template.replace('@ID@', str(identity['id'])).replace('@TARGET_CASES@', cases))
+    publication = {**identity, 'format': 2}
+    manifest = {**publication, 'attempts': attempts, 'toolchain': CONFIG['tools'],
+                'files': {name: digest(directory / name) for name in sorted(payload_assets(publication))},
                 'result': 'passed', 'local_execution': 'isolated-home-and-port'}
     (directory / MANIFEST).write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
 
@@ -117,23 +104,15 @@ def provenance(path: Path, identity: dict, *, bundle: Path | None = None):
     run(*args)
 
 
-def validate_manifest(manifest: dict, identity: dict):
-    identity_matches(manifest, identity)
-    if (manifest.get('result') != 'passed' or not re.fullmatch('[0-9a-f]{40}', manifest.get('snapshot', ''))
-            or set(manifest.get('files', {})) != payload_assets(identity)
-            or any(not re.fullmatch('[0-9a-f]{64}', checksum) for checksum in manifest['files'].values())):
-        raise ReleaseError('Malformed signed preview manifest.')
-
-
 def validate_public_directory(directory: Path, identity: dict) -> dict[str, str]:
-    paths = list(directory.iterdir())
-    if ({p.name for p in paths} != public_assets(identity)
-            or any(p.is_symlink() or not p.is_file() or p.stat().st_size > LIMIT for p in paths)):
-        raise ReleaseError('Preview assets differ from the publication allowlist.')
     manifest = json.loads((directory / MANIFEST).read_text())
     validate_manifest(manifest, identity)
+    paths = list(directory.iterdir())
+    if ({p.name for p in paths} != public_assets(manifest)
+            or any(p.is_symlink() or not p.is_file() or p.stat().st_size > LIMIT for p in paths)):
+        raise ReleaseError('Preview assets differ from the publication allowlist.')
     sums = checksums((directory / 'sha256.sum').read_text())
-    if set(sums) != public_assets(identity) - {'sha256.sum'}:
+    if set(sums) != public_assets(manifest) - {'sha256.sum'}:
         raise ReleaseError('Preview checksums do not cover exactly the public assets.')
     if any(digest(directory / name) != checksum for name, checksum in sums.items()):
         raise ReleaseError('Preview asset checksum mismatch.')
@@ -196,7 +175,7 @@ def download_public(identity: dict, directory: Path, *, target: str | None = Non
     if not allow_expired and datetime.now(timezone.utc) >= timestamp(release['published_at']) + timedelta(days=identity['retention_days']):
         raise ReleaseError('Preview downloads expired. Request a new preview; this ID is never reused.')
     assets = {a['name']: a for a in release['assets']}
-    if set(assets) != public_assets(identity) or len(assets) != len(release['assets']):
+    if not {MANIFEST, BUNDLE} <= assets.keys() or len(assets) != len(release['assets']):
         raise ReleaseError('Public preview asset set is invalid.')
     directory.mkdir(parents=True, exist_ok=True)
     for name in (MANIFEST, BUNDLE):
@@ -204,6 +183,8 @@ def download_public(identity: dict, directory: Path, *, target: str | None = Non
     provenance(directory / MANIFEST, identity, bundle=directory / BUNDLE)
     manifest = json.loads((directory / MANIFEST).read_text())
     validate_manifest(manifest, identity)
+    if set(assets) != public_assets(manifest):
+        raise ReleaseError('Public preview asset set differs from signed format.')
     if resolve_preview_tag(identity) != manifest['snapshot']:
         raise ReleaseError('Protected preview tag does not match signed source evidence.')
     commit = api(repository_path(f"git/commits/{manifest['snapshot']}"))
@@ -217,10 +198,10 @@ def download_public(identity: dict, directory: Path, *, target: str | None = Non
         if target not in identity['targets']:
             raise ReleaseError('This preview does not include the host platform; request its profile or all.')
         archive = f'fluxcope-{target}.tar.xz'
-        download_asset(identity, assets[archive], directory)
+        download_asset(manifest, assets[archive], directory)
         provenance(directory / archive, identity, bundle=directory / BUNDLE)
     else:
         for name in sorted(set(assets) - {MANIFEST, BUNDLE}):
-            download_asset(identity, assets[name], directory)
+            download_asset(manifest, assets[name], directory)
         validate_public_directory(directory, identity)
     return release, manifest

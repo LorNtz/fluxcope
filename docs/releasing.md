@@ -48,16 +48,68 @@ protected master. Downloads are GitHub prereleases, never Latest, crates.io or
 Homebrew. Publishing requires maintain/admin permission. You may also dispatch
 **Branch preview** on master in Actions with the PR number, full head SHA and profile.
 
-`preview-run` uses `~/.cache/fluxcope/previews/RUN_ID/TARGET/`, with a private HOME,
-separate certificates/settings and an initially available proxy port. It verifies
-the signed manifest and native executable before running. Stable binaries and
-state remain untouched. This state separation is not an OS sandbox. Repeated runs
-reuse that preview's settings; edit its isolated config if its port becomes occupied.
+Each new preview Release contains a version-specific shell installer. Share the
+Release URL and copy its install command; the recipient needs `curl` and `tar`,
+but no checkout, `just`, Python installation, or GitHub login. For example, replace
+`RUN_ID` with the exact published ID:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LorNtz/fluxcope/releases/download/v0.0.0-preview.RUN_ID/fluxcope-preview-installer.sh | sh
+~/.local/bin/fluxcope-preview-RUN_ID
+~/.local/bin/fluxcope-preview-RUN_ID --port 9010
+```
+
+Installation prints the absolute launch command and does not start the app or edit
+PATH. If `~/.local/bin` is already on PATH, `fluxcope-preview-RUN_ID` also works.
+The script selects the native platform included in that release: macOS 15+ or
+Linux glibc 2.28+, ARM64 or x86-64. Unsupported platforms fail before installation.
+The exact immutable HTTPS script is the initial trust boundary. It checks an
+embedded SHA-256 digest before executing its private Python runtime and verifier;
+the client then verifies the signed manifest, source/controller identity, archive,
+and executable. The bundled verifier uses captured Sigstore trust roots offline.
+It does not install Python or `gh` globally.
+
+The launcher and `just preview-run RUN_ID` share
+`~/.cache/fluxcope/previews/RUN_ID/TARGET/`, with a private HOME and separate
+certificates/settings. The first launch selects and prints an available proxy port;
+subsequent launches reuse settings. `--port` changes only that preview's saved port,
+preserving other YAML settings and comments. Installation and launch are locked
+against concurrent changes. Reinstalling the same ID preserves settings and repairs
+its executable; it never silently selects a newer preview. Stable binaries and
+state remain untouched. This state separation is not an OS sandbox, and previews
+still listen on all IPv4 interfaces. System proxy/trust settings are not changed.
+
+```sh
+# Remove the launcher/runtime, retaining settings and certificates:
+~/.local/bin/fluxcope-preview-RUN_ID --uninstall
+
+# Alternatively, remove everything (asks you to type the ID):
+~/.local/bin/fluxcope-preview-RUN_ID --uninstall --purge
+```
+
+After uninstall the command is gone; its output identifies the retained state
+directory. Reinstall that exact ID while its downloads remain available to reuse
+settings. Symlinked state paths are refused during installation and removal.
 
 Downloads expire 30 days after publication; daily cleanup can take another 24 hours.
-The protected tag and source stay in Git history. Local copies/settings remain until
-you remove their preview cache directory. Closing a PR cancels an unpublished preview
-when observed by the final publication checks; published previews keep their expiry.
+The protected tag and source stay in Git history. Installed copies continue to run
+offline after expiry, verifying saved signed evidence and local files each time.
+A new installation or repair needs an unexpired release. Older immutable previews
+keep their archive-only assets and remain usable with `just preview-run`.
+Closing a PR cancels an unpublished preview when observed by the final publication
+checks; published previews keep their expiry.
+
+Installer format 2 adds a controller-generated shell script and native client
+bundles to the signed manifest. CI builds clients from the controller commit,
+assembles and attests the staged files, then qualifies the exact shell/client on
+fresh native runners with no publication credentials. An HTTPS replay supplies
+staged metadata/files while normal signature and checksum verification remains
+active. Each qualification report names the signed manifest digest. The separate
+publisher checks those reports before obtaining/using release permissions;
+installation tests do not execute in the signing or publishing jobs. Reports are
+CI evidence outside the signed payload to avoid a circular manifest hash. A final
+public download check is required for completion. New client dependencies are
+version/hash pinned; the initial rollout qualifies all four native targets.
 
 Closing a terminal leaves CI running. Use `preview-status` to resume; inspect a
 failed run before `preview-retry`. Reruns retain the original source and workflow.
