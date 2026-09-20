@@ -1,15 +1,20 @@
-use std::sync::{
-    Arc, Weak,
-    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    },
+    time::Instant,
 };
+
+use chrono::{DateTime, Utc};
 
 use hyper::{HeaderMap, Method};
 use parking_lot::Mutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use super::{
-    BodySide, CaptureRecord, CaptureSequence, MetadataTruncation, RequestMetadata,
-    ResponseMetadata,
+    BodySide, CaptureChangeFeed, CaptureRecord, CaptureSequence, MetadataTruncation,
+    RequestMetadata, ResponseMetadata,
     model::{BodyTerminal, CaptureBudgetLease, CaptureMemoryBudget},
 };
 
@@ -119,6 +124,7 @@ pub(crate) struct CapturePublisher {
     policy: Arc<CapturePolicy>,
     metrics: Arc<CaptureMetrics>,
     dirty: Arc<CaptureDirtySignal>,
+    change_feed: CaptureChangeFeed,
 }
 
 impl CapturePublisher {
@@ -131,10 +137,20 @@ impl CapturePublisher {
             policy: Arc::new(policy),
             metrics: Arc::new(CaptureMetrics::default()),
             dirty: Arc::new(CaptureDirtySignal::default()),
+            change_feed: CaptureChangeFeed::new(),
         }
     }
 
     pub fn try_start(&self, input: RequestCaptureInput<'_>) -> Option<CaptureHandle> {
+        self.try_start_at(input, Utc::now(), Instant::now())
+    }
+
+    pub fn try_start_at(
+        &self,
+        input: RequestCaptureInput<'_>,
+        started_at: DateTime<Utc>,
+        started_mono: Instant,
+    ) -> Option<CaptureHandle> {
         let permit = match Arc::clone(&self.admission).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -172,6 +188,9 @@ impl CapturePublisher {
             truncation,
             budget_lease,
             metadata_bytes,
+            started_at,
+            started_mono,
+            self.change_feed.clone(),
         ));
         if self.tx.try_send(Arc::clone(&record)).is_err() {
             self.metrics
@@ -198,6 +217,14 @@ impl CapturePublisher {
     pub fn dirty_signal(&self) -> Arc<CaptureDirtySignal> {
         Arc::clone(&self.dirty)
     }
+    pub fn change_feed(&self) -> CaptureChangeFeed {
+        self.change_feed.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_capture_budget_used(&self) -> usize {
+        self.memory_budget.used()
+    }
 }
 
 #[derive(Clone)]
@@ -211,6 +238,10 @@ pub(crate) struct CaptureHandle {
 
 impl CaptureHandle {
     pub fn set_response(&self, input: ResponseCaptureInput<'_>) {
+        self.set_response_at(input, Instant::now());
+    }
+
+    pub fn set_response_at(&self, input: ResponseCaptureInput<'_>, at: Instant) {
         let Some(record) = self.record.upgrade() else {
             return;
         };
@@ -243,10 +274,11 @@ impl CaptureHandle {
             }
             (Some(response), truncated)
         };
-        if !record.set_response(
+        if !record.set_response_at(
             response,
             measured.truncated || budget_truncated || response_truncated,
             reserved,
+            at,
         ) {
             record.release_metadata(reserved);
             return;
@@ -263,6 +295,10 @@ impl CaptureHandle {
             BodySide::Response => self.policy.response_preview_bytes,
         };
         let result = record.append_body(side, bytes, limit);
+        if result.changed {
+            self.dirty.mark();
+        }
+
         if result.per_body_limited {
             self.metrics
                 .previews_per_body_limited
@@ -279,27 +315,49 @@ impl CaptureHandle {
     }
 
     pub fn complete(&self, side: BodySide) {
-        if let Some(record) = self.record.upgrade() {
-            record.finish_body(side, BodyTerminal::Complete);
-        }
+        self.complete_at(side, Instant::now());
+    }
+
+    pub fn complete_at(&self, side: BodySide, at: Instant) {
+        let changed = self
+            .record
+            .upgrade()
+            .is_some_and(|record| record.finish_body_at(side, BodyTerminal::Complete, at));
         self.lifecycle.mark_terminal(side);
-        self.dirty.mark();
+        if changed {
+            self.dirty.mark();
+        }
     }
 
     pub fn fail(&self, side: BodySide, error: impl Into<Arc<str>>) {
-        if let Some(record) = self.record.upgrade() {
-            record.finish_body(side, BodyTerminal::Failed(error.into()));
-        }
+        self.fail_at(side, error, Instant::now());
+    }
+
+    pub fn fail_at(&self, side: BodySide, error: impl Into<Arc<str>>, at: Instant) {
+        let error = error.into();
+        let changed = self
+            .record
+            .upgrade()
+            .is_some_and(|record| record.finish_body_at(side, BodyTerminal::Failed(error), at));
         self.lifecycle.mark_terminal(side);
-        self.dirty.mark();
+        if changed {
+            self.dirty.mark();
+        }
     }
 
     pub fn cancel(&self, side: BodySide) {
-        if let Some(record) = self.record.upgrade() {
-            record.finish_body(side, BodyTerminal::Cancelled);
-        }
+        self.cancel_at(side, Instant::now());
+    }
+
+    pub fn cancel_at(&self, side: BodySide, at: Instant) {
+        let changed = self
+            .record
+            .upgrade()
+            .is_some_and(|record| record.finish_body_at(side, BodyTerminal::Cancelled, at));
         self.lifecycle.mark_terminal(side);
-        self.dirty.mark();
+        if changed {
+            self.dirty.mark();
+        }
     }
 }
 
@@ -489,6 +547,9 @@ fn headers_bytes(headers: &[(String, String)]) -> usize {
 mod tests {
     use super::*;
     use crate::capture::BodyPreviewLimit;
+    use crate::capture::{CaptureRetentionPolicy, CaptureSnapshotMode, CaptureStore};
+    use chrono::{TimeZone, Utc};
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn admission_and_memory_limits_drop_without_waiting() {
@@ -544,10 +605,7 @@ mod tests {
         handle.append(BodySide::Request, b"abcdef");
         handle.complete(BodySide::Request);
 
-        assert_eq!(
-            record.body_preview(BodySide::Request).as_ref().as_ref(),
-            b"abc"
-        );
+        assert_eq!(record.body_preview(BodySide::Request).flatten(), b"abc");
         assert_eq!(
             record.summary().request_body.preview_limit,
             Some(BodyPreviewLimit::PerBodyLimit)
@@ -600,5 +658,237 @@ mod tests {
 
         signal.notified().await;
         assert!(!signal.pending.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn capture_timing_uses_fixed_wall_start_and_monotonic_elapsed_values() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let publisher = CapturePublisher::new(tx, CapturePolicy::default());
+        let headers = HeaderMap::new();
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 8, 24, 12, 34, 56)
+            .single()
+            .expect("fixed UTC instant");
+        let started_mono = Instant::now();
+        let handle = publisher
+            .try_start_at(request_input(&headers), started_at, started_mono)
+            .expect("capture admitted");
+        let record = rx.recv().await.expect("capture published");
+
+        handle.set_response_at(
+            ResponseCaptureInput {
+                status: 200,
+                headers: &headers,
+            },
+            started_mono + Duration::from_millis(25),
+        );
+        handle.complete_at(BodySide::Request, started_mono + Duration::from_millis(30));
+        handle.complete_at(BodySide::Response, started_mono + Duration::from_millis(75));
+
+        let timing = record.snapshot(CaptureSnapshotMode::MetadataOnly).timing;
+        assert_eq!(timing.started_at, started_at);
+        assert_eq!(timing.time_to_response, Some(Duration::from_millis(25)));
+        assert_eq!(timing.total_duration, Some(Duration::from_millis(75)));
+    }
+
+    #[tokio::test]
+    async fn total_duration_waits_for_both_streams_and_uses_later_terminal_time() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let publisher = CapturePublisher::new(tx, CapturePolicy::default());
+        let headers = HeaderMap::new();
+        let started_mono = Instant::now();
+        let handle = publisher
+            .try_start_at(request_input(&headers), fixed_utc(), started_mono)
+            .expect("capture admitted");
+        let record = rx.recv().await.expect("capture published");
+
+        handle.complete_at(BodySide::Response, started_mono + Duration::from_millis(50));
+        assert_eq!(
+            record
+                .snapshot(CaptureSnapshotMode::MetadataOnly)
+                .timing
+                .total_duration,
+            None
+        );
+
+        handle.complete_at(BodySide::Request, started_mono + Duration::from_millis(75));
+        assert_eq!(
+            record
+                .snapshot(CaptureSnapshotMode::MetadataOnly)
+                .timing
+                .total_duration,
+            Some(Duration::from_millis(75))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_and_cancelled_streams_are_terminal_for_total_duration() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let publisher = CapturePublisher::new(
+            tx,
+            CapturePolicy {
+                max_concurrent_exchanges: 2,
+                ..CapturePolicy::default()
+            },
+        );
+        let headers = HeaderMap::new();
+        let started_mono = Instant::now();
+
+        let failed = publisher
+            .try_start_at(request_input(&headers), fixed_utc(), started_mono)
+            .expect("failed fixture admitted");
+        let failed_record = rx.recv().await.expect("failed fixture published");
+        failed.fail_at(
+            BodySide::Request,
+            "request stream failed",
+            started_mono + Duration::from_millis(40),
+        );
+        failed.complete_at(BodySide::Response, started_mono + Duration::from_millis(70));
+        let failed_snapshot = failed_record.snapshot(CaptureSnapshotMode::MetadataOnly);
+        assert_eq!(
+            failed_snapshot.request_body.status.stream,
+            crate::capture::BodyStreamState::Failed
+        );
+        assert_eq!(
+            failed_snapshot.timing.total_duration,
+            Some(Duration::from_millis(70))
+        );
+
+        let cancelled = publisher
+            .try_start_at(request_input(&headers), fixed_utc(), started_mono)
+            .expect("cancelled fixture admitted");
+        let cancelled_record = rx.recv().await.expect("cancelled fixture published");
+        cancelled.complete_at(BodySide::Request, started_mono + Duration::from_millis(55));
+        cancelled.cancel_at(BodySide::Response, started_mono + Duration::from_millis(80));
+        let cancelled_snapshot = cancelled_record.snapshot(CaptureSnapshotMode::MetadataOnly);
+        assert_eq!(
+            cancelled_snapshot.response_body.status.stream,
+            crate::capture::BodyStreamState::Cancelled
+        );
+        assert_eq!(
+            cancelled_snapshot.timing.total_duration,
+            Some(Duration::from_millis(80))
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_response_does_not_replace_metadata_timing_revision_or_event() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let publisher = CapturePublisher::new(tx, CapturePolicy::default());
+        let feed = publisher.change_feed();
+        let headers = HeaderMap::new();
+        let mut replacement_headers = HeaderMap::new();
+        replacement_headers.insert("x-replacement", "ignored".parse().expect("header"));
+        let started_mono = Instant::now();
+        let handle = publisher
+            .try_start_at(request_input(&headers), fixed_utc(), started_mono)
+            .expect("capture admitted");
+        let record = rx.recv().await.expect("capture published");
+        let mut store = CaptureStore::new(CaptureRetentionPolicy::default());
+        store.insert(Arc::clone(&record));
+
+        handle.set_response_at(
+            ResponseCaptureInput {
+                status: 201,
+                headers: &headers,
+            },
+            started_mono + Duration::from_millis(25),
+        );
+        let first = record.snapshot(CaptureSnapshotMode::MetadataOnly);
+        let first_epoch = feed.epoch();
+
+        handle.set_response_at(
+            ResponseCaptureInput {
+                status: 503,
+                headers: &replacement_headers,
+            },
+            started_mono + Duration::from_millis(60),
+        );
+        let duplicate = record.snapshot(CaptureSnapshotMode::MetadataOnly);
+
+        assert_eq!(
+            duplicate.response.as_ref().map(|response| response.status),
+            Some(201)
+        );
+        assert!(
+            duplicate
+                .response
+                .as_ref()
+                .expect("first response retained")
+                .headers
+                .is_empty()
+        );
+        assert_eq!(
+            duplicate.timing.time_to_response,
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(duplicate.revision, first.revision);
+        assert_eq!(
+            feed.epoch(),
+            first_epoch,
+            "duplicate response must not emit a second change"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_limited_preview_never_resumes_with_a_suffix_after_budget_frees() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let publisher = CapturePublisher::new(
+            tx,
+            CapturePolicy {
+                max_concurrent_exchanges: 2,
+                queue_capacity: 2,
+                total_retained_bytes: 2_048,
+                ..CapturePolicy::default()
+            },
+        );
+        let headers = HeaderMap::new();
+        let target = publisher
+            .try_start(request_input(&headers))
+            .expect("target capture admitted");
+        let target_record = rx.recv().await.expect("target capture published");
+        let blocker = publisher
+            .try_start(request_input(&headers))
+            .expect("budget blocker admitted");
+        let blocker_record = rx.recv().await.expect("budget blocker published");
+        blocker.append(BodySide::Request, &vec![b'x'; 2_048]);
+
+        target.append(BodySide::Request, b"omitted");
+        let limited = target_record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
+        assert_eq!(
+            limited.request_body.status.preview_limit,
+            Some(BodyPreviewLimit::TotalMemoryLimit)
+        );
+        assert!(limited.request_body.preview.is_empty());
+
+        drop(blocker);
+        drop(blocker_record);
+        target.append(BodySide::Request, b"suffix");
+        let after_budget_freed = target_record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
+
+        assert_eq!(after_budget_freed.request_body.status.observed_bytes, 13);
+        assert_eq!(
+            after_budget_freed.request_body.status.preview_limit,
+            Some(BodyPreviewLimit::TotalMemoryLimit)
+        );
+        assert!(
+            after_budget_freed.request_body.preview.is_empty(),
+            "a retained preview must remain a prefix after its first omitted byte"
+        );
+    }
+
+    fn request_input(headers: &HeaderMap) -> RequestCaptureInput<'_> {
+        RequestCaptureInput {
+            method: Method::GET,
+            original_uri: "https://example.com/",
+            effective_uri: "https://example.com/",
+            local_path: None,
+            headers,
+        }
+    }
+
+    fn fixed_utc() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 24, 0, 0, 0)
+            .single()
+            .expect("fixed UTC instant")
     }
 }

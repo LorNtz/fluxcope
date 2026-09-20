@@ -146,7 +146,10 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
         ""
     };
     let mut block = Block::default()
-        .title(format!(" Settings{dirty} "))
+        .title(format!(
+            " Settings — {}{dirty} ",
+            app.settings_popup.mode_label()
+        ))
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -155,8 +158,11 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
         } else {
             Style::default()
         });
-    let key_hint_text =
-        settings_key_hint_text(app.settings_popup.key_hints(), area.width.saturating_sub(2));
+    let key_hint_text = settings_key_hint_text_with_commit_label(
+        app.settings_popup.key_hints(),
+        area.width.saturating_sub(2),
+        app.settings_popup.commit_label(),
+    );
     if !key_hint_text.is_empty() {
         block = block.title_bottom(Line::from(key_hint_text).alignment(Alignment::Center));
     }
@@ -182,6 +188,14 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
 }
 
 fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
+    settings_key_hint_text_with_commit_label(hints, max_width, "Save")
+}
+
+fn settings_key_hint_text_with_commit_label(
+    hints: &[SettingsKeyHint],
+    max_width: u16,
+    commit_label: &'static str,
+) -> String {
     if hints.is_empty() || max_width == 0 {
         return String::new();
     }
@@ -190,7 +204,12 @@ fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
     let mut text = String::with_capacity(max_width.min(96));
     let mut text_width_cols = 0usize;
     for hint in hints {
-        let hint_width = usize::from(text_width(hint.label))
+        let label = if hint.label == "Save" {
+            commit_label
+        } else {
+            hint.label
+        };
+        let hint_width = usize::from(text_width(label))
             .saturating_add(usize::from(text_width(hint.key)))
             .saturating_add(3);
         let separator_width = if text.is_empty() { 0 } else { 2 };
@@ -206,7 +225,7 @@ fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
             text.push_str("  ");
             text_width_cols = text_width_cols.saturating_add(2);
         }
-        text.push_str(hint.label);
+        text.push_str(label);
         text.push_str(" [");
         text.push_str(hint.key);
         text.push(']');
@@ -215,8 +234,13 @@ fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
 
     if text.is_empty() {
         let hint = hints[0];
+        let label = if hint.label == "Save" {
+            commit_label
+        } else {
+            hint.label
+        };
         fit_text_to_width(
-            &format!("{} [{}]", hint.label, hint.key),
+            &format!("{label} [{}]", hint.key),
             max_width,
             BODY_TEXT_TAB_WIDTH,
         )

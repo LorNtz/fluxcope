@@ -27,6 +27,28 @@ fn settings_popup_selects_proxy_preset_from_keyboard() {
 }
 
 #[test]
+fn settings_popup_resolves_active_preset_by_trimmed_identity() {
+    let mut settings = settings_with_proxy_presets("dev");
+    settings.proxy.as_mut().expect("proxy should exist").presets[0].name = " dev ".to_string();
+    let mut app = App::with_settings(settings, RecordingState::default());
+    app.handle_key_event(key(KeyCode::Char('m')));
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+
+    assert_eq!(
+        app.settings_popup
+            .active_proxy_preset()
+            .map(|preset| preset.name.as_str()),
+        Some(" dev ")
+    );
+    assert!(
+        app.settings_popup
+            .visible_proxy_widgets()
+            .contains(&ProxyWidget::MapRemoteEnabled)
+    );
+}
+
+#[test]
 fn settings_popup_filters_proxy_preset_select() {
     let settings = settings_with_proxy_presets("dev");
     let mut app = App::with_settings(settings, RecordingState::default());
@@ -481,6 +503,59 @@ fn settings_popup_adds_local_rule_from_combined_proxy_keyboard() {
             .len(),
         1
     );
+}
+
+#[test]
+fn settings_popup_rule_toggle_keeps_remote_and_local_tables_separate() {
+    let mut app = app_with_proxy_presets("dev");
+    app.handle_key_event(key(KeyCode::Char('m')));
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    focus_settings_content(&mut app);
+
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::RemoteHeader);
+    app.handle_key_event(key(KeyCode::Char('a')));
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::LocalHeader);
+    app.handle_key_event(key(KeyCode::Char('a')));
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::RemoteRule(0));
+    app.handle_key_event(key(KeyCode::Char(' ')));
+
+    let preset = &app.settings_popup.draft().proxy.as_ref().unwrap().presets[0];
+    assert!(!preset.map_remote.rules[0].enable);
+    assert!(preset.map_local.rules[0].enable);
+}
+
+#[test]
+fn settings_popup_invalid_rule_edit_is_atomic_and_reports_inline_error() {
+    let mut app = app_with_proxy_presets("dev");
+    app.handle_key_event(key(KeyCode::Char('m')));
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::RemoteHeader);
+    focus_settings_content(&mut app);
+    app.handle_key_event(key(KeyCode::Char('a')));
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::RemoteRule(0));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    for _ in 0.."https://example.com".chars().count() {
+        app.handle_key_event(key(KeyCode::Backspace));
+    }
+    for ch in "not a url".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+
+    let rule = &app.settings_popup.draft().proxy.as_ref().unwrap().presets[0]
+        .map_remote
+        .rules[0];
+    assert_eq!(rule.from, "https://example.com");
+    assert_eq!(rule.to, "http://localhost:3000");
+    assert!(app.settings_popup.error().is_some());
 }
 
 #[test]

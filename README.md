@@ -2,7 +2,7 @@
 
 A terminal HTTP and HTTPS debugging proxy with request recording, searchable request trees, body inspection, and local/remote response mapping.
 
-The first release is based on the existing mainline TUI and proxy. MCP integration is planned separately and is not included in v0.1.0.
+The published v0.1.0 release contains the mainline TUI and proxy. Source builds on this branch also include the optional multi-instance MCP control plane described below.
 
 ## Installation
 
@@ -29,6 +29,32 @@ fluxcope
 Point your client's HTTP/HTTPS proxy at this machine and the port shown in the status bar (default 8989). The proxy listens on **all IPv4 interfaces**, with no client authentication. Run it only on a trusted network or restrict access with your host firewall. Recording can contain credentials, cookies and personal data.
 
 Settings live in `~/.fluxcope/config.yml`. Fluxcope does not read or migrate state from earlier development builds under another application name. Proxy settings include optional named presets, map-remote, map-local and recording URL filters; edit them through the settings UI.
+
+### MCP control plane (source builds)
+
+MCP is disabled by default and currently requires Unix. Start a proxy with MCP enabled, then let your MCP client launch `fluxcope mcp` as its stdio server:
+
+```sh
+fluxcope --mcp
+# Or use an isolated loopback proxy with ephemeral settings:
+fluxcope --host 127.0.0.1 --port 8899 --mcp
+```
+
+The broker discovers same-user instances under `~/.fluxcope/run/instances`; it does not start proxies. Pin both the returned endpoint and run ID when inspecting or changing an instance. Any process running as the same OS user can access MCP-enabled instances, including captured credentials and mapping controls.
+
+When native MCP tools are unavailable, use the managed CLI client:
+
+```sh
+fluxcope mcp tools
+fluxcope mcp tools preview_mapping_mutation
+fluxcope mcp call list_instances --arguments '{}'
+fluxcope mcp call get_mapping_settings --arguments @arguments.json
+fluxcope mcp read '<returned fluxcope:// resource URI>'
+```
+
+The tool set supports bounded capture/body inspection, recording control, and revision-safe mapping changes. Scope settings reads by preset/table, preview a typed mutation, and commit using the evaluated revision. Preview performs neither file reads nor network requests; conflicting revisions and unfinished TUI drafts reject writes. The client manages initialization, pipes, deadlines, and output normalization without automatically retrying mutations. For a five-minute capture wait, use `--timeout-secs 360`.
+
+MCP schemas use `fluxcope_version`, resource URIs use `fluxcope://`, and resource pagination metadata lives under `_meta.fluxcope`. Development-era Wirelens names and state directories are not compatibility aliases; rebuild the client and restart the proxy together.
 
 ## HTTPS and the local CA
 

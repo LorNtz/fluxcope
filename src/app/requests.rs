@@ -168,6 +168,21 @@ impl App {
         self.selected_request_sequence()
             .and_then(|sequence| self.captures.get(sequence))
     }
+    #[cfg(unix)]
+    pub(crate) fn capture_record(
+        &self,
+        sequence: crate::capture::CaptureSequence,
+    ) -> Option<Arc<CaptureRecord>> {
+        self.captures.get(sequence)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn capture_at_or_before(
+        &self,
+        sequence: crate::capture::CaptureSequence,
+    ) -> Option<Arc<CaptureRecord>> {
+        self.captures.next_at_or_before(sequence)
+    }
 
     /// Deletes the selected request leaf or every request under the selected branch.
     ///

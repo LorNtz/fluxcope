@@ -157,7 +157,8 @@ The implementation should introduce these feature boundaries:
 - `mcp::body`: body resource metadata and public result conversion.
 - `mcp::mapping`: MCP mapping schemas and conversion to settings-domain operations.
 - `mcp::prompts`: prompt definitions that reference only real tools and resources.
-- `mcp::audit`: client metadata and public operation audit context.
+- `control::audit`: instance-owned mutation audit records and read-telemetry aggregation using declared MCP client context carried over private RPC.
+- `mcp::telemetry`: broker-local stdio, discovery, and forwarding metrics without captured traffic or mapping values.
 
 Mapping operations belong in a UI-independent settings-domain module shared by the TUI draft and control RPC commands. The broker and private RPC server must not call settings-popup editing methods.
 
@@ -165,12 +166,12 @@ The private RPC protocol carries typed domain operations, not arbitrary MCP JSON
 
 ### 5.2 Runtime ownership
 
-`AppRuntime` remains the serialization point for authoritative capture-store access and committed settings changes. Private control handlers do not receive shared mutable access to `App`, `CaptureStore`, or `SettingsManager`.
+`AppRuntime` remains the serialization point for authoritative capture-store access and committed settings changes. Search obtains one short, immutable `Arc`-backed store snapshot through that boundary, then executes in a bounded instance-owned worker. Private control handlers do not receive shared mutable access to `App`, `CaptureStore`, or `SettingsManager`.
 
 A bounded, non-dropping in-process command channel carries typed requests from the private socket service into the runtime. Runtime processing must:
 
 - reject commands after shutdown begins;
-- enforce a bounded number of pending and incremental commands;
+- enforce a bounded number of pending commands and immutable snapshot acquisitions;
 - avoid awaiting while application state is borrowed;
 - clone only compact values or `Arc`-backed immutable body/header data;
 - never decode bodies, parse JSON, serialize large responses, or wait for future traffic in the runtime loop.
@@ -250,7 +251,7 @@ Use one Unix-socket connection per operation:
 3. Instance sends one response frame.
 4. Connection closes.
 
-One-operation connections avoid multiplexing, connection-pool staleness, request demultiplexing, and a private cancellation message. While work is active, the instance monitors the connection read half for EOF; broker disconnect closes the socket and cancels associated incremental search, body, or wait work.
+One-operation connections avoid multiplexing, connection-pool staleness, request demultiplexing, and a private cancellation message. While work is active, the instance monitors the connection read half for EOF; broker disconnect closes the socket and cancels associated capture search, body, or wait work.
 
 ### 7.2 Framing
 
@@ -583,28 +584,33 @@ Prompts never apply changes to all instances implicitly and never name nonexiste
 |---|---:|
 | Registry descriptors scanned | 256 |
 | Descriptor size | 64 KiB |
-| Concurrent liveness probes | 16 |
-| Concurrent broker calls | 32 |
+| Concurrent liveness probes process-wide | 16 |
+| Concurrent broker calls process-wide | 32 |
 | Private RPC request / response JSON | 1 MiB / 8 MiB |
+| MCP stdio request / response JSON line | 1 MiB / 8 MiB |
+| In-flight MCP stdio responses per broker | 4 (32 MiB maximum serialized envelopes) |
 | Concurrent private RPC calls per instance | 32 |
 | In-flight serialized private responses per instance | 32 MiB |
+| Private RPC pre-request handshake | 5 s |
+| Broker stale-cleanup mutation wait | 250 ms per call |
 | Runtime command channel per instance | 64 |
-| Concurrent incremental capture searches per instance | 4 |
+| Concurrent capture-search workers per instance | 4 |
 | Ordinary tool/resource deadline | 30 s |
 | Capture search default / maximum | 20 / 100 rows |
 | Body resource default / maximum | 8 KiB / 64 KiB |
 | Body text matches default / maximum | 10 / 50 |
+| Body text query | 8 KiB UTF-8 |
 | Match context default / maximum per side | 160 B / 1 KiB |
 | Inline selected structured value | 4 KiB |
 | JSON pointer/shape examples | 20 |
 | Wait default / maximum | 30 s / 5 min |
 | Body decoded/structured input | 16 MiB |
-| Active body jobs per instance | 2 |
-| Queued body input per instance | 8 jobs and 32 MiB |
+| Active TUI/MCP body jobs per instance | 2 |
+| Queued TUI/MCP body input per instance | 8 jobs and 32 MiB |
 
 These are fixed v1 constants reported by broker/instance status and are not externally configurable.
 
-Capture searches execute incrementally under the target runtime event budget, scan newest to oldest, stop when a page fills, yield between bounded chunks, and check socket cancellation/deadline. Concurrent scans are capped and fair. No permanent folded-header index is introduced in v1.
+Capture searches acquire one immutable `Arc`-backed capture-store snapshot through a short runtime command, then scan newest to oldest in a bounded per-instance worker outside `AppRuntime`. Workers stop when a page fills, yield between bounded chunks, and check socket cancellation/deadline. Concurrent scans are capped and fair. No permanent folded-header index is introduced in v1.
 
 `wait_for_capture` waits in the instance control service, subscribes before initial query, rechecks only changed sequences/revisions, and never parks AppRuntime.
 
@@ -729,7 +735,7 @@ The broker emits only discovery/transport/version/saturation diagnostics to stde
 - Concurrent calls to distinct instances never cross captures/settings/audits.
 - Stale run writes, waits, targeted body operations, and resources fail after endpoint restart.
 - Broker exit leaves all proxies alive.
-- Incremental absent searches preserve runtime event-loop progress.
+- Bounded absent searches execute outside `AppRuntime` and preserve runtime event-loop progress.
 - Atomic persistent commit/live swap and no source/temp file writes for ephemeral modes.
 - Clean stdio MCP conformance with no stdout diagnostic contamination and supported protocol-version clients.
 
@@ -763,7 +769,7 @@ Criterion cases:
 - rapid capture-epoch wakeups and cancellation;
 - concurrent body-job/private-RPC saturation.
 
-Runtime tests prove incremental searches yield within the event budget. Memory tests prove queued body bytes and concurrent decoded/structured work stay within per-instance budgets.
+Runtime tests prove snapshot acquisition is short and search workers do not stall the event loop. Memory tests prove queued body bytes and concurrent decoded/structured work stay within shared per-instance TUI/MCP budgets.
 
 ## 19. Acceptance criteria
 

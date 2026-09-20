@@ -53,8 +53,8 @@ pub(crate) fn open_file(path: &Path, append: bool) -> io::Result<File> {
     Ok(file)
 }
 
-/// Replace a settings or CA file atomically without following an existing symlink.
-pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Prepare a synced, owner-only replacement without publishing it or following symlinks.
+pub(crate) fn prepare_file(path: &Path, bytes: &[u8]) -> io::Result<tempfile::NamedTempFile> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -67,10 +67,12 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    Ok(temporary)
 }
 
 #[cfg(test)]
@@ -85,11 +87,15 @@ mod tests {
         ensure_directory(&directory)?;
         assert_eq!(fs::metadata(&directory)?.mode() & 0o777, 0o700);
         let path = directory.join("key");
-        write_file(&path, b"synthetic test material")?;
+        prepare_file(&path, b"synthetic test material")?
+            .persist(&path)
+            .map_err(|error| error.error)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
         open_file(&path, false)?;
         assert_eq!(fs::metadata(&path)?.mode() & 0o777, 0o600);
-        write_file(&path, b"replacement")?;
+        prepare_file(&path, b"replacement")?
+            .persist(&path)
+            .map_err(|error| error.error)?;
         assert_eq!(fs::read(&path)?, b"replacement");
         assert_eq!(fs::metadata(&path)?.mode() & 0o777, 0o600);
         Ok(())
@@ -103,10 +109,10 @@ mod tests {
         let link = root.path().join("link");
         symlink(&target, &link)?;
         assert!(open_file(&link, true).is_err());
-        assert!(write_file(&link, b"overwrite").is_err());
+        assert!(prepare_file(&link, b"overwrite").is_err());
         fs::remove_file(&link)?;
         fs::hard_link(&target, &link)?;
-        assert!(write_file(&link, b"overwrite").is_err());
+        assert!(prepare_file(&link, b"overwrite").is_err());
         assert_eq!(fs::read(&target)?, b"untouched");
         Ok(())
     }

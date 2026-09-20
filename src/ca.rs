@@ -1,14 +1,16 @@
 // src/ca.rs
 use crate::private_fs;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, IsCa, KeyPair,
     KeyUsagePurpose,
 };
-#[cfg(test)]
-use std::fs;
-use std::io::Read;
-use std::path::Path;
+use std::{
+    fs::{self, File},
+    io::{self, Read},
+    path::Path,
+};
 
 // File names (not paths) - the directory is added separately
 const CA_CERT_FILE: &str = "ca_cert.der";
@@ -40,17 +42,11 @@ impl CaData {
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
 
-        let mut cert_der = Vec::new();
-        private_fs::open_file(&cert_path, false)?
-            .read_to_end(&mut cert_der)
+        let cert_der = read_owner_only_file(&cert_path)
             .with_context(|| format!("failed to read CA certificate {}", cert_path.display()))?;
-        let mut key_der = Vec::new();
-        private_fs::open_file(&key_path, false)?
-            .read_to_end(&mut key_der)
+        let key_der = read_owner_only_file(&key_path)
             .with_context(|| format!("failed to read CA private key {}", key_path.display()))?;
-        let mut cert_pem = String::new();
-        private_fs::open_file(&pem_path, false)?
-            .read_to_string(&mut cert_pem)
+        let cert_pem = String::from_utf8(read_owner_only_file(&pem_path)?)
             .with_context(|| format!("failed to read CA PEM {}", pem_path.display()))?;
 
         Ok(CaData {
@@ -67,12 +63,23 @@ impl CaData {
         let cert_path = cert_dir.join(CA_CERT_FILE);
         let key_path = cert_dir.join(CA_KEY_FILE);
         let pem_path = cert_dir.join(pem_filename);
-        private_fs::write_file(&cert_path, &self.cert_der)
-            .with_context(|| format!("failed to persist CA certificate {}", cert_path.display()))?;
-        private_fs::write_file(&key_path, &self.key_der)
-            .with_context(|| format!("failed to persist CA private key {}", key_path.display()))?;
-        private_fs::write_file(&pem_path, self.cert_pem.as_bytes())
-            .with_context(|| format!("failed to persist CA PEM {}", pem_path.display()))?;
+        // A write/sync failure must not publish an incomplete authority.
+        let certificate = private_fs::prepare_file(&cert_path, &self.cert_der)
+            .with_context(|| format!("failed to prepare CA certificate {}", cert_path.display()))?;
+        let key = private_fs::prepare_file(&key_path, &self.key_der)
+            .with_context(|| format!("failed to prepare CA private key {}", key_path.display()))?;
+        let pem = private_fs::prepare_file(&pem_path, self.cert_pem.as_bytes())
+            .with_context(|| format!("failed to prepare CA PEM {}", pem_path.display()))?;
+        for (temporary, destination) in [
+            (certificate, &cert_path),
+            (key, &key_path),
+            (pem, &pem_path),
+        ] {
+            temporary.persist(destination).with_context(|| {
+                format!("failed to publish authority file {}", destination.display())
+            })?;
+        }
+        File::open(cert_dir)?.sync_all()?;
         Ok(())
     }
 
@@ -102,26 +109,70 @@ pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> 
             ),
         "CA PEM filename must be a single filename"
     );
-    private_fs::ensure_directory(cert_dir)?;
-    let cert_path = cert_dir.join(CA_CERT_FILE);
-    let key_path = cert_dir.join(CA_KEY_FILE);
-    let pem_path = cert_dir.join(pem_filename);
+    private_fs::ensure_directory(cert_dir)
+        .with_context(|| format!("failed to prepare CA directory {}", cert_dir.display()))?;
+    let lock = private_fs::open_file(&cert_dir.join(".ca-init.lock"), true).with_context(|| {
+        format!(
+            "failed to open CA initialization lock in {}",
+            cert_dir.display()
+        )
+    })?;
+    lock.lock_exclusive()
+        .context("failed to lock CA initialization")?;
 
-    if cert_path.exists() || key_path.exists() || pem_path.exists() {
-        log::info!("Loading existing CA certificate from {:?}", cert_dir);
-        let data = CaData::from_disk(cert_dir, pem_filename)
-            .with_context(|| format!("failed to load CA from {}", cert_dir.display()))?;
-        log::info!("Successfully loaded existing CA certificate");
-        return Ok(data);
+    let result = (|| {
+        let cert_path = cert_dir.join(CA_CERT_FILE);
+        let key_path = cert_dir.join(CA_KEY_FILE);
+        let pem_path = cert_dir.join(pem_filename);
+        if path_present(&cert_path)? || path_present(&key_path)? || path_present(&pem_path)? {
+            log::info!("Loading existing CA certificate from {:?}", cert_dir);
+            return CaData::from_disk(cert_dir, pem_filename)
+                .with_context(|| format!("failed to load CA from {}", cert_dir.display()));
+        }
+
+        let (cert, key) = create_ca()?;
+        let data = CaData::from_cert(&cert, &key)?;
+        data.save(cert_dir, pem_filename)?;
+        log::info!("CA certificate saved to {:?}", cert_dir);
+        Ok(data)
+    })();
+    let unlock_result = FileExt::unlock(&lock).context("failed to unlock CA initialization");
+    match (result, unlock_result) {
+        (Ok(data), Ok(())) => Ok(data),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
     }
+}
 
-    let (cert, key) = create_ca()?;
-    let data = CaData::from_cert(&cert, &key)?;
+fn path_present(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
-    data.save(cert_dir, pem_filename)?;
-    log::info!("CA certificate saved to {:?}", cert_dir);
-
-    Ok(data)
+fn read_owner_only_file(path: &Path) -> io::Result<Vec<u8>> {
+    // Validate ownership/link safety and tighten legacy permissions before reading.
+    let file = private_fs::open_file(path, false)?;
+    let metadata = file.metadata()?;
+    const MAX_AUTHORITY_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    if metadata.len() > MAX_AUTHORITY_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "authority output is too large",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_AUTHORITY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_AUTHORITY_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "authority output is too large",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn create_ca() -> Result<(Certificate, KeyPair)> {
@@ -146,6 +197,67 @@ fn create_ca() -> Result<(Certificate, KeyPair)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authority_preparation_failure_does_not_publish_partial_files() -> Result<()> {
+        let cert_dir = tempfile::tempdir()?;
+        let pem_filename = "fluxcope-ca.pem";
+        fs::create_dir(cert_dir.path().join(pem_filename))?;
+        let (certificate, key) = create_ca()?;
+        let authority = CaData::from_cert(&certificate, &key)?;
+
+        assert!(authority.save(cert_dir.path(), pem_filename).is_err());
+
+        assert!(!cert_dir.path().join(CA_CERT_FILE).exists());
+        assert!(!cert_dir.path().join(CA_KEY_FILE).exists());
+        fs::remove_dir(cert_dir.path().join(pem_filename))?;
+        let recovered = create_or_load_ca(cert_dir.path(), pem_filename)?;
+        let reloaded = create_or_load_ca(cert_dir.path(), pem_filename)?;
+        assert_eq!(recovered.key_der(), reloaded.key_der());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authority_permissions_survive_restrictive_umask_and_restart() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "FLUXCOPE_CA_RESTRICTIVE_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cert_dir = tempfile::tempdir()?;
+            rustix::process::umask(rustix::fs::Mode::from_bits_retain(0o477));
+            let pem_filename = "fluxcope-ca.pem";
+            let created = create_or_load_ca(cert_dir.path(), pem_filename)?;
+            for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+                assert_eq!(
+                    fs::metadata(cert_dir.path().join(name))?
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600,
+                    "{name} must remain readable only by its owner",
+                );
+            }
+            let loaded = create_or_load_ca(cert_dir.path(), pem_filename)?;
+            assert_eq!(created.cert_der(), loaded.cert_der());
+            assert_eq!(created.key_der(), loaded.key_der());
+            return Ok(());
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "ca::tests::authority_permissions_survive_restrictive_umask_and_restart",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "CA umask child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_certificate_persistence() {
@@ -187,6 +299,43 @@ mod tests {
         assert_eq!(ca1.key_der(), ca2.key_der(), "Key DER bytes should match");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn legacy_authority_permissions_are_tightened_before_loading() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let cert_dir = tempfile::tempdir().expect("temporary CA directory");
+        let pem_filename = "fluxcope-ca.pem";
+        let original = create_or_load_ca(cert_dir.path(), pem_filename)
+            .expect("initial authority creation should succeed");
+
+        for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+            fs::set_permissions(
+                cert_dir.path().join(name),
+                fs::Permissions::from_mode(0o644),
+            )
+            .expect("legacy permissions should be installed");
+        }
+
+        let loaded = create_or_load_ca(cert_dir.path(), pem_filename)
+            .expect("legacy authority should be migrated and loaded");
+
+        assert_eq!(loaded.cert_der(), original.cert_der());
+        assert_eq!(loaded.key_der(), original.key_der());
+        assert_eq!(loaded.cert_pem(), original.cert_pem());
+        for name in [CA_CERT_FILE, CA_KEY_FILE, pem_filename] {
+            assert_eq!(
+                fs::metadata(cert_dir.path().join(name))
+                    .expect("migrated authority metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{name} must be tightened to owner-only",
+            );
+        }
+    }
+
     #[test]
     fn incomplete_persisted_authority_is_fatal() {
         let cert_dir = tempfile::tempdir().expect("temporary CA directory should be created");
@@ -200,5 +349,92 @@ mod tests {
 
         assert!(error.to_string().contains("failed to load CA"));
         assert!(!cert_dir.path().join(CA_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn concurrent_initialization_publishes_one_complete_shared_authority() {
+        use std::sync::{Arc, Barrier};
+
+        let cert_dir = tempfile::tempdir().expect("temporary CA directory");
+        let cert_path = Arc::new(cert_dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+        let callers = (0..2)
+            .map(|_| {
+                let cert_path = Arc::clone(&cert_path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    create_or_load_ca(&cert_path, "fluxcope-ca.pem")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let authorities = callers
+            .into_iter()
+            .map(|caller| {
+                caller
+                    .join()
+                    .expect("CA initialization thread should not panic")
+                    .expect("concurrent CA initialization should succeed")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(authorities[0].cert_der(), authorities[1].cert_der());
+        assert_eq!(authorities[0].key_der(), authorities[1].key_der());
+        assert_eq!(authorities[0].cert_pem(), authorities[1].cert_pem());
+        assert_eq!(
+            fs::read(cert_dir.path().join(CA_CERT_FILE)).expect("persisted certificate"),
+            authorities[0].cert_der()
+        );
+        assert_eq!(
+            fs::read(cert_dir.path().join(CA_KEY_FILE)).expect("persisted private key"),
+            authorities[0].key_der()
+        );
+        assert_eq!(
+            fs::read_to_string(cert_dir.path().join("fluxcope-ca.pem"))
+                .expect("persisted PEM certificate"),
+            authorities[0].cert_pem()
+        );
+        assert!(!authorities[0].cert_der().is_empty());
+        assert!(!authorities[0].key_der().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_authority_directory_lock_and_outputs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let cert_dir = root.path().join("authority");
+        create_or_load_ca(&cert_dir, "fluxcope-ca.pem").expect("CA initialization");
+
+        assert_eq!(
+            fs::metadata(&cert_dir)
+                .expect("CA directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for name in [
+            CA_CERT_FILE,
+            CA_KEY_FILE,
+            "fluxcope-ca.pem",
+            ".ca-init.lock",
+        ] {
+            let path = cert_dir.join(name);
+            let metadata = fs::symlink_metadata(&path).expect("authority file metadata");
+            assert!(metadata.is_file(), "{name} must be a regular file");
+            assert!(
+                !metadata.file_type().is_symlink(),
+                "{name} must not be a symlink"
+            );
+            assert_eq!(
+                metadata.permissions().mode() & 0o777,
+                0o600,
+                "{name} must be owner-only"
+            );
+        }
     }
 }

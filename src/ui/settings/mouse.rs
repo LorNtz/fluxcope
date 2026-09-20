@@ -93,7 +93,13 @@ fn handle_prefilter_table_mouse(
     if let Some((index, toggle)) = hit_regions.prefilter_hit(hit_regions.local_position(mouse)) {
         app.settings_popup.select_prefilter_pattern(index);
         if toggle {
-            app.settings_popup.toggle_prefilter_pattern(index);
+            if app.settings_transaction_pending() {
+                app.settings_popup.mark_save_failed(
+                    "settings transaction is pending; wait for it to finish".to_string(),
+                );
+            } else {
+                app.settings_popup.toggle_prefilter_pattern(index);
+            }
         }
         return true;
     }
@@ -139,6 +145,14 @@ fn handle_proxy_preset_select_mouse(
     let dropdown_hit = active_select.is_some_and(|select| select.dropdown_contains(local_position));
     let option_hit = active_select.and_then(|select| select.layout.option_at(local_position));
     let clicked_select_target = clicked_select.map(|select| select.target);
+    if app.settings_transaction_pending()
+        && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && (box_hit || dropdown_hit || clicked_select_target.is_some() || option_hit.is_some())
+    {
+        app.settings_popup
+            .mark_save_failed("settings transaction is pending; wait for it to finish".to_string());
+        return true;
+    }
     match mouse.kind {
         MouseEventKind::ScrollDown if dropdown_hit => {
             app.settings_popup.scroll_active_select_down();

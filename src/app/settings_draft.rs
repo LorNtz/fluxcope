@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use crate::settings::AppSettings;
 
@@ -7,21 +10,22 @@ use crate::settings::AppSettings;
 /// Navigation and proxy-rule cursors live in `SettingsPopup`; they borrow this
 /// draft for every operation and never retain a second settings collection.
 pub(super) struct SettingsDraft {
-    original: AppSettings,
-    current: AppSettings,
+    original: Arc<AppSettings>,
+    current: Arc<AppSettings>,
     error: Option<String>,
 }
 
 impl SettingsDraft {
-    pub fn new(settings: AppSettings) -> Self {
+    pub fn new(settings: impl Into<Arc<AppSettings>>) -> Self {
+        let settings = settings.into();
         Self {
-            original: settings.clone(),
+            original: Arc::clone(&settings),
             current: settings,
             error: None,
         }
     }
 
-    pub fn replace(&mut self, settings: AppSettings) {
+    pub fn replace(&mut self, settings: impl Into<Arc<AppSettings>>) {
         *self = Self::new(settings);
     }
 
@@ -45,8 +49,8 @@ impl SettingsDraft {
         self.error = None;
     }
 
-    pub fn snapshot(&self) -> AppSettings {
-        self.current.clone()
+    pub fn snapshot(&self) -> Arc<AppSettings> {
+        Arc::clone(&self.current)
     }
 }
 
@@ -60,6 +64,6 @@ impl Deref for SettingsDraft {
 
 impl DerefMut for SettingsDraft {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.current
+        Arc::make_mut(&mut self.current)
     }
 }

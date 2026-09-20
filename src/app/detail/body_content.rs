@@ -249,10 +249,11 @@ fn body_text_for_record(record: &CaptureRecord, tab: MainDisplayTab) -> Option<S
     }
 
     let preview = record.body_preview(side);
-    let body = if preview.is_empty() {
+    let flattened = preview.flatten();
+    let body = if flattened.is_empty() {
         None
     } else {
-        std::str::from_utf8(&preview).ok()
+        std::str::from_utf8(&flattened).ok()
     };
     Some(match side {
         BodySide::Request => format_request_body(body, &capture.request.headers),
@@ -262,7 +263,7 @@ fn body_text_for_record(record: &CaptureRecord, tab: MainDisplayTab) -> Option<S
         BodySide::Response => match body {
             Some(body) => format_json_body(body),
             None if status.observed_bytes == 0 => "(No body)".to_string(),
-            None => binary_body_summary(&preview, status.observed_bytes),
+            None => binary_body_summary(&flattened, status.observed_bytes),
         },
     })
 }

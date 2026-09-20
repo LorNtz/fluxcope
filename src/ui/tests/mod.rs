@@ -1,11 +1,16 @@
 use super::*;
-use crate::capture::{
-    BodySide, CaptureSequence, CapturedExchange, DecodeDisplayMode, DecodeKey, DecodePolicy,
-    DecodeResult, start_decode_service,
-};
-use crate::settings::{
-    ProxyPresetSettings, ProxySettings, RecordingPrefilterPatternSettings, RequestListSettings,
-    UiSettings,
+use crate::{
+    app::SettingsUiContext,
+    capture::{
+        BodySide, CaptureRetentionPolicy, CaptureSequence, CapturedExchange, DecodeDisplayMode,
+        DecodeKey, DecodePolicy, DecodeResult, start_decode_service,
+    },
+    logging::LogRetentionPolicy,
+    recording::RecordingState,
+    settings::{
+        AppSettings, ConfigMode, PersistenceMode, ProxyPresetSettings, ProxySettings,
+        RecordingPrefilterPatternSettings, RequestListSettings, UiSettings,
+    },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use http::Method;
@@ -16,6 +21,15 @@ fn ui_settings(auto_expand: bool) -> UiSettings {
     UiSettings {
         request_list: RequestListSettings { auto_expand },
     }
+}
+fn app_with_settings_context(context: SettingsUiContext) -> App {
+    App::with_runtime_policies(
+        AppSettings::default(),
+        RecordingState::default(),
+        LogRetentionPolicy::default(),
+        CaptureRetentionPolicy::default(),
+        context,
+    )
 }
 
 fn proxy_settings(active: &str, presets: &[&str]) -> ProxySettings {
