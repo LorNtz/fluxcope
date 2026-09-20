@@ -33,6 +33,7 @@ main() (
     directory=$(cd "$directory" && pwd -P)
     archive=$directory/client.tar.xz
     url='https://github.com/LorNtz/fluxcope/releases/download/v0.0.0-preview.@ID@'
+    printf 'Downloading installer runtime for preview @ID@ (%s)…\n' "$target"
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
         --max-filesize 268435456 "$url/fluxcope-preview-client-$target.tar.xz" -o "$archive"
     if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$archive"); else actual=$(shasum -a 256 "$archive"); fi

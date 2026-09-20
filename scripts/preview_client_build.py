@@ -3,6 +3,7 @@
 import argparse
 import importlib.metadata
 import json
+import re
 from pathlib import Path
 import sys
 import tarfile
@@ -14,6 +15,40 @@ from preview_client.model import client_asset, digest, PreviewError
 from preview_client.remote import clean_environment
 from preview_client.state import host_target
 from release_support import ROOT, run
+
+
+def prepare_python(target, directory):
+    """manylinux's own Python is static; fetch a pinned shared-library runtime."""
+    if target != host_target():
+        raise PreviewError('Packaging Python must match the native platform.')
+    pins = json.loads((ROOT / '.github/preview-client-pins.json').read_text())
+    pin = pins['python'][target]
+    if directory.exists():
+        raise PreviewError('Use a fresh packaging runtime directory.')
+    with tempfile.TemporaryDirectory(prefix='preview-python-') as temporary:
+        archive = Path(temporary) / 'python.tar.gz'
+        url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{pins['python_release']}/{pin['asset']}"
+        run('curl', '--fail', '--location', '--retry', '3', '--max-time', '180',
+            '--max-filesize', str(128 * 1024 * 1024), '--output', str(archive), url)
+        if digest(archive) != pin['sha256']:
+            raise PreviewError('Pinned packaging Python checksum mismatch.')
+        directory.mkdir()
+        with tarfile.open(archive) as stream:
+            stream.extractall(directory, filter='data')
+    run(str(directory / 'python/bin/python3'), '-c',
+        'import sysconfig; assert sysconfig.get_config_var("Py_ENABLE_SHARED") == 1')
+
+
+def client_contract(binary, target):
+    if target.endswith('apple-darwin'):
+        commands = run('otool', '-l', str(binary))
+        versions = re.findall(r'\bminos (\d+)\.(\d+)(?:\.(\d+))?', commands)
+        versions += re.findall(r'cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version (\d+)\.(\d+)(?:\.(\d+))?', commands)
+        if not versions or any(tuple(int(p or 0) for p in value) > (15, 0, 0) for value in versions):
+            raise PreviewError('Private runtime requires an OS newer than macOS 15, or lacks a verifiable minimum.')
+    elif 'INTERP' in run('readelf', '-l', str(binary)):
+        binary_contract(binary, target)
+    # A static ELF has no glibc dependency. readelf and native execution still validate it.
 
 
 def build(target, output):
@@ -53,17 +88,14 @@ def build(target, output):
         roots = run(str(bundle / 'gh'), 'attestation', 'trusted-root', env=clean_environment(work))
         (bundle / 'trusted-root.jsonl').write_text(roots + '\n')
         run(str(bundle / 'preview-client'), '--help')
-        binary_contract(bundle / 'preview-client', target)
-        if target.endswith('apple-darwin'):
-            binary_contract(bundle / 'gh', target)
-        else:
-            # The pinned Go verifier can be fully static and require no glibc.
-            dynamic = run('readelf', '-l', str(bundle / 'gh'))
-            if 'INTERP' in dynamic:
-                binary_contract(bundle / 'gh', target)
+        for name in ('preview-client', 'gh'):
+            client_contract(bundle / name, target)
         notices = [run(str(bundle / 'gh'), 'licenses')]
         license._Printer__setup()
         notices.append('Python\n' + '\n'.join(license._Printer__lines))
+        for path in sorted((Path(sys.base_prefix) / 'licenses').glob('*')):
+            if path.is_file():
+                notices.append(path.name + '\n' + path.read_text())
         for name in ('pyinstaller', 'ruamel.yaml', 'certifi'):
             distribution = importlib.metadata.distribution(name)
             for path in distribution.files:
@@ -78,7 +110,8 @@ def build(target, output):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('bundle', 'python'), nargs='?', default='bundle')
     parser.add_argument('--target', required=True)
     parser.add_argument('--directory', type=Path, required=True)
     args = parser.parse_args()
-    build(args.target, args.directory)
+    {'bundle': build, 'python': prepare_python}[args.command](args.target, args.directory)

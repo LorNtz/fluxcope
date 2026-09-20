@@ -109,6 +109,7 @@ def install(state, downloads, client_archive=None):
         raise PreviewError('Launcher path is occupied by another file; nothing was overwritten.')
     with tempfile.TemporaryDirectory(prefix='install-', dir=state.root) as temporary:
         staging = Path(temporary)
+        print(f'Verifying preview {state.id} and its signed release metadata…', flush=True)
         manifest, assets = downloads.metadata(state.id, staging)
         if state.target not in manifest['targets']:
             raise PreviewError('This preview does not include this native platform; request its profile or all.')

@@ -74,3 +74,10 @@ Date: 2026/09/20 12:16
 - Both reviewers confirmed the trust/runtime corrections. Fixed their follow-up on normal PTY EOF/EIO during confirmed purge, retaining the deadline.
 - Normalized private installation file permissions. Full-stage transfer optimization remains deferred within explicit size bounds.
 - Validation: 93 Python tests and seven cache tests passed; actionlint reports only its existing lack of cache-mode schema support.
+
+### Preview installer: native CI packaging corrections
+Date: 2026/09/20 12:23
+
+- Native CI identified static manylinux Python and the Intel bootloader’s legacy LC_VERSION_MIN_MACOSX command.
+- Pinned standalone CPython 3.11.16 Linux distributions by SHA-256 for packaging; retained execution in glibc 2.28 containers and accepted both Mach-O minimum-version forms.
+- Real Apple Silicon frozen client passed anonymous public install using bundled HTTPS roots, offline signed-evidence verification, isolated proxy forwarding and clean shutdown.
