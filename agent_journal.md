@@ -526,3 +526,27 @@ Date: 2026/09/20 13:53
 - Design Review and Performance Review: adopted the pre-poll permit assertion; no remaining blockers.
 
 **Result**: Feature-branch CI hang fixed without changing production code.
+
+### Fix preview artifact selection after failed-job retries
+Date: 2026/09/20 13:12
+
+- Live installer qualification exposed GitHub carrying successful jobs into later attempt responses under new job IDs. Resolve evidence from the first appearance of the same completed execution timestamps while preserving the latest job result.
+- Added regressions for carried jobs across three attempts and for actual reruns that succeed or fail, preventing fallback to stale successful evidence.
+
+**Result**: Focused correction implemented; review and validation follow.
+
+### Validate preview retry evidence correction
+Date: 2026/09/20 13:14
+
+- All 99 Python tooling tests passed, including inherited-job and real-rerun regressions. Checked against actual attempt 1/2 metadata from preview 35490029823.
+- Design Review: no actionable findings; newer failures remain authoritative.
+- Performance Review: no actionable findings; no extra API calls and constant extra work per job.
+
+**Result**: Ready for CI and merge.
+
+### Integrate reviewed preview retry recovery
+Date: 2026/09/20 13:54
+
+- Merged master retry correction into the development preview branch. Preserved both branches’ appended journal records and left local AGENTS.md and untracked files unchanged.
+
+**Result**: Development preview includes current installer and retry tooling plus the deterministic MCP test correction.

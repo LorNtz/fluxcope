@@ -67,7 +67,14 @@ def run_jobs(run_id: int, attempt: int) -> dict[str, dict]:
         while True:
             response = api(repository_path(f'actions/runs/{run_id}/attempts/{number}/jobs?per_page=100&page={page}'))
             for job in response['jobs']:
-                jobs.setdefault(job['name'], {**job, 'evidence_attempt': number})
+                latest = jobs.setdefault(job['name'], {**job, 'evidence_attempt': number})
+                # Failed-job reruns also list inherited jobs with new IDs and
+                # run_attempt values. Their execution timestamps stay unchanged;
+                # the artifact belongs to the first attempt of that execution.
+                if (latest.get('started_at') and latest.get('completed_at')
+                        and all(latest.get(key) == job.get(key) for key in
+                                ('head_sha', 'started_at', 'completed_at', 'status', 'conclusion'))):
+                    latest['evidence_attempt'] = number
             if len(response['jobs']) < 100:
                 break
             page += 1
