@@ -1,6 +1,6 @@
 [package]
 name = "fluxcope"
-version = "0.1.0"
+version = "0.0.0-preview.35495854929"
 edition = "2024"
 rust-version = "1.98"
 description = "A terminal HTTP and HTTPS debugging proxy with recording and request mapping"
