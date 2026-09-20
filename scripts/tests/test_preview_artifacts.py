@@ -45,6 +45,42 @@ def refresh_checksums(directory):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_format_two_publishes_only_the_signed_installer_and_native_clients(self):
+        from preview_client.model import INSTALLER, MANIFEST, client_asset
+        with tempfile.TemporaryDirectory() as temporary, patch.object(assets, 'provenance'):
+            root = Path(temporary)
+            identity = fixture(root)
+            for name in (INSTALLER, *(client_asset(t) for t in identity['targets'])):
+                (root / name).write_bytes(b'controller-owned payload')
+            manifest = json.loads((root / MANIFEST).read_text())
+            manifest['format'] = 2
+            manifest['files'] = {name: digest(root / name) for name in assets.payload_assets(manifest)}
+            (root / MANIFEST).write_text(json.dumps(manifest))
+            refresh_checksums(root)
+            self.assertEqual(set(assets.validate_public_directory(root, identity)), assets.public_assets(manifest))
+            (root / INSTALLER).write_bytes(b'replaced installer')
+            refresh_checksums(root)
+            with self.assertRaisesRegex(ReleaseError, 'signed manifest'):
+                assets.validate_public_directory(root, identity)
+
+    def test_installer_qualification_must_cover_exact_manifest_and_controller(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identity = fixture(root)
+            target = identity['targets'][0]
+            report = {'schema': 1, 'id': identity['id'], 'controller': identity['controller'],
+                      'target': target, 'manifest_sha256': digest(root / assets.MANIFEST), 'result': 'passed'}
+            def evidence(current, job, prefix, expected, directory):
+                self.assertEqual(job, f'Preview install ({target})')
+                (directory / f'{target}-install.json').write_text(json.dumps(report))
+            with patch.object(publisher, 'download_evidence', side_effect=evidence):
+                publisher.verify_install_reports(current_run(), identity, root)
+                original = report.copy()
+                for key, value in (('controller', 'f' * 40), ('manifest_sha256', 'f' * 64), ('id', 999), ('result', 'failed')):
+                    report = {**original, key: value}
+                    with self.subTest(key=key), self.assertRaisesRegex(ReleaseError, 'exact signed assets'):
+                        publisher.verify_install_reports(current_run(), identity, root)
+
     def test_interrupted_draft_resumes_with_scoped_readback_and_no_duplicate_upload(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

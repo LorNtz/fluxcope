@@ -87,3 +87,10 @@ Date: 2026/09/20 12:26
 
 - Real frozen-client purge found that buffered r+ opening of /dev/tty requires a seekable stream. Split terminal input/output handles so confirmation works on an actual PTY.
 - Removed imports made obsolete by the shared-client extraction. Both reviewers approved the native packaging correction.
+
+### Preview installer: final provenance regression coverage
+Date: 2026/09/20 12:33
+
+- Pinned the macOS packaging interpreter to CPython 3.11.16, matching the explicit Linux runtime version.
+- Added format-2 installer-tampering and mismatched qualification-digest/controller regression checks; removed a duplicate manifest read introduced during extraction.
+- Both reviewers approved the real-terminal confirmation correction.

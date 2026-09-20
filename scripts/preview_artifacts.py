@@ -111,8 +111,6 @@ def validate_public_directory(directory: Path, identity: dict) -> dict[str, str]
     if ({p.name for p in paths} != public_assets(manifest)
             or any(p.is_symlink() or not p.is_file() or p.stat().st_size > LIMIT for p in paths)):
         raise ReleaseError('Preview assets differ from the publication allowlist.')
-    manifest = json.loads((directory / MANIFEST).read_text())
-    validate_manifest(manifest, identity)
     sums = checksums((directory / 'sha256.sum').read_text())
     if set(sums) != public_assets(manifest) - {'sha256.sum'}:
         raise ReleaseError('Preview checksums do not cover exactly the public assets.')
