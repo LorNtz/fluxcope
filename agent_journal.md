@@ -573,3 +573,21 @@ Date: 2026/09/20 14:31
 - Merged PR #20 from master into the preview branch, preserving appended journal records on both sides and unrelated local work.
 
 **Result**: Source branch and protected controller are ready for a fresh four-platform publication qualification.
+
+### Stabilize settings fixture readiness for preview qualification
+Date: 2026/09/20 15:01
+
+- Replaced test-only flag/notification pairs with persistent watch state to prevent a lost wakeup observed in Linux ARM64 preview CI.
+- Added a regression covering subscribers before and after worker entry, including entry without a receiver.
+- Production settings transaction behavior is unchanged.
+
+**Result**: implementation ready for focused stress testing and independent review.
+
+### Verify settings readiness race correction
+Date: 2026/09/20 15:03
+
+- Design and performance reviewers found no actionable issues.
+- All 29 settings tests, 300 repetitions of shutdown transaction coverage, 862 unit tests and all 12 integration tests passed.
+- cargo fmt --check, cargo clippy --locked --all-targets -- -D warnings and git diff --check passed.
+
+**Result**: feature branch test fixture correction is ready for native preview CI.

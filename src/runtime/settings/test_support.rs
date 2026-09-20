@@ -2,13 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     path::PathBuf,
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex},
 };
 
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -57,8 +54,7 @@ pub(crate) struct StageBarrier {
 }
 
 struct StageBarrierInner {
-    entered: AtomicBool,
-    entered_notify: Notify,
+    entered: watch::Sender<bool>,
     released: Mutex<bool>,
     released_notify: Condvar,
 }
@@ -67,8 +63,7 @@ impl StageBarrier {
     fn new() -> Self {
         Self {
             inner: Arc::new(StageBarrierInner {
-                entered: AtomicBool::new(false),
-                entered_notify: Notify::new(),
+                entered: watch::channel(false).0,
                 released: Mutex::new(false),
                 released_notify: Condvar::new(),
             }),
@@ -76,8 +71,7 @@ impl StageBarrier {
     }
 
     fn block(&self) {
-        self.inner.entered.store(true, Ordering::Release);
-        self.inner.entered_notify.notify_waiters();
+        self.inner.entered.send_replace(true);
         let mut released = self.inner.released.lock().expect("stage barrier lock");
         while !*released {
             released = self
@@ -89,9 +83,12 @@ impl StageBarrier {
     }
 
     pub(crate) async fn entered(&self) {
-        while !self.inner.entered.load(Ordering::Acquire) {
-            self.inner.entered_notify.notified().await;
-        }
+        self.inner
+            .entered
+            .subscribe()
+            .wait_for(|entered| *entered)
+            .await
+            .expect("stage barrier remains available");
     }
 
     pub(crate) fn release(&self) {
@@ -265,8 +262,7 @@ struct FixtureInner {
     state: Arc<Mutex<RuntimeState>>,
     hooks: Arc<FixtureHooks>,
     shutdown: CancellationToken,
-    shutdown_started: AtomicBool,
-    shutdown_notify: Notify,
+    shutdown_started: watch::Sender<bool>,
     service_task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
     runtime_task: Mutex<Option<JoinHandle<()>>>,
     persisted_path: Option<PathBuf>,
@@ -401,8 +397,7 @@ impl SettingsRuntimeFixture {
                 state,
                 hooks,
                 shutdown,
-                shutdown_started: AtomicBool::new(false),
-                shutdown_notify: Notify::new(),
+                shutdown_started: watch::channel(false).0,
                 service_task: Mutex::new(Some(service_task)),
                 runtime_task: Mutex::new(Some(runtime_task)),
                 persisted_path,
@@ -662,8 +657,7 @@ impl SettingsRuntimeFixture {
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.inner.shutdown_started.store(true, Ordering::Release);
-        self.inner.shutdown_notify.notify_waiters();
+        self.inner.shutdown_started.send_replace(true);
         self.inner.shutdown.cancel();
         let service = self.inner.service_task.lock().expect("service task").take();
         if let Some(service) = service {
@@ -676,9 +670,12 @@ impl SettingsRuntimeFixture {
     }
 
     pub(crate) async fn shutdown_started(&self) {
-        while !self.inner.shutdown_started.load(Ordering::Acquire) {
-            self.inner.shutdown_notify.notified().await;
-        }
+        self.inner
+            .shutdown_started
+            .subscribe()
+            .wait_for(|started| *started)
+            .await
+            .expect("settings fixture remains available");
     }
 
     pub(crate) fn gateway_accepts_reserved_terminal_delivery(&self) -> bool {
@@ -865,5 +862,32 @@ fn execute_runtime_request(
         _ => Err(ControlError::invalid_argument(
             "unsupported fixture runtime request",
         )),
+    }
+}
+
+#[tokio::test]
+async fn stage_barrier_remembers_entry_for_early_and_late_waiters() {
+    use std::time::Duration;
+
+    for subscribe_before_entry in [true, false] {
+        let barrier = StageBarrier::new();
+        let entered = barrier.entered();
+        tokio::pin!(entered);
+        if subscribe_before_entry {
+            assert!(futures::poll!(entered.as_mut()).is_pending());
+        }
+
+        // Release first so a failed assertion cannot strand a blocking worker.
+        barrier.release();
+        let worker_barrier = barrier.clone();
+        tokio::task::spawn_blocking(move || worker_barrier.block())
+            .await
+            .expect("barrier worker");
+        tokio::time::timeout(Duration::from_secs(1), entered)
+            .await
+            .expect("entry must survive regardless of subscription timing");
+        tokio::time::timeout(Duration::from_secs(1), barrier.entered())
+            .await
+            .expect("entry must remain visible to subsequent waiters");
     }
 }
