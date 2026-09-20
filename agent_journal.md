@@ -503,3 +503,26 @@ Date: 2026/09/20 12:46
 
 - Merged master controller 96d400f into the MCP development branch so its just commands support installer-format previews.
 - Preserved both branches’ journal entries; local AGENTS.md edits and untracked files remain outside the merge commit.
+
+### Stabilize blocking-scan admission qualification test
+Date: 2026/09/20 13:49
+
+- Intel preview qualification hung in the cancellation/deadline test because a 25 ms wall deadline could expire before all 32 blocking workers started, and an assertion panic left their gate closed during runtime shutdown.
+- Pause Tokio time until every worker starts, advance explicitly, assert cancellation/deadline results and exhausted admission, and release the gate through an unwind-safe local guard. Production MCP behavior is unchanged.
+
+**Result**: Test correction implemented for deterministic qualification; validation and two Rust reviews follow.
+
+### Tighten scan admission regression assertion
+Date: 2026/09/20 13:51
+
+- Adopted design-review feedback: assert all original permits remain held before polling the extra request, so it cannot consume and hide an incorrectly released permit.
+
+**Result**: Regression directly detects early admission release.
+
+### Verify deterministic blocking-scan qualification
+Date: 2026/09/20 13:53
+
+- Regression passed 100 consecutive runs. Full Rust unit/integration/doc suite, cargo fmt --check, and all-target Clippy with warnings denied passed. Full suite ran with local socket access required by its existing fixtures.
+- Design Review and Performance Review: adopted the pre-poll permit assertion; no remaining blockers.
+
+**Result**: Feature-branch CI hang fixed without changing production code.

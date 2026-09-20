@@ -3935,9 +3935,17 @@ mod tests {
         let _ = targeted.await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(start_paused = true)]
     async fn cancelled_and_expired_blocking_scans_retain_shared_scan_admission() {
+        struct ReleaseOnDrop(Arc<BlockingGate>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
         let gate = Arc::new(BlockingGate::default());
+        // Even a failed assertion must unblock workers before runtime shutdown.
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
         let registry = Arc::new(BlockingScanRegistry {
             gate: Arc::clone(&gate),
             started: AtomicUsize::new(0),
@@ -3964,27 +3972,39 @@ mod tests {
             });
             calls.push((cancelled, task));
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while registry.started.load(Ordering::SeqCst) != 32 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all admitted blocking scans started");
+        // Keep virtual time paused until every worker has actually started.
+        // A wall-clock bound still reports a broken fixture without hanging.
+        let startup = std::time::Instant::now();
+        while registry.started.load(Ordering::SeqCst) != 32 {
+            assert!(
+                startup.elapsed() < Duration::from_secs(10),
+                "all admitted blocking scans must start"
+            );
+            tokio::task::yield_now().await;
+        }
         for (cancelled, _) in calls.iter().take(16) {
             cancelled.cancel();
         }
-        for (_, task) in calls {
-            let _ = task.await;
+        tokio::time::advance(Duration::from_millis(25)).await;
+        for (index, (_, task)) in calls.into_iter().enumerate() {
+            let error = task
+                .await
+                .expect("discovery task")
+                .expect_err("blocked scan must be cancelled or expire");
+            assert_eq!(
+                error.code(),
+                if index < 16 {
+                    ControlErrorCode::Cancelled
+                } else {
+                    ControlErrorCode::DeadlineExceeded
+                }
+            );
         }
 
         let extra_cancelled = CancellationToken::new();
-        let extra = {
-            let broker = broker.clone();
-            let cancelled = extra_cancelled.clone();
-            tokio::spawn(async move { broker.discover(client(), deadline(), cancelled).await })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut extra = Box::pin(broker.discover(client(), deadline(), extra_cancelled.clone()));
+        assert_eq!(broker.scan_admission.available_permits(), 0);
+        assert!(futures::poll!(extra.as_mut()).is_pending());
         assert_eq!(
             registry.started.load(Ordering::SeqCst),
             32,
@@ -3993,7 +4013,10 @@ mod tests {
 
         extra_cancelled.cancel();
         gate.release();
-        let _ = extra.await;
+        assert_eq!(
+            extra.await.expect_err("extra scan cancelled").code(),
+            ControlErrorCode::Cancelled
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
