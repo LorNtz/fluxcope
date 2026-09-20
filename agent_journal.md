@@ -100,3 +100,20 @@ Date: 2026/09/20 12:38
 
 - The final exact-version check exposed that setup-python’s macOS 3.11 selector supplies 3.11.9 and does not offer 3.11.16.
 - Extended the existing pinned standalone-runtime mechanism to macOS ARM64/Intel, so all four frozen clients use checksum-pinned CPython 3.11.16. The workflow interpreter remains separate from the shipped runtime.
+
+### Fix preview artifact selection after failed-job retries
+Date: 2026/09/20 13:12
+
+- Live installer qualification exposed GitHub carrying successful jobs into later attempt responses under new job IDs. Resolve evidence from the first appearance of the same completed execution timestamps while preserving the latest job result.
+- Added regressions for carried jobs across three attempts and for actual reruns that succeed or fail, preventing fallback to stale successful evidence.
+
+**Result**: Focused correction implemented; review and validation follow.
+
+### Validate preview retry evidence correction
+Date: 2026/09/20 13:14
+
+- All 99 Python tooling tests passed, including inherited-job and real-rerun regressions. Checked against actual attempt 1/2 metadata from preview 35490029823.
+- Design Review: no actionable findings; newer failures remain authoritative.
+- Performance Review: no actionable findings; no extra API calls and constant extra work per job.
+
+**Result**: Ready for CI and merge.
