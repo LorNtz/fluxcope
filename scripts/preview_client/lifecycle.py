@@ -245,10 +245,10 @@ def uninstall(state, purge=False):
     checked(state.launcher)
     if purge:
         try:
-            with open('/dev/tty', 'r+') as terminal:
+            with open('/dev/tty', 'r') as reader, open('/dev/tty', 'w') as terminal:
                 terminal.write(f'Delete all settings and certificates for preview {state.id}? Type {state.id}: ')
                 terminal.flush()
-                answer = terminal.readline().strip()
+                answer = reader.readline().strip()
         except OSError as error:
             raise PreviewError('Purging requires an interactive terminal.') from error
         if answer != str(state.id):

@@ -81,3 +81,9 @@ Date: 2026/09/20 12:23
 - Native CI identified static manylinux Python and the Intel bootloader’s legacy LC_VERSION_MIN_MACOSX command.
 - Pinned standalone CPython 3.11.16 Linux distributions by SHA-256 for packaging; retained execution in glibc 2.28 containers and accepted both Mach-O minimum-version forms.
 - Real Apple Silicon frozen client passed anonymous public install using bundled HTTPS roots, offline signed-evidence verification, isolated proxy forwarding and clean shutdown.
+
+### Preview installer: real-terminal purge correction
+Date: 2026/09/20 12:26
+
+- Real frozen-client purge found that buffered r+ opening of /dev/tty requires a seekable stream. Split terminal input/output handles so confirmation works on an actual PTY.
+- Removed imports made obsolete by the shared-client extraction. Both reviewers approved the native packaging correction.

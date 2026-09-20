@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 from pathlib import Path
 import re
-import tempfile
 from urllib.request import urlopen
 
 from dist_artifacts import digest
-from preview_identity import (BASE, CONFIG, REPO, SIGNER, identity_from_run,
-                              platforms, timestamp, trusted_run)
+from preview_identity import BASE, CONFIG, REPO, SIGNER, timestamp
 from release_evidence import artifact_files
 from release_gate import optional_api
 from release_publish import checksums
@@ -19,7 +16,7 @@ from release_support import ReleaseError, api, pages, repository_path, run, run_
 
 from preview_client.model import (LIMIT, BUNDLE, MANIFEST, INSTALLER, client_asset,
                                   platform_assets, payload_assets, public_assets,
-                                  identity_matches, validate_manifest, asset_limit)
+                                  identity_matches, validate_manifest)
 
 
 def require_job(current: dict, name: str) -> dict:
