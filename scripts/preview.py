@@ -7,17 +7,14 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
-import platform
-import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
 
-from dist_artifacts import digest, extract_binary
-from preview_artifacts import BUNDLE, download_asset, download_public, provenance, release_for
+from preview_client.state import host_target
+from preview_artifacts import download_public, release_for
 from preview_identity import (BASE, PROFILES, REPO, TITLE, WORKFLOW, identity_from_run,
                               platforms, preview_id, timestamp, trusted_run, validate_pr)
 from preview_record import read_record
@@ -83,8 +80,10 @@ def status(identifier: int):
         if current['status'] == 'completed':
             if record and record['state'] == 'complete':
                 with tempfile.TemporaryDirectory(prefix='fluxcope-preview-status-') as directory:
-                    release, _ = download_public(identity, Path(directory), metadata_only=True)
+                    release, manifest = download_public(identity, Path(directory), metadata_only=True)
                 print(f"Download: {release['html_url']}\nRun: just preview-run {identifier}")
+                if manifest.get('format', 1) == 2:
+                    print(f"Install: curl --proto '=https' --tlsv1.2 -fsSL https://github.com/{REPO}/releases/download/{identity['tag']}/fluxcope-preview-installer.sh | sh")
                 return
             raise ReleaseError(f'Preview needs attention. Inspect the workflow, then: just preview-retry {identifier}')
         time.sleep(30)
@@ -170,85 +169,28 @@ def retry(current: dict):
     raise ReleaseError(f'Rerun acknowledgement is delayed. Resume with just preview-status {identity["id"]}.')
 
 
-def host_target() -> str:
-    machine = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x86_64'}.get(platform.machine())
-    system = platform.system()
-    if not machine or system not in ('Darwin', 'Linux'):
-        raise ReleaseError('Preview execution supports native macOS/Linux ARM64 and x86-64.')
-    if system == 'Darwin' and int(platform.mac_ver()[0].split('.')[0]) < 15:
-        raise ReleaseError('macOS previews require macOS 15 or newer.')
-    return machine + ('-apple-darwin' if system == 'Darwin' else '-unknown-linux-gnu')
-
-
-def private_directory(path: Path):
-    if path.is_symlink():
-        raise ReleaseError(f'Preview state must not be a symlink: {path}')
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.stat().st_uid != os.getuid():
-        raise ReleaseError('Preview state is owned by another user.')
-    path.chmod(0o700)
-
-
 def execute(current: dict):
-    identity = identity_from_run(current)
-    record = read_record(identity)
-    if not record or record['state'] != 'complete' or record.get('cleanup'):
-        raise ReleaseError('Only a complete, unexpired preview can be run.')
-    target = host_target()
-    base = Path.home() / '.cache/fluxcope/previews'
-    # Check every existing component before creating private descendants.
-    for directory in (Path.home() / '.cache', base.parent, base, base / str(identity['id']), base / str(identity['id']) / target):
-        if directory.is_symlink():
-            raise ReleaseError('Preview cache path traverses a symlink.')
-    root = base / str(identity['id']) / target
-    for directory in (base.parent, base, root.parent, root, root / 'bin', root / 'home', root / 'home/.fluxcope'):
-        private_directory(directory)
-    with tempfile.TemporaryDirectory(prefix='download-', dir=root) as temporary:
-        release, manifest = download_public(identity, Path(temporary), metadata_only=True)
-        if target not in identity['targets']:
-            raise ReleaseError('This preview does not include your host; request its native profile or all.')
-        # The signed fresh verification report also binds the executable digest.
-        report_name = f'{target}-smoke.json'
-        asset = next(a for a in release['assets'] if a['name'] == report_name)
-        download_asset(identity, asset, Path(temporary))
-        if digest(Path(temporary) / report_name) != manifest['files'][report_name]:
-            raise ReleaseError('Signed smoke evidence mismatch.')
-        binary_digest = json.loads((Path(temporary) / report_name).read_text())['binary_sha256']
-        cached = root / 'bin/fluxcope'
-        if cached.is_symlink() or not cached.is_file() or digest(cached) != binary_digest:
-            archive_name = f'fluxcope-{target}.tar.xz'
-            archive_asset = next(a for a in release['assets'] if a['name'] == archive_name)
-            download_asset(identity, archive_asset, Path(temporary))
-            archive = Path(temporary) / archive_name
-            provenance(archive, identity, bundle=Path(temporary) / BUNDLE)
-            extracted = Path(temporary) / 'fluxcope'
-            extract_binary(archive, extracted)
-            if digest(extracted) != binary_digest:
-                raise ReleaseError('Extracted executable differs from verified preview evidence.')
-            os.replace(extracted, cached)
-        cached.chmod(0o700)
-    config = root / 'home/.fluxcope/config.yml'
-    if config.is_symlink():
-        raise ReleaseError('Preview config must not be a symlink.')
-    if not config.exists():
-        with socket.socket() as listener:
-            listener.bind(('127.0.0.1', 0))
-            port = listener.getsockname()[1]
-        with config.open('x') as stream:
-            stream.write(f'server:\n  port: {port}\n')
-        config.chmod(0o600)
-        print(f'Preview proxy port: {port}')
-    else:
-        print(f'Reusing preview port/settings from {config}')
-    print(f"Running preview {identity['id']} at {identity['source']}\nState: {root / 'home'}")
-    home = root / 'home'
-    environment = {**os.environ, 'HOME': str(home), 'XDG_CONFIG_HOME': str(home / '.config'),
-                   'XDG_DATA_HOME': str(home / '.local/share'), 'XDG_CACHE_HOME': str(home / '.cache')}
-    for key in ('GH_TOKEN', 'GITHUB_TOKEN', 'GIT_TOKEN'):
-        environment.pop(key, None)
-    result = subprocess.run([str(root / 'bin/fluxcope')], cwd=home, env=environment)
+    from preview_client.lifecycle import install, installed, launch
+    from preview_client.remote import Downloads
+    from preview_client.state import State, checked
+    state = State(current['id'])
+    downloads = Downloads('gh')
+    with state.lock():
+        directory = installed(state)
+        if directory is None:
+            if 'display_title' not in current:
+                current = trusted_run(state.id)
+            record = read_record(identity_from_run(current))
+            if not record or record['state'] != 'complete' or record.get('cleanup'):
+                raise ReleaseError('Only a complete, unexpired preview can be installed.')
+            directory = install(state, downloads)
+        if not (directory / 'preview-client').exists():
+            launch(state, downloads)  # Existing archive-only previews use the same verification/state code.
+            return
+    checked(state.launcher)
+    result = subprocess.run([str(state.launcher)])
     if result.returncode:
-        raise ReleaseError('Preview exited unsuccessfully. Check its displayed error; an occupied port can be changed in its isolated config.')
+        raise ReleaseError('Preview launcher exited unsuccessfully; see its error above.')
 
 
 def main():
@@ -272,6 +214,8 @@ def main():
     verify_local_repository()
     if args.command == 'publish':
         publish(args.profile, args.new)
+    elif args.command == 'run' and args.id:
+        execute({'id': preview_id(args.id)})
     else:
         current = select_run(args.id, runnable=args.command == 'run')
         {'status': lambda r: status(r['id']), 'retry': retry, 'run': execute}[args.command](current)

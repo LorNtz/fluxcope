@@ -205,12 +205,53 @@ jobs:
           path: ${{ runner.temp }}/evidence/*
           if-no-files-found: error
           retention-days: 7
-  publish:
-    name: Preview publish
-    needs: [gate, quality, verify]
+  client:
+    name: Preview client (${{ matrix.target }})
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.gate.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    cache-mode: read
+    env:
+      TARGET: ${{ matrix.target }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Package native macOS client from controller code
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/client-venv"
+          "$RUNNER_TEMP/client-venv/bin/pip" install --require-hashes -r scripts/preview-client-requirements.txt
+          "$RUNNER_TEMP/client-venv/bin/python" scripts/preview_client_build.py --target "$TARGET" --directory "$RUNNER_TEMP/client"
+      - name: Package native Linux client in glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/client"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/client,dst=$RUNNER_TEMP/client" \
+            --env "CONTROLLER=$PWD" --env CLIENT_PHASE=build --env "TARGET=$TARGET" \
+            --env "OUTPUT=$RUNNER_TEMP/client" "$CONTAINER" bash "$PWD/scripts/preview_client_linux.sh"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-client-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client/*
+          if-no-files-found: error
+          retention-days: 7
+  attest:
+    name: Preview attest
+    needs: [gate, quality, verify, client]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: preview-release
     concurrency:
       group: preview-${{ github.run_id }}
       cancel-in-progress: false
@@ -245,8 +286,82 @@ jobs:
         env:
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: python3 scripts/preview_publish.py finalize --directory "$RUNNER_TEMP/public" --bundle "$BUNDLE_PATH"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-stage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public/*
+          if-no-files-found: error
+          retention-days: 7
+  install:
+    name: Preview install (${{ matrix.target }})
+    needs: [gate, attest]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.gate.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    cache-mode: read
+    env:
+      TARGET: ${{ matrix.target }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_publish.py download-stage --directory "$RUNNER_TEMP/stage"
+      - name: Fresh native macOS installation lifecycle
+        if: runner.os == 'macOS'
+        run: python3 scripts/preview_install_check.py --target "$TARGET" --directory "$RUNNER_TEMP/stage" --report "$RUNNER_TEMP/stage/$TARGET-install.json"
+      - name: Fresh native Linux installation lifecycle in glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/stage,dst=$RUNNER_TEMP/stage" \
+            --env "CONTROLLER=$PWD" --env CLIENT_PHASE=verify --env "TARGET=$TARGET" \
+            --env "OUTPUT=$RUNNER_TEMP/stage" "$CONTAINER" bash "$PWD/scripts/preview_client_linux.sh"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-install-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage/${{ matrix.target }}-install.json
+          if-no-files-found: error
+          retention-days: 30
+  publish:
+    name: Preview publish
+    needs: [gate, attest, install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: preview-release
+    concurrency:
+      group: preview-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/preview_publish.py prepare-publication --directory "$RUNNER_TEMP/public"
       - id: app
-        if: steps.prepare.outputs.existing != 'true'
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
@@ -254,15 +369,14 @@ jobs:
           owner: LorNtz
           repositories: fluxcope
           permission-contents: write
-      - if: steps.prepare.outputs.existing != 'true'
-        env:
+      - env:
           GH_TOKEN: ${{ github.token }}
           GIT_TOKEN: ${{ steps.app.outputs.token }}
           IMMUTABLE_RELEASES_ENABLED: ${{ vars.IMMUTABLE_RELEASES_ENABLED }}
         run: python3 scripts/preview_publish.py publish --directory "$RUNNER_TEMP/public"
   result:
     name: Preview result
-    needs: [gate, quality, build, verify, publish]
+    needs: [gate, quality, build, verify, client, attest, install, publish]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     permissions:

@@ -1,0 +1,71 @@
+name: Preview client packaging
+on:
+  pull_request:
+    paths: ['scripts/preview_client/**', 'scripts/preview_client*.py', 'scripts/preview-client-*.txt', 'scripts/preview-installer.sh.in', 'scripts/preview_install_check.py', '.github/preview-client-pins.json', '.github/workflows/preview*.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+cache-mode: none
+defaults:
+  run:
+    shell: bash
+env:
+  MACOSX_DEPLOYMENT_TARGET: '15.0'
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - id: platforms
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          config = json.load(open('.github/release-config.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({'include': config['platforms']}) + '\n')
+          PYCODE
+  client:
+    name: Preview client (${{ matrix.target }})
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    cache-mode: read
+    env:
+      TARGET: ${{ matrix.target }}
+      CONTAINER: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/preview-cache-check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Package native macOS client from controller code
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/client-venv"
+          "$RUNNER_TEMP/client-venv/bin/pip" install --require-hashes -r scripts/preview-client-requirements.txt
+          "$RUNNER_TEMP/client-venv/bin/python" scripts/preview_client_build.py --target "$TARGET" --directory "$RUNNER_TEMP/client"
+      - name: Package native Linux client in glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/client"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/client,dst=$RUNNER_TEMP/client" \
+            --env "CONTROLLER=$PWD" --env CLIENT_PHASE=build --env "TARGET=$TARGET" \
+            --env "OUTPUT=$RUNNER_TEMP/client" "$CONTAINER" bash "$PWD/scripts/preview_client_linux.sh"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-client-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client/*
+          if-no-files-found: error
+          retention-days: 7

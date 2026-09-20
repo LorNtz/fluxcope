@@ -42,43 +42,32 @@ class ClientTests(unittest.TestCase):
                     patch.object(preview, 'release_for', return_value=release):
                 self.assertEqual(preview.reusable(finished), expected)
 
-    def test_verified_cached_binary_is_reused_with_isolated_home_and_port(self):
-        current = current_run()
-        identity = identity_from_run(current)
-        target = identity['targets'][0]
+    def test_run_delegates_to_installed_launcher_without_remote_metadata(self):
+        from preview_client.state import State
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
-            root = home / f'.cache/fluxcope/previews/123/{target}'
-            (root / 'bin').mkdir(parents=True)
-            binary = root / 'bin/fluxcope'
-            binary.write_bytes(b'verified executable fixture')
-            report = json.dumps({'binary_sha256': digest(binary)}).encode()
-            report_name = f'{target}-smoke.json'
-            import hashlib
-            manifest = {'files': {report_name: hashlib.sha256(report).hexdigest()}}
-            def download(identity, asset, directory):
-                self.assertEqual(asset['name'], report_name)
-                (directory / report_name).write_bytes(report)
-            with patch.object(Path, 'home', return_value=home), patch.object(preview, 'host_target', return_value=target), \
-                    patch.object(preview, 'read_record', return_value={'state': 'complete'}), \
-                    patch.object(preview, 'download_public', return_value=({'assets': [{'name': report_name}]}, manifest)), \
-                    patch.object(preview, 'download_asset', side_effect=download), \
-                    patch.object(preview, 'extract_binary') as extract, \
-                    patch.object(preview.socket, 'socket') as socket, \
+            home = Path(temporary).resolve()
+            state = State(123, 'aarch64-apple-darwin', home)
+            generation = state.root / 'installs' / ('a' * 64 + '-12345678')
+            generation.mkdir(parents=True)
+            (generation / 'preview-client').write_text('fixture')
+            (state.root / 'receipt.json').write_text(json.dumps({'generation': generation.name}))
+            state.launcher.parent.mkdir(parents=True)
+            state.launcher.write_text('fixture launcher')
+            with patch('preview_client.state.Path.home', return_value=home), \
+                    patch('preview_client.state.host_target', return_value=state.target), \
+                    patch.object(preview, 'read_record') as remote, \
                     patch.object(preview.subprocess, 'run') as execute:
-                socket.return_value.__enter__.return_value.getsockname.return_value = ('127.0.0.1', 45123)
                 execute.return_value.returncode = 0
-                preview.execute(current)
-                extract.assert_not_called()
-                self.assertEqual(execute.call_args.kwargs['env']['HOME'], str(root / 'home'))
-                self.assertEqual(execute.call_args.kwargs['cwd'], root / 'home')
-                self.assertIn('port:', (root / 'home/.fluxcope/config.yml').read_text())
-                self.assertFalse((home / '.fluxcope').exists())
+                preview.execute(current_run())
+                remote.assert_not_called()
+                self.assertEqual(execute.call_args.args[0], [str(state.launcher)])
 
     def test_launcher_rejects_non_complete_or_expired_result_before_downloading(self):
         for record in (None, {'state': 'failed'}, {'state': 'expired', 'cleanup': 'complete'}):
-            with self.subTest(record=record), patch.object(preview, 'read_record', return_value=record), \
-                    patch.object(preview, 'download_public') as download:
+            with self.subTest(record=record), tempfile.TemporaryDirectory() as temporary, \
+                    patch('preview_client.state.Path.home', return_value=Path(temporary).resolve()), \
+                    patch.object(preview, 'read_record', return_value=record), \
+                    patch('preview_client.lifecycle.install') as download:
                 with self.assertRaises(ReleaseError):
                     preview.execute(current_run())
                 download.assert_not_called()

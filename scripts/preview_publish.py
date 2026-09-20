@@ -11,7 +11,7 @@ import tempfile
 
 from dist_artifacts import digest
 from preview_artifacts import (BUNDLE, MANIFEST, assemble, download_public, release_for,
-                               resolve_preview_tag, validate_public_directory)
+                               resolve_preview_tag, validate_public_directory, download_evidence, public_assets)
 from preview_identity import REPO, ROOT, authorize, snapshot, validate_pr
 from preview_record import read_record
 from release_support import ReleaseError, api, output, repository_path, run
@@ -29,8 +29,7 @@ def prepare(directory: Path):
     identity, current = publication_identity()
     release = release_for(identity)
     if release and not release['draft']:
-        with tempfile.TemporaryDirectory(prefix='fluxcope-preview-public-') as temporary:
-            download_public(identity, Path(temporary))
+        download_public(identity, directory)
         output('existing', 'true')
         return
     validate_pr(api(repository_path(f"pulls/{identity['pr']}")), identity['source'], exact=False)
@@ -66,8 +65,15 @@ def ensure_tag(identity: dict):
         raise ReleaseError('Preview tag publication was not confirmed.')
 
 
-def notes(identity: dict) -> str:
-    return (f"Temporary preview of PR #{identity['pr']} at `{identity['source']}`. No merge or stable release is implied.\n\n"
+def notes(identity: dict, installer: bool = False) -> str:
+    command = (f"Install (no GitHub login, Python or checkout needed):\n\n```sh\n"
+               f"curl --proto '=https' --tlsv1.2 -fsSL https://github.com/{REPO}/releases/download/{identity['tag']}/fluxcope-preview-installer.sh | sh\n"
+               f"```\n\nLaunch: `~/.local/bin/fluxcope-preview-{identity['id']}`. Installation does not start the app or change PATH.\n\n"
+               f"Change port: `~/.local/bin/fluxcope-preview-{identity['id']} --port 9010`.\n\n"
+               f"Remove executable: `~/.local/bin/fluxcope-preview-{identity['id']} --uninstall` (retains settings). "
+               "Add `--purge` to also remove settings, with confirmation.\n\n"
+               "Installed previews run offline after download expiry; new installation or repair needs an unexpired release.\n\n") if installer else ''
+    return (command + f"Temporary preview of PR #{identity['pr']} at `{identity['source']}`. No merge or stable release is implied.\n\n"
             f"Snapshot: `{identity['snapshot']}` · controller: `{identity['controller']}`.\n\n"
             f"Platforms: {', '.join(identity['targets'])}. macOS 15+; Linux glibc 2.28+.\n\n"
             'macOS binaries are not Developer ID signed or notarized. The debugging proxy listens on all IPv4 interfaces.\n\n'
@@ -75,9 +81,33 @@ def notes(identity: dict) -> str:
             f"Run with isolated state: `just preview-run {identity['id']}`. This verifies provenance before execution.\n")
 
 
+def download_stage(directory: Path, *, qualified: bool = False):
+    identity, current = publication_identity()
+    download_evidence(current, 'Preview attest', 'preview-stage', public_assets({**identity, 'format': 2}),
+                      directory, limit=1024 * 1024 * 1024)
+    validate_public_directory(directory, identity)
+    if qualified:
+        verify_install_reports(current, identity, directory)
+
+
+def verify_install_reports(current: dict, identity: dict, directory: Path):
+    for target in identity['targets']:
+        name = f'{target}-install.json'
+        with tempfile.TemporaryDirectory(prefix='preview-install-report-') as temporary:
+            root = Path(temporary)
+            download_evidence(current, f'Preview install ({target})', f'preview-install-{target}', {name}, root)
+            report = json.loads((root / name).read_text())
+        if report != {'schema': 1, 'id': identity['id'], 'controller': identity['controller'],
+                      'target': target, 'manifest_sha256': digest(directory / MANIFEST), 'result': 'passed'}:
+            raise ReleaseError('Installer qualification does not cover these exact signed assets.')
+
+
 def publish(directory: Path):
-    identity, _ = publication_identity()
+    identity, current = publication_identity()
     sums = validate_public_directory(directory, identity)
+    manifest = json.loads((directory / MANIFEST).read_text())
+    if manifest.get('format', 1) == 2:
+        verify_install_reports(current, identity, directory)
     if os.environ.get('IMMUTABLE_RELEASES_ENABLED') != 'true':
         raise ReleaseError('Immutable release setup has not been confirmed.')
     existing = release_for(identity, include_drafts=True, token=os.environ['GIT_TOKEN'])
@@ -93,7 +123,7 @@ def publish(directory: Path):
         existing = api(repository_path('releases'), method='POST', payload={
             'tag_name': identity['tag'], 'target_commitish': identity['snapshot'],
             'name': f"Preview #{identity['pr']} · {identity['source'][:12]} · {identity['profile']}",
-            'draft': True, 'prerelease': True, 'make_latest': 'false', 'body': notes(identity)})
+            'draft': True, 'prerelease': True, 'make_latest': 'false', 'body': notes(identity, manifest.get('format', 1) == 2)})
     if not existing['prerelease'] or existing['tag_name'] != identity['tag']:
         raise ReleaseError('Conflicting preview draft.')
     present = {a['name']: a for a in existing['assets']}
@@ -115,7 +145,7 @@ def publish(directory: Path):
         raise ReleaseError('Draft bytes or tag do not match verified publication evidence.')
     validate_pr(api(repository_path(f"pulls/{identity['pr']}")), identity['source'], exact=False)
     api(repository_path(f"releases/{existing['id']}"), method='PATCH',
-        payload={'draft': False, 'prerelease': True, 'make_latest': 'false', 'body': notes(identity)})
+        payload={'draft': False, 'prerelease': True, 'make_latest': 'false', 'body': notes(identity, manifest.get('format', 1) == 2)})
     with tempfile.TemporaryDirectory(prefix='fluxcope-preview-public-') as temporary:
         release, _ = download_public(identity, Path(temporary))
     print(release['html_url'])
@@ -123,11 +153,11 @@ def publish(directory: Path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'finalize', 'publish'))
+    parser.add_argument('command', choices=('prepare', 'finalize', 'publish', 'download-stage', 'prepare-publication'))
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--bundle', type=Path)
     args = parser.parse_args()
     if args.command == 'finalize':
         finalize(args.directory, args.bundle)
     else:
-        {'prepare': prepare, 'publish': publish}[args.command](args.directory)
+        {'prepare': prepare, 'publish': publish, 'download-stage': download_stage, 'prepare-publication': lambda path: download_stage(path, qualified=True)}[args.command](args.directory)
