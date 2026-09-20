@@ -73,7 +73,8 @@ The launcher and `just preview-run RUN_ID` share
 `~/.cache/fluxcope/previews/RUN_ID/TARGET/`, with a private HOME and separate
 certificates/settings. The first launch selects and prints an available proxy port;
 subsequent launches reuse settings. `--port` changes only that preview's saved port,
-preserving other YAML settings and comments. Installation and launch are locked
+preserving other settings. Its port edit preserves YAML comments, but the app's
+normal settings save can reformat the file and remove comments. Installation and launch are locked
 against concurrent changes. Reinstalling the same ID preserves settings and repairs
 its executable; it never silently selects a newer preview. Stable binaries and
 state remain untouched. This state separation is not an OS sandbox, and previews
