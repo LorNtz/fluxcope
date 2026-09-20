@@ -20,8 +20,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 CONVENTIONAL = re.compile(r"(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([^\r\n()]+\))?!?: \S.+")
 
 
-class ReleaseError(RuntimeError):
-    """An actionable failure; do not interpret it as absent remote state."""
+from preview_client.model import PreviewError as ReleaseError
 
 
 def run(*args: str, cwd: Path = ROOT, capture: bool = True, env: dict | None = None) -> str:

@@ -101,6 +101,12 @@ def report():
         if jobs.get('Preview publish', {}).get('conclusion') == 'success':
             with tempfile.TemporaryDirectory(prefix='fluxcope-preview-result-') as temporary:
                 published, manifest = download_public(identity, Path(temporary), metadata_only=True)
+            if manifest.get('format', 1) == 2:
+                required = ['Preview attest', *(f'Preview client ({t})' for t in identity['targets']),
+                            *(f'Preview install ({t})' for t in identity['targets'])]
+                if any(jobs.get(name, {}).get('conclusion') != 'success' for name in required):
+                    raise ReleaseError('Installer qualification is incomplete; preview cannot be complete.')
+                details['installer'] = True
             state = 'complete'
             details.update(snapshot=manifest['snapshot'], url=published['html_url'], published_at=published['published_at'])
     elif any(job['conclusion'] == 'cancelled' for job in jobs.values()):

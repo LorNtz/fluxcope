@@ -16,32 +16,16 @@ import tomllib
 from release_support import (BASE, CONFIG, REPO, ROOT, SHA, ReleaseError, api,
                              output, repository_path, run, run_jobs)
 
-WORKFLOW = 'preview.yml'
-SIGNER = f'{REPO}/.github/workflows/{WORKFLOW}'
-RETENTION_DAYS = 30
-PROFILES = dict(zip(('macos-arm64', 'macos-intel', 'linux-arm64', 'linux-x64'),
-                    (p['target'] for p in CONFIG['platforms'])))
-TITLE = re.compile(r'Preview #([1-9][0-9]*) ([0-9a-f]{40}) (macos-arm64|macos-intel|linux-arm64|linux-x64|all)')
+from preview_client.model import (WORKFLOW, SIGNER, RETENTION_DAYS, PROFILES, TITLE,
+                                  preview_id, timestamp, identity_from_run)
+
 TAG = re.compile(r'v0\.0\.0-preview\.([1-9][0-9]*)')
-
-
-def preview_id(value: object) -> int:
-    if not re.fullmatch(r'[1-9][0-9]{0,19}', str(value)):
-        raise ReleaseError('Preview ID must be a positive workflow run ID.')
-    return int(value)
 
 
 def platforms(profile: str) -> list[dict]:
     if profile not in (*PROFILES, 'all'):
         raise ReleaseError(f'Unknown preview profile: {profile}')
     return [dict(p) for p in CONFIG['platforms'] if profile == 'all' or p['target'] == PROFILES[profile]]
-
-
-def timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    if parsed.tzinfo is None:
-        raise ReleaseError('Preview timestamps must include a timezone.')
-    return parsed.astimezone(timezone.utc)
 
 
 def validate_pr(pr: dict, source: str, *, exact: bool, opened: bool = True):
@@ -75,20 +59,6 @@ def trusted_run(run_id: int) -> dict:
         raise ReleaseError('Run is not an authorized master preview workflow.')
     verify_controller(current['head_sha'])
     return current
-
-
-def identity_from_run(current: dict) -> dict:
-    match = TITLE.fullmatch(current['display_title'])
-    if not match:
-        raise ReleaseError('Malformed preview run identity.')
-    identifier = preview_id(current['id'])
-    return {'schema': 1, 'channel': 'preview', 'id': identifier,
-            'version': f'0.0.0-preview.{identifier}', 'tag': f'v0.0.0-preview.{identifier}',
-            'repository': REPO, 'pr': int(match[1]), 'source': match[2],
-            'controller': current['head_sha'], 'profile': match[3],
-            'targets': [p['target'] for p in platforms(match[3])],
-            'actor': current['actor']['login'], 'created_at': current['created_at'],
-            'retention_days': RETENTION_DAYS}
 
 
 def authorize(*, exact: bool = False, opened: bool = True) -> tuple[dict, dict]:

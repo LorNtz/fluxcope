@@ -38,6 +38,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: python3 scripts/metadata_check.py
+      - run: python3 -m pip install --require-hashes -r scripts/preview-client-runtime.txt
       - run: PYTHONPATH=scripts python3 -m unittest discover -s scripts/tests -v
       - run: python3 scripts/install_tool.py cargo-deny --directory "$RUNNER_TEMP/fluxcope-tools"
       - run: cargo-deny --locked check advisories licenses sources
