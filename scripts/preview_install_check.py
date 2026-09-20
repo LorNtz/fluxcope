@@ -213,16 +213,22 @@ def check(directory, target, report):
             assert config.read_bytes() == original, 'reinstall changed preview settings'
             server.expired = True
             command(installer, environment, error='expired')
-            # Explicit port change preserves unrelated YAML values and comments.
-            config.write_text(config.read_text() + '\n# retained comment\npreview_fixture: "yes"\n')
+            # The app rewrites YAML on startup; check settings, not comment/quote
+            # formatting. The port editor's round-trip formatting has a unit test.
+            config.write_text(f'# preview settings\nserver:\n  port: {port}\n'
+                              'recording:\n  start_record_on_launch: false\n'
+                              'ui:\n  request_list:\n    auto_expand: true\n')
             new_port = free_port()
+            while new_port == port:
+                new_port = free_port()
             wrapper = temporary / 'launch'
             wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(str(state.launcher))} --port {new_port}\n')
             wrapper.chmod(0o755)
             before = len(server.requests)
             with patch.dict(os.environ, offline, clear=True), Terminal(wrapper, home) as terminal:
                 terminal.wait(lambda: ready(new_port), 'offline launch after expiry', timeout=60)
-                assert '# retained comment' in config.read_text() and 'preview_fixture: "yes"' in config.read_text()
+                saved = config.read_text()
+                assert 'start_record_on_launch: false' in saved and 'auto_expand: true' in saved, saved
                 terminal.key(b'q')
                 terminal.finish()
             assert len(server.requests) == before, 'offline launch made network requests'

@@ -117,3 +117,19 @@ Date: 2026/09/20 13:14
 - Performance Review: no actionable findings; no extra API calls and constant extra work per job.
 
 **Result**: Ready for CI and merge.
+
+### Correct native installer settings-preservation assertion
+Date: 2026/09/20 14:22
+
+- Signed native installer qualification reached offline relaunch on all targets, then wrongly required YAML comments/quotes to survive the application’s existing startup normalization.
+- Verify two real unrelated setting values across the explicit port change; retain the unit test for the port editor’s comment preservation. Clarified the application serialization boundary in releasing.md.
+
+**Result**: Harness correction prepared for replay against the exact signed artifacts before CI.
+
+### Validate exact signed installer lifecycle
+Date: 2026/09/20 14:27
+
+- Replayed the real signed format-2 payload from run 35492919316 locally on Apple Silicon with the unmodified shell/frozen client and full signature/checksum checks. Complete lifecycle passed, including corrupted downloads/executable rejection, offline expiry launch, settings-preserving port override, uninstall and TTY-confirmed purge.
+- All 99 Python tests passed. Design and performance reviews found no blockers; the fixture uses real non-default settings.
+
+**Result**: Harness correction verified against production artifacts and ready for CI.
