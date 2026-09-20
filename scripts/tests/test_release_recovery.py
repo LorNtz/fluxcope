@@ -167,6 +167,41 @@ class ResultAndInstallerTests(unittest.TestCase):
         self.assertEqual(jobs['Tests (Linux)']['conclusion'], 'success')
         support.run_jobs.cache_clear()
 
+    def test_carried_jobs_keep_original_artifacts_despite_new_ids_and_attempts(self):
+        original = {'id': 101, 'name': 'Package', 'head_sha': 'a' * 40,
+                    'run_attempt': 1, 'status': 'completed', 'conclusion': 'success',
+                    'started_at': '2026-09-20T04:48:01Z', 'completed_at': '2026-09-20T05:00:11Z'}
+        records = {number: [{**original, 'id': 100 + number, 'run_attempt': number}]
+                   for number in (1, 2, 3)}
+        support.run_jobs.cache_clear()
+        self.addCleanup(support.run_jobs.cache_clear)
+        def api(path):
+            number = int(path.split('/attempts/')[1].split('/')[0])
+            return {'jobs': records[number]}
+        with patch.object(support, 'api', side_effect=api):
+            job = support.run_jobs(123, 3)['Package']
+        self.assertEqual(job['id'], 103)
+        self.assertEqual(job['evidence_attempt'], 1)
+
+    def test_actual_rerun_never_falls_back_to_prior_successful_evidence(self):
+        original = {'name': 'Package', 'head_sha': 'a' * 40,
+                    'status': 'completed', 'conclusion': 'success',
+                    'started_at': '2026-09-20T04:48:01Z', 'completed_at': '2026-09-20T05:00:11Z'}
+        for conclusion in ('success', 'failure'):
+            with self.subTest(conclusion=conclusion):
+                newer = {**original, 'conclusion': conclusion,
+                         'started_at': '2026-09-20T05:08:01Z', 'completed_at': '2026-09-20T05:10:11Z'}
+                records = {3: [newer], 2: [newer], 1: [original]}
+                support.run_jobs.cache_clear()
+                self.addCleanup(support.run_jobs.cache_clear)
+                def api(path):
+                    number = int(path.split('/attempts/')[1].split('/')[0])
+                    return {'jobs': records[number]}
+                with patch.object(support, 'api', side_effect=api):
+                    job = support.run_jobs(123, 3)['Package']
+                self.assertEqual(job['evidence_attempt'], 2)
+                self.assertEqual(job['conclusion'], conclusion)
+
     def test_normal_source_ci_wait_is_a_running_release(self):
         identity = {'source': 'a' * 40, 'version': '0.1.0', 'channel': 'stable'}
         active = {'id': 123, 'run_attempt': 1, 'file': 'release-plz.yml', 'html_url': 'run', 'status': 'in_progress', 'conclusion': None}
