@@ -28,6 +28,14 @@
     "x86_64-unknown-linux-gnu": {
       "asset": "cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
       "sha256": "64427febea27864d136db46c8efe968eb6fa5ca2813ce1dca4bb95aec31cb2e4"
+    },
+    "aarch64-apple-darwin": {
+      "asset": "cpython-3.11.16+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "768f05cf200273bbdda9a5955a5a6892a4b22f2a0b1e4b0a9160f5c7fce86816"
+    },
+    "x86_64-apple-darwin": {
+      "asset": "cpython-3.11.16+20260901-x86_64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "908b381433f78b832c8d64960ced0f85871893cc8779f413f963e0c9e293c258"
     }
   }
 }

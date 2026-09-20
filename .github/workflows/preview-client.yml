@@ -47,11 +47,12 @@ jobs:
       - uses: ./.github/actions/preview-cache-check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: '3.11.16'
+          python-version: '3.14'
       - name: Package native macOS client from controller code
         if: runner.os == 'macOS'
         run: |
-          python3 -m venv "$RUNNER_TEMP/client-venv"
+          python3 scripts/preview_client_build.py python --target "$TARGET" --directory "$RUNNER_TEMP/client-python"
+          "$RUNNER_TEMP/client-python/python/bin/python3" -m venv "$RUNNER_TEMP/client-venv"
           "$RUNNER_TEMP/client-venv/bin/pip" install --require-hashes -r scripts/preview-client-requirements.txt
           "$RUNNER_TEMP/client-venv/bin/python" scripts/preview_client_build.py --target "$TARGET" --directory "$RUNNER_TEMP/client"
       - name: Package native Linux client in glibc 2.28

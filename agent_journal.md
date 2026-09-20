@@ -94,3 +94,9 @@ Date: 2026/09/20 12:33
 - Pinned the macOS packaging interpreter to CPython 3.11.16, matching the explicit Linux runtime version.
 - Added format-2 installer-tampering and mismatched qualification-digest/controller regression checks; removed a duplicate manifest read introduced during extraction.
 - Both reviewers approved the real-terminal confirmation correction.
+
+### Preview installer: consistent pinned runtime on all platforms
+Date: 2026/09/20 12:38
+
+- The final exact-version check exposed that setup-python’s macOS 3.11 selector supplies 3.11.9 and does not offer 3.11.16.
+- Extended the existing pinned standalone-runtime mechanism to macOS ARM64/Intel, so all four frozen clients use checksum-pinned CPython 3.11.16. The workflow interpreter remains separate from the shipped runtime.

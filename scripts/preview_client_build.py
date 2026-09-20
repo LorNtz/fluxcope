@@ -18,7 +18,7 @@ from release_support import ROOT, run
 
 
 def prepare_python(target, directory):
-    """manylinux's own Python is static; fetch a pinned shared-library runtime."""
+    """Fetch a checksum-pinned native interpreter with the shared library PyInstaller needs."""
     if target != host_target():
         raise PreviewError('Packaging Python must match the native platform.')
     pins = json.loads((ROOT / '.github/preview-client-pins.json').read_text())
