@@ -2,6 +2,6 @@
   "schema": 1,
   "channel": "stable",
   "mode": "automatic",
-  "version": "0.1.0",
-  "previous_stable": null
+  "version": "0.1.1",
+  "previous_stable": "0.1.0"
 }
