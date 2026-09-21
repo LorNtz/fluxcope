@@ -609,3 +609,12 @@ Date: 2026/09/21 17:33
 - Clarified repository shorthand and GitHub `/tree/<ref>/...` folder URLs; retained the published 1.0.0 tag/path in historical release notes.
 
 **Result**: Prepared the rename for validation and a separate immutable skill release; runtime workflows remain unchanged.
+
+### Correct repository attribution and replace withdrawn skill releases
+Date: 2026/09/21 20:20
+
+- Prepared replacement historical commits with identical trees and the repository-local Git identity.
+- Added identity verification to agent and skill release instructions.
+- Prepared skill 1.0.2 and updated installation links and withdrawal records for 1.0.0 and 1.0.1.
+
+**Result**: History correction and replacement release prepared for validation and publication.

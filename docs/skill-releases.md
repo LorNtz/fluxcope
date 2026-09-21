@@ -2,6 +2,8 @@
 
 The skill is distributed from GitHub through the skills CLI. Its source is `skills/fluxcope-skill/`; it is installed independently of the application and MCP server registration. The [skills.sh directory](https://skills.sh/docs/faq) discovers public repository skills through installation telemetry; there is no separate package upload.
 
+Before creating commits, squash merges, or tags, follow the repository-local Git identity rule in [AGENTS.md](../AGENTS.md#rules-to-follow-when-editing). Verify the resulting commit author and tagger before publication.
+
 1. Update `metadata.version` in `SKILL.md`, the installation tag in README, and `skills/CHANGELOG.md`. Record the application interface targeted by the release in the setup guide. Keep all installed references and license texts inside the skill directory.
 2. Validate frontmatter and relative references. Test installation from the candidate checkout with a pinned CLI version in a temporary project, selecting the supported agents. Set `DISABLE_TELEMETRY=1` for test installations. Confirm the installed files match the candidate, including both license texts. Exercise the documented workflows against the published application build; record the tested version/platform and any untested integration layers.
 3. Open a skill-only PR and wait for every required check on its exact head. Merge with an expected-head check. Do not invoke the application release flow for a skill-only release.

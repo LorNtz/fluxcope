@@ -3,7 +3,7 @@ name: fluxcope-skill
 description: Use Fluxcope to debug captured HTTP or HTTPS traffic, inspect request and response bodies, control recording, manage mapping presets and rules, or set up its MCP connection, including preview builds. Applies to using the proxy, not implementing Fluxcope itself.
 license: MIT OR Apache-2.0
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 ---
 
 # Fluxcope skill

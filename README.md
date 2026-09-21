@@ -56,11 +56,11 @@ The tool set supports bounded capture/body inspection, recording control, and re
 
 MCP schemas use `fluxcope_version`, resource URIs use `fluxcope://`, and resource pagination metadata lives under `_meta.fluxcope`. Development-era Wirelens names and state directories are not compatibility aliases; rebuild the client and restart the proxy together.
 
-The portable [Fluxcope MCP agent skill](skills/fluxcope-skill/SKILL.md) guides agents through setup, capture inspection, and mapping changes. Skill 1.0.1 targets the MCP interface in Fluxcope 0.2.0. Install the pinned skill release for Codex and Claude Code:
+The portable [Fluxcope MCP agent skill](skills/fluxcope-skill/SKILL.md) guides agents through setup, capture inspection, and mapping changes. Skill 1.0.2 targets the MCP interface in Fluxcope 0.2.0. Install the pinned skill release for Codex and Claude Code:
 
 ```sh
 npx skills@1.7.0 add \
-  https://github.com/LorNtz/fluxcope/tree/skill-v1.0.1/skills/fluxcope-skill \
+  https://github.com/LorNtz/fluxcope/tree/skill-v1.0.2/skills/fluxcope-skill \
   --agent codex claude-code --global
 ```
 
@@ -68,7 +68,7 @@ Omit `--global` for project scope, or choose only the agent you use. Skill insta
 
 To follow the default branch instead, use `npx skills@1.7.0 add LorNtz/fluxcope --skill fluxcope-skill --agent codex claude-code --global`. A direct GitHub folder URL must include `/tree/<branch-or-tag>/skills/fluxcope-skill`; the CLI does not use `/skills/fluxcope-skill` alone as a folder selector.
 
-Version 1.0.1 renames the installed skill from `fluxcope-mcp` to `fluxcope-skill`. After installing the new name, remove the old entry with `npx skills@1.7.0 remove fluxcope-mcp --agent codex claude-code --global`, using the same agents and scope as the old installation. Version 1.0.0 remains available at its original tag and path.
+Version 1.0.1 renames the installed skill from `fluxcope-mcp` to `fluxcope-skill`. After installing the new name, remove the old entry with `npx skills@1.7.0 remove fluxcope-mcp --agent codex claude-code --global`, using the same agents and scope as the old installation. Releases 1.0.0 and 1.0.1 were withdrawn to correct repository attribution; their tag names are retired. Use 1.0.2 or later.
 
 ## HTTPS and the local CA
 

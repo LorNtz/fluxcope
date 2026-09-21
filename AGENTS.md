@@ -44,6 +44,8 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 
 # Rules to Follow When Editing
 
+- Before creating commits or annotated tags, read `user.name` and `user.email` with `git config --local --get` in this repository and use those values for author, committer, and tagger identity. Copy both values into the local config of any isolated clone before committing. Verify `git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` match them; resolve environment overrides before proceeding. For GitHub squash merges, pass the repository-local email with `gh pr merge --author-email`.
+
 - when drafting plans or proposals, grill me if there's anything unclear or you need my decision.
 - When making changes, do your best to not touch and improve adjacent but irrelevant code, comments, or formatting. Don't refactor what isn't broken. I don't want my feature commits include irrelevant code changes.
 - When fixing issues, unless I ask you to do explicitly, do not add speculative features to handle them.
