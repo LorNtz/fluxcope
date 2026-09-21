@@ -600,3 +600,12 @@ Date: 2026/09/21 17:17
 - Validated frontmatter and an isolated skills CLI 1.7.0 installation: all six files match and Codex/Claude Code discovery paths resolve correctly. Earlier independent dry runs covered mutation timeouts, preview limitations, and capture revision changes.
 
 **Result**: Prepared an isolated skill-only PR; release publication and public-tag verification follow its required checks.
+
+### Task: Rename the published agent skill to fluxcope-skill
+Date: 2026/09/21 17:33
+
+- Renamed the portable skill directory and frontmatter identity to `fluxcope-skill`, with version 1.0.1.
+- Updated installation/release references and added migration instructions for old `fluxcope-mcp` installations.
+- Clarified repository shorthand and GitHub `/tree/<ref>/...` folder URLs; retained the published 1.0.0 tag/path in historical release notes.
+
+**Result**: Prepared the rename for validation and a separate immutable skill release; runtime workflows remain unchanged.

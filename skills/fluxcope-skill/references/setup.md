@@ -2,7 +2,7 @@
 
 ## Establish what is installed
 
-Skill 1.0.0 targets the MCP interface shipped in Fluxcope 0.2.0. Other builds must expose the capabilities needed for the requested workflow.
+This skill targets the MCP interface shipped in Fluxcope 0.2.0. Other builds must expose the capabilities needed for the requested workflow.
 
 Check the selected executable's path, `--version`, `--help`, and `mcp --help`. Use those capabilities rather than assuming a published release supports MCP. Keep the proxy and broker on the same build where possible; inspect reported `fluxcope_version` and `rpc_version` when a connection fails after an upgrade.
 
