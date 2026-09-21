@@ -30,7 +30,7 @@ Point your client's HTTP/HTTPS proxy at this machine and the port shown in the s
 
 Settings live in `~/.fluxcope/config.yml`. Fluxcope does not read or migrate state from earlier development builds under another application name. Proxy settings include optional named presets, map-remote, map-local and recording URL filters; edit them through the settings UI.
 
-### MCP control plane (source builds)
+### MCP control plane
 
 MCP is disabled by default and currently requires Unix. Start a proxy with MCP enabled, then let your MCP client launch `fluxcope mcp` as its stdio server:
 
@@ -55,6 +55,16 @@ fluxcope mcp read '<returned fluxcope:// resource URI>'
 The tool set supports bounded capture/body inspection, recording control, and revision-safe mapping changes. Scope settings reads by preset/table, preview a typed mutation, and commit using the evaluated revision. Preview performs neither file reads nor network requests; conflicting revisions and unfinished TUI drafts reject writes. The client manages initialization, pipes, deadlines, and output normalization without automatically retrying mutations. For a five-minute capture wait, use `--timeout-secs 360`.
 
 MCP schemas use `fluxcope_version`, resource URIs use `fluxcope://`, and resource pagination metadata lives under `_meta.fluxcope`. Development-era Wirelens names and state directories are not compatibility aliases; rebuild the client and restart the proxy together.
+
+The portable [Fluxcope MCP agent skill](skills/fluxcope-mcp/SKILL.md) guides agents through setup, capture inspection, and mapping changes. Skill 1.0.0 targets the MCP interface in Fluxcope 0.2.0. Install the pinned skill release for Codex and Claude Code:
+
+```sh
+npx skills@1.7.0 add \
+  https://github.com/LorNtz/fluxcope/tree/skill-v1.0.0/skills/fluxcope-mcp \
+  --agent codex claude-code --global
+```
+
+Omit `--global` for project scope, or choose only the agent you use. Skill installation is separate from the application and MCP client registration; the [setup guide](skills/fluxcope-mcp/references/setup.md) covers that separation and preview-build limitations. Pinned installs stay on their chosen tag; install a newer tag explicitly to upgrade. See the [skill changelog](skills/CHANGELOG.md) and [skill release procedure](docs/skill-releases.md).
 
 ## HTTPS and the local CA
 
