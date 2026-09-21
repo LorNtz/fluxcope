@@ -2,6 +2,12 @@
 
 Skill versions are independent of application versions. Each entry corresponds to an immutable `skill-vVERSION` Git tag and the skill's `metadata.version`.
 
+## 1.0.1 — 2026-09-21
+
+- Renamed the skill identity and directory from `fluxcope-mcp` to `fluxcope-skill`; MCP workflows and the Fluxcope 0.2.0 interface baseline are unchanged.
+- Added repository shorthand, valid GitHub folder URL guidance, and migration instructions. Install the new name, then remove the old entry in the same scope; the installer does not rename existing installations.
+- Installation uses `skills/fluxcope-skill` at `skill-v1.0.1`. The original `skill-v1.0.0` tag and `skills/fluxcope-mcp` path are preserved.
+
 ## 1.0.0 — 2026-09-21
 
 - Initial portable skill for Fluxcope's MCP interface, with native tools and managed CLI fallback.
