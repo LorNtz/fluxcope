@@ -1,12 +1,12 @@
 ---
-name: fluxcope-mcp
+name: fluxcope-skill
 description: Use Fluxcope to debug captured HTTP or HTTPS traffic, inspect request and response bodies, control recording, manage mapping presets and rules, or set up its MCP connection, including preview builds. Applies to using the proxy, not implementing Fluxcope itself.
 license: MIT OR Apache-2.0
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
-# Fluxcope MCP
+# Fluxcope skill
 
 The proxy and stdio MCP broker run separately; installing this skill installs neither. MCP currently requires Unix.
 
