@@ -591,3 +591,12 @@ Date: 2026/09/20 15:03
 - cargo fmt --check, cargo clippy --locked --all-targets -- -D warnings and git diff --check passed.
 
 **Result**: feature branch test fixture correction is ready for native preview CI.
+
+### Task: Prepare the standalone Fluxcope MCP skill 1.0.0 release
+Date: 2026/09/21 17:17
+
+- Added the portable versioned skill, setup/capture/mapping references, and bundled MIT/Apache license texts.
+- Added tag-pinned installation instructions, a skill changelog, and the independent skill release procedure.
+- Validated frontmatter and an isolated skills CLI 1.7.0 installation: all six files match and Codex/Claude Code discovery paths resolve correctly. Earlier independent dry runs covered mutation timeouts, preview limitations, and capture revision changes.
+
+**Result**: Prepared an isolated skill-only PR; release publication and public-tag verification follow its required checks.
