@@ -15,9 +15,9 @@ autobenches = false
 
 [dependencies]
 # TUI
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
-tui-tree-widget = "0.23" # Essential for the request list panel
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+tui-tree-widget = "0.24" # Essential for the request list panel
 
 # Async & Runtime
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -40,17 +40,17 @@ json-event-parser = "0.2.3"
 serde_yaml = "0.9"
 http = "1"
 url = "2.5"
-brotli = "8"
+brotli = "9"
 flate2 = "1"
-zstd = "0.13"
+zstd = "0.14"
 
 # Utilities
 clap = { version = "4.6", features = ["derive"] }
 fs2 = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-getrandom = "0.3"
-sha2 = "0.10"
+getrandom = "0.4"
+sha2 = "0.11"
 parking_lot = "0.12" # Faster Mutex/RwLock
 anyhow = "1"
 log = "0.4"
@@ -58,12 +58,12 @@ qrcode = { version = "0.14", default-features = false }
 unicode-casefold = "0.2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
-edtui = { version = "=0.9.9", default-features = false, features = ["arboard", "mouse-support"] }
-tui-scrollview = "=0.5.1"
+edtui = { version = "=0.11.7", default-features = false, features = ["arboard", "mouse-support"] }
+tui-scrollview = "=0.6.7"
 tui-textarea = { version = "0.7.0", default-features = false, features = ["ratatui"] }
 globset = "0.4"
 tempfile = "3"
-rmcp = { version = "=3.1.4", default-features = false, features = ["base64", "macros", "server", "client", "transport-io"] }
+rmcp = { version = "=3.4.0", default-features = false, features = ["base64", "macros", "server", "client", "transport-io"] }
 schemars = "1.1"
 
 [features]
@@ -73,8 +73,8 @@ benchmark = []
 rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
-rmcp = { version = "=3.1.4", default-features = false, features = ["transport-child-process"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
+rmcp = { version = "=3.4.0", default-features = false, features = ["transport-child-process"] }
 portable-pty = "0.9"
 
 [[bench]]
