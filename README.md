@@ -2,7 +2,7 @@
 
 A terminal HTTP and HTTPS debugging proxy with request recording, searchable request trees, body inspection, and local/remote response mapping.
 
-The published v0.1.0 release contains the mainline TUI and proxy. Source builds on this branch also include the optional multi-instance MCP control plane described below.
+Fluxcope includes an optional multi-instance MCP control plane for coding agents; see [MCP setup and capabilities](#mcp-control-plane).
 
 ## Installation
 
@@ -30,45 +30,111 @@ Point your client's HTTP/HTTPS proxy at this machine and the port shown in the s
 
 Settings live in `~/.fluxcope/config.yml`. Fluxcope does not read or migrate state from earlier development builds under another application name. Proxy settings include optional named presets, map-remote, map-local and recording URL filters; edit them through the settings UI.
 
-### MCP control plane
+## MCP control plane
 
-MCP is disabled by default and currently requires Unix. Start a proxy with MCP enabled, then let your MCP client launch `fluxcope mcp` as its stdio server:
+Fluxcope exposes its live proxy state through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/docs/learn/architecture), so coding agents can investigate captured traffic and change recording or mappings. MCP is available in Fluxcope 0.2.0, is disabled by default, and currently requires Unix.
+
+### Architecture
+
+![Fluxcope MCP architecture: an agent host or CLI client connects over stdio to a broker that discovers and controls independent proxy instances over Unix sockets; application traffic flows through the selected proxy to upstream servers.](docs/assets/mcp-architecture.png)
+
+[Editable Excalidraw source](docs/assets/mcp-architecture.excalidraw)
+
+One executable provides three process modes:
+
+- **Proxy and TUI — `fluxcope --mcp`:** owns captured traffic, recording state, and mapping settings. Each running proxy exposes a private Unix control socket and publishes a descriptor under `~/.fluxcope/run/instances`.
+- **MCP broker — `fluxcope mcp`:** the agent host launches this process over stdio. It discovers proxies owned by the same OS user and routes calls to the selected instance. It does not start or own the proxy processes.
+- **Managed CLI client — `fluxcope mcp tools|call|read`:** launches a broker child from the same executable, performs one command, and shuts the child down. This gives agents that use a shell access to the same tools and resources.
+
+A broker can reach several proxies, each with its own captures and settings. Retain both `proxy_endpoint` and `run_id` from `list_instances`; restarting a proxy creates a new run even if its port is unchanged. The separately installed [agent skill](#agent-skill) supplies workflow instructions to the agent.
+
+### Connect through stdio
+
+Start a proxy in a terminal and keep it running:
 
 ```sh
 fluxcope --mcp
-# Or use an isolated loopback proxy with ephemeral settings:
+# Or start a separate loopback proxy with ephemeral settings:
 fluxcope --host 127.0.0.1 --port 8899 --mcp
 ```
 
-The broker discovers same-user instances under `~/.fluxcope/run/instances`; it does not start proxies. Pin both the returned endpoint and run ID when inspecting or changing an instance. Any process running as the same OS user can access MCP-enabled instances, including captured credentials and mapping controls.
+Register a local MCP server in your agent host using:
 
-When native MCP tools are unavailable, use the managed CLI client:
+| Setting | Value |
+| --- | --- |
+| Transport | `stdio` |
+| Command | `/absolute/path/to/fluxcope` |
+| Arguments | `["mcp"]` |
+
+The host launches the broker and exchanges MCP messages over its stdin/stdout. The proxy port carries application HTTP/HTTPS traffic; it is not an HTTP MCP endpoint. Run the proxy and broker as the same OS user with the same `HOME`, then call `list_instances` to verify discovery. The [setup guide](skills/fluxcope-skill/references/setup.md) covers client-specific registration and preview builds.
+
+### Interface
+
+The broker exposes three MCP interfaces:
+
+| Interface | Discovery and calls | What it provides |
+| --- | --- | --- |
+| Tools | `tools/list`, `tools/call` | Operations with JSON input schemas for instance discovery, capture inspection, recording, and mappings. |
+| Resources | `resources/templates/list`, `resources/read` | `fluxcope://` links tied to a capture revision, for raw or decoded body pages and extracted JSON/form values. Follow links returned by capture and body tools; `resources/list` does not enumerate captures. |
+| Prompts | `prompts/list`, `prompts/get` | `debug_http_flow` for capture investigation and `configure_mapping` for mapping changes. Both provide workflows without prompt arguments. |
+
+When native MCP tools are unavailable, inspect schemas and invoke operations through the managed CLI:
 
 ```sh
 fluxcope mcp tools
-fluxcope mcp tools preview_mapping_mutation
+fluxcope mcp tools search_captures
 fluxcope mcp call list_instances --arguments '{}'
 fluxcope mcp call get_mapping_settings --arguments @arguments.json
 fluxcope mcp read '<returned fluxcope:// resource URI>'
 ```
 
-The tool set supports bounded capture/body inspection, recording control, and revision-safe mapping changes. Scope settings reads by preset/table, preview a typed mutation, and commit using the evaluated revision. Preview performs neither file reads nor network requests; conflicting revisions and unfinished TUI drafts reject writes. The client manages initialization, pipes, deadlines, and output normalization without automatically retrying mutations. For a five-minute capture wait, use `--timeout-secs 360`.
+Create `arguments.json` from the selected tool's schema and the instance returned by discovery. Arguments can also be inline JSON or `-` for stdin. The CLI manages initialization, deadlines, and JSON output; it does not automatically retry mutations. Its default deadline is 60 seconds. For a five-minute capture wait, use `fluxcope mcp --timeout-secs 360 call wait_for_capture --arguments @wait.json`.
 
-MCP schemas use `fluxcope_version`, resource URIs use `fluxcope://`, and resource pagination metadata lives under `_meta.fluxcope`. Development-era Wirelens names and state directories are not compatibility aliases; rebuild the client and restart the proxy together.
+### Tools and capabilities
 
-The portable [Fluxcope MCP agent skill](skills/fluxcope-skill/SKILL.md) guides agents through setup, capture inspection, and mapping changes. Skill 1.0.2 targets the MCP interface in Fluxcope 0.2.0. Install the pinned skill release for Codex and Claude Code:
+| Capability | Tools | Behavior |
+| --- | --- | --- |
+| Discovery and health | `list_instances`, `get_broker_status`, `get_status` | Find live instances and inspect configuration mode, capture capacity, warnings, metrics, and bounded audit data. |
+| Recording | `set_recording_enabled` | Enable or disable capture storage. Traffic still forwards and mappings still apply when recording is off. |
+| Capture inspection | `search_captures`, `wait_for_capture`, `get_capture` | Search retained metadata with pagination, wait for request/response milestones, and retrieve an exact capture revision with body links. |
+| Body search and extraction | `search_capture_body`, `extract_capture_body` | Find text with bounded context or extract an exact JSON pointer or URL-form field. |
+| JSON structure | `find_json_pointers`, `probe_json_pointer_pattern` | Locate fields and inspect structural matches without returning their values. |
+| Mapping planning | `get_mapping_settings`, `validate_mapping_settings`, `explain_mapping`, `preview_mapping_mutation` | Read ordered rules, validate proposed settings, and explain or preview remote-then-local mapping decisions without sending traffic or reading mapped files. |
+| Presets | `create_preset`, `rename_preset`, `delete_preset`, `set_active_preset` | Manage named presets and explicitly choose the active one. Creating a preset does not activate it. |
+| Mapping gates | `set_mapping_gate` | Explicitly enable or disable mapping gates. |
+| Mapping rules | `create_mapping_rule`, `update_mapping_rule`, `delete_mapping_rule`, `move_mapping_rule`, `set_mapping_rule_enabled` | Manage map-remote and map-local rules, their order, and their enabled state. |
+
+A capture investigation usually follows `list_instances` → `search_captures` or `wait_for_capture` → `get_capture` → targeted body inspection. Body reads use the capture's revision and return bounded pages; follow returned pagination metadata and report retention, truncation, or decoding limits.
+
+For mapping changes, read the current `settings_revision`, preview the intended operation, then call the matching mutation tool with the same `expected_settings_revision`. A preview does not reserve that revision: concurrent edits or unfinished TUI drafts can reject the write. Default-owned settings persist to disk; temporary instances and instances launched with a read-only config file keep changes in memory. Check the returned persistence mode and verify the effect with new traffic when needed.
+
+Any process running as the same OS user can access MCP-enabled instances, including captured credentials and mapping controls. Keep access local and inspect only the traffic needed for the task.
+
+## Agent skill
+
+[fluxcope-skill](skills/fluxcope-skill/SKILL.md) teaches coding agents how to debug HTTP and HTTPS traffic through Fluxcope's MCP interface. It provides workflows to:
+
+- Find captured requests, inspect headers and bodies, and extract JSON or form values.
+- Control recording and manage mapping presets and rules with revision checks.
+- Set up the MCP connection, select the right proxy instance, and troubleshoot preview builds.
+
+### Install the skill
+
+With Node.js and npm available, run this in your terminal to install the latest skill from `master`:
 
 ```sh
-npx skills@1.7.0 add \
-  https://github.com/LorNtz/fluxcope/tree/skill-v1.0.2/skills/fluxcope-skill \
-  --agent codex claude-code --global
+npx skills@latest add LorNtz/fluxcope --skill fluxcope-skill
 ```
 
-Omit `--global` for project scope, or choose only the agent you use. Skill installation is separate from the application and MCP client registration; the [setup guide](skills/fluxcope-skill/references/setup.md) covers that separation and preview-build limitations. Pinned installs stay on their chosen tag; install a newer tag explicitly to upgrade. See the [skill changelog](skills/CHANGELOG.md) and [skill release procedure](docs/skill-releases.md).
+Follow the installer prompts to choose your agents and whether to install for the current project or globally. Run the same command again when you want to update to the latest skill.
 
-To follow the default branch instead, use `npx skills@1.7.0 add LorNtz/fluxcope --skill fluxcope-skill --agent codex claude-code --global`. A direct GitHub folder URL must include `/tree/<branch-or-tag>/skills/fluxcope-skill`; the CLI does not use `/skills/fluxcope-skill` alone as a folder selector.
+### Connect and use
 
-Version 1.0.1 renames the installed skill from `fluxcope-mcp` to `fluxcope-skill`. After installing the new name, remove the old entry with `npx skills@1.7.0 remove fluxcope-mcp --agent codex claude-code --global`, using the same agents and scope as the old installation. Releases 1.0.0 and 1.0.1 were withdrawn to correct repository attribution; their tag names are retired. Use 1.0.2 or later.
+Skill installation adds instructions to your agent; install Fluxcope and register its MCP server separately. Follow the [MCP setup guide](skills/fluxcope-skill/references/setup.md) for supported Fluxcope versions, client registration, and preview-build limitations, or ask your agent: “Use fluxcope-skill to set up the Fluxcope MCP connection.”
+
+Once your proxy is running with MCP enabled and capturing traffic, try: “Use fluxcope-skill to find failed API requests and inspect their response bodies.”
+
+See the [skill changelog](skills/CHANGELOG.md) for version history and the [skill release procedure](docs/skill-releases.md) for publishing updates.
 
 ## HTTPS and the local CA
 
