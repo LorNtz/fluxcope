@@ -618,3 +618,40 @@ Date: 2026/09/21 20:20
 - Prepared skill 1.0.2 and updated installation links and withdrawal records for 1.0.0 and 1.0.1.
 
 **Result**: History correction and replacement release prepared for validation and publication.
+
+### Wait for complete release PR checks
+Date: 2026/09/20 21:14
+
+- Replaced the shared ship/release check wait with a read-only waiter that reads ruleset and classic required checks, including missing downstream jobs.
+- Added bounded merge-status settling, actionable blocker messages, exact head/base re-review, and stage-specific interruption/resume guidance.
+- Updated the releasing guide for the shared waiting behavior.
+
+**Result**: implementation prepared for regression tests and independent review; no remote merge or publication performed.
+
+
+### Cover release waiting boundaries and apply review findings
+Date: 2026/09/20 21:18
+
+- Added synthetic regressions for late and absent jobs, failures, cancellations, review blockers, rules changes, head/base changes, timeout, interruption, and approval order.
+- Adopted review feedback: recheck PR state after interactive confirmation, and use GraphQL classic-protection metadata to avoid requiring the administrative REST endpoint.
+
+**Result**: reviewed boundaries covered without mutating remote PRs.
+
+
+### Validate shared ship/release waiting fix
+Date: 2026/09/20 21:20
+
+- All 124 Python tests passed, including 25 new regressions; diff whitespace and Python syntax checks passed.
+- Read-only GitHub verification returned all five required checks and correctly listed failed checks with direct job links on an existing PR.
+- Independent re-review passed after addressing confirmation-time revision changes and avoiding the administrative protection endpoint.
+
+**Result**: both commands use the corrected waiter on local branch fix/release-check-wait.
+
+### Prepare reviewed release wait fixes for merge
+Date: 2026/09/23 21:25
+
+- Applied the reviewed patch to a clean worktree based on current master, preserving unrelated workspace edits.
+- All 124 Python tests passed again on the updated base.
+- The prior independent review remains applicable: release helper and regression files are unchanged.
+
+**Result**: ready for PR checks and the user-authorized merge.
