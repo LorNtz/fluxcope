@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+from release_checks import revision, wait_for_merge
 from release_support import (
     BASE, CONFIG, CONVENTIONAL, REPO, ROOT, ReleaseError, api, dispatch, eligible_pr,
     pages, pr_intent, release_branch, repository_path, run, safe_text,
@@ -145,17 +146,24 @@ def review_and_merge(pr: dict, *, release: bool) -> dict:
             print(f"Release: {intent['version']} ({intent['channel']})")
         print(f"Review all changes: {current['html_url']}/files")
         print(safe_text(current.get("body") or ""))
-        run("gh", "pr", "checks", str(number), "--repo", REPO, "--required", "--watch", "--interval", "10", capture=False)
-        refreshed = api(repository_path(f"pulls/{number}"))
-        if refreshed["head"]["sha"] != head:
-            print("PR head changed. Review the refreshed changes and checks.")
+        refreshed = wait_for_merge(current, resume='just release' if release else 'just ship')
+        if refreshed['merged']:
+            return refreshed
+        if revision(refreshed) != revision(current):
+            print("PR head or base changed. Review the refreshed changes and checks.")
             continue
-        if refreshed["mergeable_state"] not in ("clean", "has_hooks"):
-            raise ReleaseError("PR is not mergeable with current branch rules; resolve the indicated checks or base update.")
         if intent:
             confirm(f"I reviewed this complete release and any required TUI experience check. Merge to publish {intent['version']}?")
         else:
             confirm("I reviewed the feature changes at this head. Squash merge this feature PR?")
+        latest = api(repository_path(f"pulls/{number}"))
+        if latest['merged']:
+            return latest
+        if (revision(latest) != revision(refreshed) or latest['state'] != 'open'
+                or latest['draft'] or latest['mergeable_state'] not in ('clean', 'has_hooks')
+                or latest['mergeable'] is not True):
+            print("PR changed during confirmation. Review the refreshed changes and checks.")
+            continue
         run("gh", "pr", "merge", str(number), "--repo", REPO, "--squash", "--match-head-commit", head, capture=False)
         result = api(repository_path(f"pulls/{number}"))
         if not result["merged"] or not result.get("merge_commit_sha"):
@@ -327,6 +335,6 @@ if __name__ == "__main__":
     except (ReleaseError, OSError, ValueError, KeyError) as error:
         print(f"Release: {safe_text(error)}", file=sys.stderr)
         sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nLocal wait stopped. Remote jobs continue; use just release-status to resume.", file=sys.stderr)
+    except KeyboardInterrupt as error:
+        print('\n' + (str(error) or "Local wait stopped. Remote jobs continue; use just release-status to resume."), file=sys.stderr)
         sys.exit(130)
