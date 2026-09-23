@@ -53,7 +53,7 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 - For newly added code, do some proper abstractions like traits or generics to provide extensibility, especially at the interface level but avoid over-engineering (like adding a helper function only to take arguments and create a struct with them but without doing anything else). It is encouraged to create helper functions to improve maintainability and readability but avoid splitting a continuous logic into multiple functions, especially those that are unlikely to be reused and require lengthy naming to explain their purpose.
 - Avoid making a file or module overly lengthy. If the newly added code causes this, it is encouraged to perform some idiomatic and appropriate module/file splitting (at this point, adjustments and refactoring of the existing code architecture without breaking are allowed). However, it is not encouraged to rigidly split some highly cohesive code.
 - Keep `requirements.md` and `what_i_just_did.md` local-only and out of Git. Track `agent_journal.md` and carry it across branches.
-- After code implementation (remember that plan or doc changes are not included), use subagents to review the changes. Spawn two subagents with their jobs described below. Notice that the main agent will do all the programmatic checkings (cargo test, cargo fmt, clippy and so on) so subagents should not do these again. Wait for all of them, then make appropriate modifications to the change based on the review opinions.
+- After code implementation (remember that plan or doc changes are not included), use subagents to review the changes. For rust code implementation specifically, spawn two subagents with their jobs described below. Notice that the main agent will do all the programmatic checkings (cargo test, cargo fmt, clippy and so on) so subagents should not do these again. Wait for all of them, then make appropriate modifications to the change based on the review opinions.
     - One subagent for design pattern and maintainability review, with (and not limited to) these responsibilities:
         - discovering repeating patterns that can be elegantly abstracted and properly encapsulated, and offer design advices as a senior professional engineer
         - hunting for common anti-patterns in rust
@@ -79,3 +79,10 @@ Date: yyyy/mm/dd hh:mm
 
 **Result**: some feature implemented/ bug fixed, verified with some tests in xxx.rs
 ```
+
+# Conventions
+
+## Branches Management
+
+- dev branches should be named like `[type like those of conventional commit]/[short-intention-description]`, for example "feat/theming-support" or "ci/preview-shell-installer"
+- For multiple features that would be released in the same version and need to be tested together, there should be an integration branch named like "integration/vX.Y.Z"
