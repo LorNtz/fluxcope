@@ -30,7 +30,7 @@ Point your client's HTTP/HTTPS proxy at this machine and the port shown in the s
 
 Settings live in `~/.fluxcope/config.yml`. Fluxcope does not read or migrate state from earlier development builds under another application name. Proxy settings include optional named presets, map-remote, map-local and recording URL filters; edit them through the settings UI.
 
-To add a mapping preset, open settings with `m`, choose **Proxy**, and select **Create new preset** in the preset dropdown. The new empty preset is selected automatically and gets an unused name such as `Preset 1`; edit **Preset name** to rename it. Its map-remote and map-local toggles start disabled. Save to keep it, or discard the settings draft to cancel creation.
+To add a mapping preset, open settings with `m`, choose **Proxy**, and select **+ Create new preset** in the preset dropdown. The new empty preset is selected automatically and gets an unused name such as `Preset 1`; edit **Preset name** to rename it. Its map-remote and map-local toggles start disabled. Save to keep it, or discard the settings draft to cancel creation.
 
 ## MCP control plane
 

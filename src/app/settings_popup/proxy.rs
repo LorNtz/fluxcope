@@ -199,7 +199,7 @@ impl SettingsPopup {
         }));
         items.push(SelectItem {
             id: SettingsSelectId::ProxyPreset(ProxyPresetChoice::Create),
-            label: "Create new preset".into(),
+            label: "+ Create new preset".into(),
             role: SelectItemRole::Action,
             filter_mode: SelectFilterMode::AlwaysVisible,
         });
