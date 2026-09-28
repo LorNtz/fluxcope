@@ -151,16 +151,9 @@ fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsCont
                 FieldEditKind::ProxyPresetName,
                 None,
             ),
-            ProxyWidget::MappingEnabled => checkbox_row(
-                popup,
-                row,
-                popup
-                    .draft()
-                    .proxy
-                    .as_ref()
-                    .is_some_and(|proxy| proxy.enable),
-                "Mapping enabled",
-            ),
+            ProxyWidget::MappingEnabled => {
+                checkbox_row(popup, row, popup.proxy_mapping_enabled(), "Mapping enabled")
+            }
             ProxyWidget::MapRemoteEnabled => checkbox_row(
                 popup,
                 row,

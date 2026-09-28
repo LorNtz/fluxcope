@@ -171,6 +171,37 @@ fn selected_suppressed_mapping_checkbox_stays_distinct() {
 }
 
 #[test]
+fn empty_default_preset_renders_disabled_gates_without_mutating_enabled_empty_proxy() {
+    let original_proxy = ProxySettings {
+        enable: true,
+        active_preset: None,
+        presets: Vec::new(),
+    };
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup.open(AppSettings {
+        proxy: Some(original_proxy.clone()),
+        ..AppSettings::default()
+    });
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+
+    let (_ui, buffer) = render_to_buffer_with_size(&mut app, 120, 40);
+    let content_area = settings_content_test_area(buffer.area);
+    for label in ["Mapping enabled", "Map remote enabled", "Map local enabled"] {
+        let position =
+            find_buffer_text(&buffer, content_area, label).expect("mapping gate visible");
+        let row = Rect::new(content_area.x, position.y, content_area.width, 1);
+        assert!(find_buffer_text(&buffer, row, "[ ]").is_some());
+    }
+    assert!(!app.settings_popup.is_dirty());
+    assert_eq!(
+        app.settings_popup.draft().proxy.as_ref(),
+        Some(&original_proxy)
+    );
+}
+
+#[test]
 fn settings_popup_create_preset_mouse_commits_filtered_action() {
     for existing in [false, true] {
         let mut app = App::new(ui_settings(true));
