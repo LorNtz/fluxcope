@@ -2,6 +2,6 @@
   "schema": 1,
   "channel": "stable",
   "mode": "explicit",
-  "version": "0.2.0",
-  "previous_stable": "0.1.0"
+  "version": "0.2.1",
+  "previous_stable": "0.2.0"
 }
