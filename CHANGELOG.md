@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Create empty mapping presets from the settings dropdown, with generated unique names and the existing rename/save flow.
+
 ## [0.2.0](https://github.com/LorNtz/fluxcope/compare/v0.1.0...v0.2.0) - 2026-09-20
 
 ### Added

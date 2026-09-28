@@ -139,12 +139,6 @@ fn checkbox_row<'a>(
 fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsContentItem<'_>> {
     let preset = popup.active_proxy_preset();
     let widgets = popup.visible_proxy_widgets();
-    if widgets.is_empty() {
-        return vec![SettingsContentItem::Line(Line::from(
-            "No proxy preset configured.",
-        ))];
-    }
-
     let mut items = Vec::with_capacity(widgets.len().saturating_add(2));
     for (row, widget) in widgets.iter().enumerate() {
         let item = match widget {

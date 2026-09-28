@@ -96,16 +96,178 @@ fn settings_popup_esc_closes_proxy_preset_select_without_changing_value() {
 }
 
 #[test]
-fn settings_popup_opening_empty_proxy_preset_select_does_not_create_proxy_settings() {
+fn settings_popup_create_preset_cancel_leaves_empty_settings_unchanged() {
     let mut app = App::new(ui_settings(true));
     app.handle_key_event(key(KeyCode::Char('m')));
     app.settings_popup
         .select_topic_for_tests(SettingsTopic::Proxy);
-
     focus_settings_content(&mut app);
     app.handle_key_event(key(KeyCode::Enter));
 
+    assert_eq!(
+        app.settings_popup.active_select_target(),
+        Some(SelectTarget::ProxyPreset)
+    );
+    assert!(app.settings_popup.draft().proxy.is_none());
+    assert!(!app.settings_popup.is_dirty());
+    app.handle_key_event(key(KeyCode::Esc));
     assert_eq!(app.settings_popup.active_select_target(), None);
+    assert!(app.settings_popup.draft().proxy.is_none());
+    assert!(!app.settings_popup.is_dirty());
+}
+
+#[test]
+fn settings_popup_create_preset_from_absent_proxy_is_disabled() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    focus_settings_content(&mut app);
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Enter));
+
+    let proxy = app
+        .settings_popup
+        .draft()
+        .proxy
+        .as_ref()
+        .expect("created proxy");
+    assert!(!proxy.enable);
+    assert_eq!(proxy.active_preset.as_deref(), Some("Preset 1"));
+    assert_eq!(proxy.presets.len(), 1);
+    let preset = &proxy.presets[0];
+    assert_eq!(preset.name, "Preset 1");
+    assert!(!preset.map_remote.enable);
+    assert!(!preset.map_local.enable);
+    assert!(preset.map_remote.rules.is_empty());
+    assert!(preset.map_local.rules.is_empty());
+    assert_eq!(app.settings_popup.active_select_target(), None);
+    assert!(app.settings_popup.is_dirty());
+}
+
+#[test]
+fn settings_popup_create_preset_preserves_empty_proxy_global_gate() {
+    for enabled in [false, true] {
+        let mut settings = settings_with_proxy_presets("missing");
+        let proxy = settings.proxy.as_mut().unwrap();
+        proxy.enable = enabled;
+        proxy.presets.clear();
+        let mut app = App::with_settings(settings, RecordingState::default());
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        focus_settings_content(&mut app);
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Enter));
+
+        let proxy = app.settings_popup.draft().proxy.as_ref().unwrap();
+        assert_eq!(proxy.enable, enabled);
+        assert_eq!(proxy.active_preset.as_deref(), Some("Preset 1"));
+        assert_eq!(proxy.presets.len(), 1);
+        assert!(!proxy.presets[0].map_remote.enable);
+        assert!(!proxy.presets[0].map_local.enable);
+    }
+}
+
+#[test]
+fn settings_popup_create_preset_uses_smallest_unused_trimmed_identity() {
+    let mut settings = settings_with_proxy_presets("Preset 1");
+    let proxy = settings.proxy.as_mut().unwrap();
+    proxy.presets[0].name = " Preset 1 ".to_string();
+    proxy.presets[1].name = "Preset 3".to_string();
+    proxy.presets[0]
+        .map_remote
+        .rules
+        .push(crate::settings::ProxyMapRemoteRule {
+            from: "https://example.com".to_string(),
+            to: "http://localhost:3000".to_string(),
+            enable: true,
+        });
+    let original = proxy.presets.clone();
+    let mut app = App::with_settings(settings, RecordingState::default());
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    focus_settings_content(&mut app);
+
+    for expected in ["Preset 2", "Preset 4"] {
+        app.handle_key_event(key(KeyCode::Enter));
+        for ch in "unmatched".chars() {
+            app.handle_key_event(key(KeyCode::Char(ch)));
+        }
+        app.handle_key_event(key(KeyCode::Enter));
+        let proxy = app.settings_popup.draft().proxy.as_ref().unwrap();
+        assert_eq!(proxy.active_preset.as_deref(), Some(expected));
+        assert_eq!(&proxy.presets[..original.len()], original.as_slice());
+        assert!(proxy.enable);
+        let created = proxy.presets.last().unwrap();
+        assert_eq!(created.name, expected);
+        assert!(!created.map_remote.enable);
+        assert!(!created.map_local.enable);
+        assert!(created.map_remote.rules.is_empty());
+        assert!(created.map_local.rules.is_empty());
+        assert_eq!(app.settings_popup.active_select_target(), None);
+    }
+    let proxy = app.settings_popup.draft().proxy.as_ref().unwrap();
+    assert_eq!(proxy.presets.len(), original.len() + 2);
+}
+
+#[test]
+fn settings_popup_create_preset_rename_survives_save_roundtrip() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    focus_settings_content(&mut app);
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Enter));
+    app.settings_popup
+        .select_proxy_row_for_tests(ProxyRow::PresetName);
+    app.handle_key_event(key(KeyCode::Enter));
+    for _ in 0.."Preset 1".len() {
+        app.handle_key_event(key(KeyCode::Backspace));
+    }
+    for ch in "local dev".chars() {
+        app.handle_key_event(key(KeyCode::Char(ch)));
+    }
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Char('s')));
+    let saved = app.take_settings_save_request().expect("save new preset");
+    let yaml = serde_yaml::to_string(&saved).expect("serialize settings");
+    let reloaded: AppSettings = serde_yaml::from_str(&yaml).expect("reload settings");
+    let proxy = reloaded.proxy.as_ref().expect("persisted proxy");
+    assert_eq!(proxy.active_preset.as_deref(), Some("local dev"));
+    assert_eq!(proxy.presets[0].name, "local dev");
+    assert_eq!(proxy.presets.len(), 1);
+    assert!(!proxy.enable);
+    assert!(!proxy.presets[0].map_remote.enable);
+    assert!(!proxy.presets[0].map_local.enable);
+    app.finish_settings_save(
+        reloaded,
+        crate::runtime::settings::SettingsRevision::INITIAL,
+    );
+    app.open_settings_popup();
+    assert_eq!(
+        app.settings_popup.active_proxy_preset().unwrap().name,
+        "local dev"
+    );
+    assert!(!app.settings_popup.is_dirty());
+}
+
+#[test]
+fn settings_popup_create_preset_discard_restores_original_settings() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Proxy);
+    focus_settings_content(&mut app);
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_key_event(key(KeyCode::Enter));
+    assert!(app.settings_popup.is_dirty());
+    app.handle_key_event(key(KeyCode::Esc));
+    app.handle_key_event(key(KeyCode::Esc));
+    assert!(app.take_settings_save_request().is_none());
+    app.open_settings_popup();
     assert!(app.settings_popup.draft().proxy.is_none());
     assert!(!app.settings_popup.is_dirty());
 }

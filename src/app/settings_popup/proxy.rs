@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 #[cfg(test)]
 use super::ProxyRow;
 use super::{
@@ -7,9 +9,12 @@ use super::{
     SettingsSelectId, SettingsTableState, SettingsTopic,
 };
 use crate::{
-    select::{SelectCommit, SelectItem, SelectItemRole, SelectOutcome, SelectState},
+    select::{
+        SelectCommit, SelectFilterMode, SelectItem, SelectItemRole, SelectOutcome, SelectState,
+    },
     settings::{
-        AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings,
+        AppSettings, ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule,
+        ProxyMapRemoteSettings, ProxyPresetSettings,
         mapping_ops::{
             MappingMutation, MappingMutationErrorKind, apply_mapping_mutation,
             find_mapping_preset_index,
@@ -54,10 +59,6 @@ impl SettingsPopup {
         self.bump_presentation_revision();
         self.focus_select_target(target);
         let items = self.select_items(target);
-        if items.is_empty() {
-            self.mode = EditMode::Browse;
-            return;
-        }
         let selected = self.active_select_id(target);
         let mut state = SelectState::new();
         state.open_with_selected(
@@ -184,23 +185,25 @@ impl SettingsPopup {
     }
 
     fn proxy_preset_select_items(&self) -> Vec<SelectItem<'_, SettingsSelectId>> {
-        self.draft
+        let presets = self
+            .draft
             .proxy
             .as_ref()
-            .map(|proxy| {
-                proxy
-                    .presets
-                    .iter()
-                    .enumerate()
-                    .map(|(index, preset)| {
-                        SelectItem::value(
-                            SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)),
-                            preset.name.as_str(),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map_or(&[][..], |proxy| proxy.presets.as_slice());
+        let mut items = Vec::with_capacity(presets.len() + 1);
+        items.extend(presets.iter().enumerate().map(|(index, preset)| {
+            SelectItem::value(
+                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)),
+                preset.name.as_str(),
+            )
+        }));
+        items.push(SelectItem {
+            id: SettingsSelectId::ProxyPreset(ProxyPresetChoice::Create),
+            label: "Create new preset".into(),
+            role: SelectItemRole::Action,
+            filter_mode: SelectFilterMode::AlwaysVisible,
+        });
+        items
     }
 
     pub(crate) fn select_items(
@@ -239,12 +242,10 @@ impl SettingsPopup {
             }
             (
                 SelectTarget::ProxyPreset,
-                SettingsSelectId::ProxyPreset(_),
+                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Create),
                 SelectItemRole::Action,
-            ) => {
-                self.draft.clear_error();
-                SelectCommitEffect::KeepOpen
-            }
+            ) => self.create_proxy_preset(),
+            _ => SelectCommitEffect::KeepOpen,
         }
     }
 
@@ -262,6 +263,51 @@ impl SettingsPopup {
                 self.mode = EditMode::Select { target, state };
             }
         }
+    }
+
+    fn create_proxy_preset(&mut self) -> SelectCommitEffect {
+        let mut name = String::new();
+        for number in 1.. {
+            name.clear();
+            write!(&mut name, "Preset {number}").expect("writing to a String cannot fail");
+            if self
+                .draft
+                .proxy
+                .as_ref()
+                .is_none_or(|proxy| find_mapping_preset_index(proxy, &name).is_none())
+            {
+                break;
+            }
+        }
+        let initial = ProxyPresetSettings {
+            map_remote: ProxyMapRemoteSettings {
+                enable: false,
+                rules: Vec::new(),
+            },
+            map_local: ProxyMapLocalSettings {
+                enable: false,
+                rules: Vec::new(),
+            },
+            ..ProxyPresetSettings::default()
+        };
+        let proxy_was_absent = self.draft.proxy.is_none();
+        if !self.apply_proxy_mutation(MappingMutation::CreatePreset {
+            name,
+            initial: Some(initial),
+        }) {
+            return SelectCommitEffect::KeepOpen;
+        }
+        let proxy = self
+            .draft
+            .proxy
+            .as_mut()
+            .expect("created preset has a proxy");
+        if proxy_was_absent {
+            proxy.enable = false;
+        }
+        let index = proxy.presets.len() - 1;
+        self.apply_proxy_preset_selection(index);
+        SelectCommitEffect::Close
     }
 
     fn apply_proxy_preset_selection(&mut self, index: usize) {
