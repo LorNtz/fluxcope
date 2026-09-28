@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/LorNtz/fluxcope/compare/v0.2.0...v0.2.1) - 2026-09-28
+
+### Added
+
+- support paste in active settings inputs ([#33](https://github.com/LorNtz/fluxcope/pull/33))
+- create mapping presets from settings dropdown ([#32](https://github.com/LorNtz/fluxcope/pull/32))
+- show an editable default mapping preset ([#31](https://github.com/LorNtz/fluxcope/pull/31))
+
 ### Added
 
 - An editable, disabled `default` mapping preset when no presets are configured, without writing proxy boilerplate merely by opening settings.
