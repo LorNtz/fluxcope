@@ -301,11 +301,7 @@ pub(in crate::ui) fn proxy_rule_table_widget<'a>(
     preset: Option<&'a ProxyPresetSettings>,
     max_height: u16,
 ) -> ProxyRuleTableWidget<'a> {
-    let mapping_enabled = popup
-        .draft()
-        .proxy
-        .as_ref()
-        .is_some_and(|proxy| proxy.enable);
+    let mapping_enabled = popup.proxy_mapping_enabled();
     let section_enabled = preset.is_some_and(|preset| match table {
         ProxyRuleTable::Remote => preset.map_remote.enable,
         ProxyRuleTable::Local => preset.map_local.enable,
