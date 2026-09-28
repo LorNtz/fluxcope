@@ -30,6 +30,8 @@ Point your client's HTTP/HTTPS proxy at this machine and the port shown in the s
 
 Settings live in `~/.fluxcope/config.yml`. Fluxcope does not read or migrate state from earlier development builds under another application name. Proxy settings include optional named presets, map-remote, map-local and recording URL filters; edit them through the settings UI.
 
+Mapping-rule `From` and `To` inputs accept your terminal's paste action, such as Cmd+V on macOS, while the rule editor is active. Text is inserted at the cursor; newlines, tabs and other control characters are removed without applying the edit. Press Enter to apply or Esc to cancel.
+
 ## MCP control plane
 
 Fluxcope exposes its live proxy state through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/docs/learn/architecture), so coding agents can investigate captured traffic and change recording or mappings. MCP is available in Fluxcope 0.2.0, is disabled by default, and currently requires Unix.

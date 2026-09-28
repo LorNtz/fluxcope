@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Terminal paste in map-remote and map-local rule inputs, with Unicode cursor insertion and control-character filtering.
+
 ## [0.2.0](https://github.com/LorNtz/fluxcope/compare/v0.1.0...v0.2.0) - 2026-09-20
 
 ### Added
