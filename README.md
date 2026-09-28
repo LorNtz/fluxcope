@@ -34,7 +34,7 @@ When no mapping presets are configured, the **Proxy** settings topic shows an em
 
 To add a mapping preset, open settings with `m`, choose **Proxy**, and select **+ Create new preset** in the preset dropdown. The new empty preset is selected automatically and gets an unused name such as `Preset 1`; edit **Preset name** to rename it. Its map-remote and map-local toggles start disabled. Save to keep it, or discard the settings draft to cancel creation. Creating a new preset does not save an untouched virtual `default`.
 
-Mapping-rule `From` and `To` inputs accept your terminal's paste action, such as Cmd+V on macOS, while the rule editor is active. Text is inserted at the cursor; newlines, tabs and other control characters are removed without applying the edit. Press Enter to apply or Esc to cancel.
+Active settings text inputs accept your terminal's paste action, such as Cmd+V on macOS: the server port, certificate directory and PEM filename, preset name, URL filter patterns, mapping-rule `From` and `To` fields, and the preset dropdown's filter. Text is inserted at the cursor; newlines, tabs and other control characters are removed without applying the edit or choosing a dropdown item. Existing validation still applies. Press Enter to apply or choose, or Esc to cancel.
 
 ## MCP control plane
 

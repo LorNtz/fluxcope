@@ -2,7 +2,6 @@ use std::fmt::Write as _;
 
 #[cfg(test)]
 use super::ProxyRow;
-use super::field_editor::paste_text_value;
 use super::{
     EditMode, FieldApplyOutcome, FieldEditKind, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS,
     ProxyPresetChoice, ProxyRuleTable, ProxyWidget, RuleEditField, RuleEditorState,
@@ -449,28 +448,6 @@ impl SettingsPopup {
             }),
             _ => None,
         }
-    }
-
-    pub(crate) fn handle_rule_editor_paste(&mut self, pasted: &str) -> bool {
-        let EditMode::RuleEditor {
-            from,
-            to,
-            active_field,
-            from_cursor,
-            to_cursor,
-            ..
-        } = &mut self.mode
-        else {
-            return false;
-        };
-        let changed = match active_field {
-            RuleEditField::From => paste_text_value(pasted, from, from_cursor),
-            RuleEditField::To => paste_text_value(pasted, to, to_cursor),
-        };
-        if changed {
-            self.bump_presentation_revision();
-        }
-        true
     }
 
     pub(super) fn start_rule_editor(&mut self, table: ProxyRuleTable, index: usize) {

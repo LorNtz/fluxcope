@@ -9,7 +9,7 @@ impl App {
     pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
         match self.focus.popup() {
             Some(PopupFocus::Settings) if !self.settings_transaction_pending() => {
-                self.settings_popup.handle_rule_editor_paste(pasted)
+                self.settings_popup.handle_paste(pasted)
             }
             Some(_) => false,
             None => self.handle_request_search_paste(pasted),
