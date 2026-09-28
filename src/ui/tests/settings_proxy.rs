@@ -171,25 +171,108 @@ fn selected_suppressed_mapping_checkbox_stays_distinct() {
 }
 
 #[test]
-fn settings_popup_proxy_page_without_presets_renders_empty_state_only() {
+fn empty_default_preset_renders_disabled_gates_without_mutating_enabled_empty_proxy() {
+    let original_proxy = ProxySettings {
+        enable: true,
+        active_preset: None,
+        presets: Vec::new(),
+    };
     let mut app = App::new(ui_settings(true));
     app.open_settings_popup();
+    app.settings_popup.open(AppSettings {
+        proxy: Some(original_proxy.clone()),
+        ..AppSettings::default()
+    });
     app.settings_popup
         .select_topic_for_tests(SettingsTopic::Proxy);
 
-    let (_ui, buffer) = render_to_buffer_with_size(&mut app, 100, 20);
-    let rendered = (0..buffer.area.height)
-        .map(|row| buffer_row(&buffer, row, 0, buffer.area.width))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (_ui, buffer) = render_to_buffer_with_size(&mut app, 120, 40);
+    let content_area = settings_content_test_area(buffer.area);
+    for label in ["Mapping enabled", "Map remote enabled", "Map local enabled"] {
+        let position =
+            find_buffer_text(&buffer, content_area, label).expect("mapping gate visible");
+        let row = Rect::new(content_area.x, position.y, content_area.width, 1);
+        assert!(find_buffer_text(&buffer, row, "[ ]").is_some());
+    }
+    assert!(!app.settings_popup.is_dirty());
+    assert_eq!(
+        app.settings_popup.draft().proxy.as_ref(),
+        Some(&original_proxy)
+    );
+}
 
-    assert!(rendered.contains("No proxy preset configured."));
-    assert!(!rendered.contains("Preset name"));
-    assert!(!rendered.contains("Mapping enabled"));
-    assert!(!rendered.contains("─ Map Remote ─"));
-    assert!(!rendered.contains("─ Map Local ─"));
-    assert!(!rendered.contains("Map Remote Rules"));
-    assert!(!rendered.contains("Map Local Rules"));
+#[test]
+fn settings_popup_create_preset_mouse_commits_filtered_action() {
+    for existing in [false, true] {
+        let mut app = App::new(ui_settings(true));
+        app.open_settings_popup();
+        app.settings_popup
+            .select_topic_for_tests(SettingsTopic::Proxy);
+        if existing {
+            app.settings_popup.draft_mut_for_tests().proxy =
+                Some(proxy_settings("dev", &["dev", "qa"]));
+        }
+        focus_settings_content(&mut app);
+        app.handle_key_event(key(KeyCode::Enter));
+        for ch in "unmatched".chars() {
+            app.handle_key_event(key(KeyCode::Char(ch)));
+        }
+
+        let (mut ui, buffer) = render_to_buffer(&mut app);
+        let root_area = buffer.area;
+        let content_area = settings_content_test_area(root_area);
+        let content_width = content_area.width.saturating_sub(1).max(1);
+        let items = settings_content_items_for_test(&app.settings_popup, root_area);
+        let field_layout = settings_field_layout(&items);
+        let content_height =
+            settings_content_height(&items, content_area.height, field_layout, content_width);
+        let layout = settings_select_layout(
+            &items,
+            Some(SelectTarget::ProxyPreset),
+            field_layout,
+            content_width,
+            content_height,
+        )
+        .expect("preset selector remains available")
+        .layout;
+        let options_area = layout
+            .options_area
+            .expect("creation action remains visible");
+        let action_click = Position::new(
+            content_area.x + options_area.x + 1,
+            content_area.y + options_area.y,
+        );
+        drop(items);
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                action_click.x,
+                action_click.y,
+            ),
+            &mut app,
+        );
+
+        let proxy = app
+            .settings_popup
+            .draft()
+            .proxy
+            .as_ref()
+            .expect("created proxy");
+        assert_eq!(proxy.active_preset.as_deref(), Some("Preset 1"));
+        assert_eq!(proxy.presets.len(), if existing { 3 } else { 1 });
+        if existing {
+            assert_eq!(proxy.presets[0].name, "dev");
+            assert_eq!(proxy.presets[1].name, "qa");
+        }
+        let preset = proxy.presets.last().unwrap();
+        assert_eq!(preset.name, "Preset 1");
+        assert!(preset.map_remote.rules.is_empty());
+        assert!(preset.map_local.rules.is_empty());
+        assert!(!preset.map_remote.enable);
+        assert!(!preset.map_local.enable);
+        assert_eq!(app.settings_popup.active_select_target(), None);
+        assert!(app.settings_popup.is_dirty());
+    }
 }
 
 #[test]
