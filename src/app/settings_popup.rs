@@ -245,6 +245,7 @@ pub(crate) enum SettingsSelectId {
 pub(crate) enum ProxyPresetChoice {
     Existing(usize),
     Default,
+    Create,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
