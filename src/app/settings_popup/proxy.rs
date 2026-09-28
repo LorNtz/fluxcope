@@ -9,14 +9,30 @@ use super::{
 use crate::{
     select::{SelectCommit, SelectItem, SelectItemRole, SelectOutcome, SelectState},
     settings::{
-        AppSettings, ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings,
+        AppSettings, ProxyMapLocalRule, ProxyMapLocalSettings, ProxyMapRemoteRule,
+        ProxyMapRemoteSettings, ProxyPresetSettings, ProxySettings,
         mapping_ops::{
-            MappingMutation, MappingMutationErrorKind, apply_mapping_mutation,
-            find_mapping_preset_index,
+            MappingMutation, MappingMutationError, MappingMutationErrorKind, MappingMutationResult,
+            MutationEffect, apply_mapping_mutation, find_mapping_preset_index,
         },
     },
 };
 use crossterm::event::KeyEvent;
+use std::sync::LazyLock;
+
+// Presentation only: the authoritative draft stays unchanged until a proxy edit succeeds.
+static DEFAULT_PROXY_PRESET: LazyLock<ProxyPresetSettings> =
+    LazyLock::new(|| ProxyPresetSettings {
+        name: "default".to_string(),
+        map_remote: ProxyMapRemoteSettings {
+            enable: false,
+            rules: Vec::new(),
+        },
+        map_local: ProxyMapLocalSettings {
+            enable: false,
+            rules: Vec::new(),
+        },
+    });
 
 impl SettingsPopup {
     pub(super) fn handle_select_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
@@ -54,10 +70,6 @@ impl SettingsPopup {
         self.bump_presentation_revision();
         self.focus_select_target(target);
         let items = self.select_items(target);
-        if items.is_empty() {
-            self.mode = EditMode::Browse;
-            return;
-        }
         let selected = self.active_select_id(target);
         let mut state = SelectState::new();
         state.open_with_selected(
@@ -177,6 +189,20 @@ impl SettingsPopup {
         active_preset(&self.draft)
     }
 
+    pub(crate) fn proxy_mapping_enabled(&self) -> bool {
+        self.draft
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| !proxy.presets.is_empty() && proxy.enable)
+    }
+
+    fn has_virtual_proxy_preset(&self) -> bool {
+        self.draft
+            .proxy
+            .as_ref()
+            .is_none_or(|proxy| proxy.presets.is_empty())
+    }
+
     pub(crate) fn proxy_preset_is_selected(&self) -> bool {
         self.focus == SettingsPaneFocus::Content
             && self.topic == SettingsTopic::Proxy
@@ -184,6 +210,12 @@ impl SettingsPopup {
     }
 
     fn proxy_preset_select_items(&self) -> Vec<SelectItem<'_, SettingsSelectId>> {
+        if self.has_virtual_proxy_preset() {
+            return vec![SelectItem::value(
+                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default),
+                DEFAULT_PROXY_PRESET.name.as_str(),
+            )];
+        }
         self.draft
             .proxy
             .as_ref()
@@ -219,6 +251,9 @@ impl SettingsPopup {
     }
 
     fn active_proxy_preset_select_id(&self) -> Option<SettingsSelectId> {
+        if self.has_virtual_proxy_preset() {
+            return Some(SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default));
+        }
         active_preset_index(&self.draft)
             .map(|index| SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)))
     }
@@ -237,6 +272,11 @@ impl SettingsPopup {
                 self.apply_proxy_preset_selection(index);
                 SelectCommitEffect::Close
             }
+            (
+                SelectTarget::ProxyPreset,
+                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default),
+                SelectItemRole::Value,
+            ) => SelectCommitEffect::Close,
             (
                 SelectTarget::ProxyPreset,
                 SettingsSelectId::ProxyPreset(_),
@@ -428,7 +468,7 @@ impl SettingsPopup {
                 to,
             },
         };
-        match apply_mapping_mutation(&mut self.draft, mutation) {
+        match self.mutate_proxy(mutation) {
             Ok(_) => self.draft.clear_error(),
             Err(error) => self.draft.set_error(error.message),
         }
@@ -437,26 +477,20 @@ impl SettingsPopup {
     pub(super) fn toggle_selected_proxy_checkbox(&mut self) {
         match self.selected_proxy_widget() {
             Some(ProxyWidget::MappingEnabled) => {
-                if let Some(enabled) = self.draft.proxy.as_ref().map(|proxy| !proxy.enable) {
-                    let _ = apply_mapping_mutation(
-                        &mut self.draft,
-                        MappingMutation::SetGlobalEnabled { enabled },
-                    );
-                }
+                self.apply_proxy_mutation(MappingMutation::SetGlobalEnabled {
+                    enabled: !self.proxy_mapping_enabled(),
+                });
             }
             Some(ProxyWidget::MapRemoteEnabled) => {
                 if let Some((preset, enabled)) = self
                     .active_proxy_preset()
                     .map(|preset| (preset.name.clone(), !preset.map_remote.enable))
                 {
-                    let _ = apply_mapping_mutation(
-                        &mut self.draft,
-                        MappingMutation::SetTableEnabled {
-                            preset,
-                            table: ProxyRuleTable::Remote,
-                            enabled,
-                        },
-                    );
+                    self.apply_proxy_mutation(MappingMutation::SetTableEnabled {
+                        preset,
+                        table: ProxyRuleTable::Remote,
+                        enabled,
+                    });
                 }
             }
             Some(ProxyWidget::MapLocalEnabled) => {
@@ -464,14 +498,11 @@ impl SettingsPopup {
                     .active_proxy_preset()
                     .map(|preset| (preset.name.clone(), !preset.map_local.enable))
                 {
-                    let _ = apply_mapping_mutation(
-                        &mut self.draft,
-                        MappingMutation::SetTableEnabled {
-                            preset,
-                            table: ProxyRuleTable::Local,
-                            enabled,
-                        },
-                    );
+                    self.apply_proxy_mutation(MappingMutation::SetTableEnabled {
+                        preset,
+                        table: ProxyRuleTable::Local,
+                        enabled,
+                    });
                 }
             }
             _ => {
@@ -735,8 +766,30 @@ impl SettingsPopup {
         active_preset(&self.draft).map(|preset| preset.name.as_str())
     }
 
+    fn mutate_proxy(
+        &mut self,
+        mutation: MappingMutation,
+    ) -> Result<MappingMutationResult, MappingMutationError> {
+        let original_proxy = self.has_virtual_proxy_preset().then(|| {
+            self.draft.proxy.replace(ProxySettings {
+                enable: false,
+                active_preset: Some(DEFAULT_PROXY_PRESET.name.clone()),
+                presets: vec![DEFAULT_PROXY_PRESET.clone()],
+            })
+        });
+        let result = apply_mapping_mutation(&mut self.draft, mutation);
+        // A rejected or no-op edit must not persist the virtual preset, including
+        // a rename that normalizes back to "default".
+        if let Some(original_proxy) = original_proxy
+            && !matches!(&result, Ok(result) if result.effect == MutationEffect::Changed)
+        {
+            self.draft.proxy = original_proxy;
+        }
+        result
+    }
+
     fn apply_proxy_mutation(&mut self, mutation: MappingMutation) -> bool {
-        match apply_mapping_mutation(&mut self.draft, mutation) {
+        match self.mutate_proxy(mutation) {
             Ok(_) => true,
             Err(error) => {
                 self.draft.set_error(error.message);
@@ -757,13 +810,10 @@ impl SettingsPopup {
             );
             return FieldApplyOutcome::KeepEditing;
         };
-        match apply_mapping_mutation(
-            &mut self.draft,
-            MappingMutation::RenamePreset {
-                name,
-                new_name: value,
-            },
-        ) {
+        match self.mutate_proxy(MappingMutation::RenamePreset {
+            name,
+            new_name: value,
+        }) {
             Ok(_) => {
                 self.draft.clear_error();
                 self.clear_field_hint(FieldEditKind::ProxyPresetName);
@@ -870,7 +920,13 @@ impl SettingsPopup {
 }
 
 fn active_preset(settings: &AppSettings) -> Option<&ProxyPresetSettings> {
-    let proxy = settings.proxy.as_ref()?;
+    let Some(proxy) = settings
+        .proxy
+        .as_ref()
+        .filter(|proxy| !proxy.presets.is_empty())
+    else {
+        return Some(&DEFAULT_PROXY_PRESET);
+    };
     active_preset_index(settings).and_then(|index| proxy.presets.get(index))
 }
 

@@ -192,14 +192,13 @@ impl ProxyWidget {
         Self::LocalRules,
     ];
     const PRESET_ONLY: [Self; 1] = [Self::Preset];
-    const EMPTY: [Self; 0] = [];
 
     fn visible_for(settings: &AppSettings) -> &'static [Self] {
         let Some(proxy) = settings.proxy.as_ref() else {
-            return &Self::EMPTY;
+            return &Self::ACTIVE_PRESET;
         };
         if proxy.presets.is_empty() {
-            return &Self::EMPTY;
+            return &Self::ACTIVE_PRESET;
         }
         let Some(active) = proxy.active_preset.as_deref() else {
             return &Self::PRESET_ONLY;
@@ -245,6 +244,7 @@ pub(crate) enum SettingsSelectId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyPresetChoice {
     Existing(usize),
+    Default,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
