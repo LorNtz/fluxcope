@@ -6,6 +6,16 @@ use super::{
 };
 
 impl App {
+    pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
+        match self.focus.popup() {
+            Some(PopupFocus::Settings) if !self.settings_transaction_pending() => {
+                self.settings_popup.handle_paste(pasted)
+            }
+            Some(_) => false,
+            None => self.handle_request_search_paste(pasted),
+        }
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false;

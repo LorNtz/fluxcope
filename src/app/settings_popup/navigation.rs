@@ -8,6 +8,7 @@ use super::{
     SETTINGS_TOPIC_KEY_HINTS, SettingsKeyHint, SettingsPaneFocus, SettingsPopup,
     SettingsPopupAction, SettingsScrollRequest, SettingsTopic,
 };
+use crate::text_input::paste_text_value;
 use crossterm::event::{KeyCode, KeyEvent};
 use tui_scrollview::ScrollViewState;
 
@@ -78,6 +79,38 @@ impl SettingsPopup {
         };
         self.bump_presentation_revision();
         action
+    }
+
+    pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
+        let changed = match &mut self.mode {
+            EditMode::Field { value, cursor, .. }
+            | EditMode::PrefilterEditor { value, cursor, .. } => {
+                paste_text_value(pasted, value, cursor)
+            }
+            EditMode::RuleEditor {
+                from,
+                to,
+                active_field,
+                from_cursor,
+                to_cursor,
+                ..
+            } => match active_field {
+                RuleEditField::From => paste_text_value(pasted, from, from_cursor),
+                RuleEditField::To => paste_text_value(pasted, to, to_cursor),
+            },
+            EditMode::Select { state, .. } => state.handle_paste(pasted),
+            EditMode::Browse
+            | EditMode::RuleTable { .. }
+            | EditMode::PrefilterTable { .. }
+            | EditMode::UnsavedConfirm => return false,
+        };
+        if changed {
+            if let EditMode::Field { kind, .. } = self.mode {
+                self.clear_field_hint(kind);
+            }
+            self.bump_presentation_revision();
+        }
+        true
     }
 
     pub fn handle_key_while_transaction_pending(&mut self, key: KeyEvent) -> SettingsPopupAction {

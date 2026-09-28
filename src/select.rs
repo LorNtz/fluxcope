@@ -1,3 +1,4 @@
+use crate::text_input::{byte_index_for_char, paste_text_value};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::borrow::Cow;
 
@@ -213,7 +214,7 @@ impl SelectState {
                 SelectOutcome::None
             }
             KeyCode::Backspace => {
-                self.backspace(items);
+                self.backspace();
                 SelectOutcome::None
             }
             KeyCode::Left => {
@@ -225,11 +226,19 @@ impl SelectState {
                 SelectOutcome::None
             }
             KeyCode::Char(ch) => {
-                self.insert_char(ch, items);
+                self.insert_char(ch);
                 SelectOutcome::None
             }
             _ => SelectOutcome::None,
         }
+    }
+
+    pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
+        if !self.open || !paste_text_value(pasted, &mut self.filter, &mut self.filter_cursor) {
+            return false;
+        }
+        self.reset_filter_position();
+        true
     }
 
     pub(crate) fn scroll_up<Id>(&mut self, items: &[SelectItem<'_, Id>], max_visible_items: usize) {
@@ -295,14 +304,14 @@ impl SelectState {
         self.ensure_focus_visible(max_visible_items);
     }
 
-    fn insert_char<Id>(&mut self, ch: char, items: &[SelectItem<'_, Id>]) {
+    fn insert_char(&mut self, ch: char) {
         let index = byte_index_for_char(&self.filter, self.filter_cursor);
         self.filter.insert(index, ch);
         self.filter_cursor += 1;
-        self.reset_filter_position(items);
+        self.reset_filter_position();
     }
 
-    fn backspace<Id>(&mut self, items: &[SelectItem<'_, Id>]) {
+    fn backspace(&mut self) {
         if self.filter_cursor == 0 {
             return;
         }
@@ -311,13 +320,13 @@ impl SelectState {
         let remove_end = byte_index_for_char(&self.filter, self.filter_cursor);
         self.filter.replace_range(remove_start..remove_end, "");
         self.filter_cursor -= 1;
-        self.reset_filter_position(items);
+        self.reset_filter_position();
     }
 
-    fn reset_filter_position<Id>(&mut self, items: &[SelectItem<'_, Id>]) {
+    fn reset_filter_position(&mut self) {
+        // Zero is also the empty-result sentinel; no item resolution is needed.
         self.focused_filtered_index = 0;
         self.scroll_offset = 0;
-        self.clamp_focus(items);
     }
 
     fn clamp_focus<Id>(&mut self, items: &[SelectItem<'_, Id>]) {
@@ -348,13 +357,6 @@ impl SelectState {
     fn filter_len(&self) -> usize {
         self.filter.chars().count()
     }
-}
-
-fn byte_index_for_char(value: &str, char_index: usize) -> usize {
-    value
-        .char_indices()
-        .nth(char_index)
-        .map_or(value.len(), |(index, _)| index)
 }
 
 #[cfg(test)]

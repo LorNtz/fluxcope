@@ -399,7 +399,7 @@ impl AppRuntime {
                 false
             }
             Event::Paste(pasted) => {
-                self.app.handle_request_search_paste(&pasted);
+                self.app.handle_paste(&pasted);
                 false
             }
             Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => false,

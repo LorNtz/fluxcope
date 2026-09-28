@@ -23,6 +23,7 @@ mod request_search;
 mod runtime;
 mod select;
 mod settings;
+mod text_input;
 mod ui;
 pub async fn run() -> anyhow::Result<()> {
     run_from(std::env::args_os()).await

@@ -2,6 +2,7 @@ use super::{
     EditMode, FieldApplyOutcome, FieldEditHint, FieldEditKind, FieldEditState, ProxyWidget,
     SettingsPopup, SettingsPopupAction, SettingsTopic,
 };
+use crate::text_input::byte_index_for_char;
 use crossterm::event::{KeyCode, KeyEvent};
 
 impl SettingsPopup {
@@ -170,13 +171,6 @@ impl SettingsPopup {
             self.field_hint = None;
         }
     }
-}
-
-fn byte_index_for_char(value: &str, char_index: usize) -> usize {
-    value
-        .char_indices()
-        .nth(char_index)
-        .map_or(value.len(), |(index, _)| index)
 }
 
 pub(super) fn edit_text_value(key: KeyEvent, value: &mut String, cursor: &mut usize) {

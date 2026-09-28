@@ -285,14 +285,14 @@ fn editing_captures_shortcuts_and_paste_limit_feedback_clears_on_success() {
     assert!(app.is_panel_focused(PanelFocus::RequestList));
 
     app.handle_key_event(key(KeyCode::Home));
-    assert!(app.handle_request_search_paste(&"x".repeat(511)));
+    assert!(app.handle_paste(&"x".repeat(511)));
     assert_eq!(
         app.request_search_title_status(),
         SearchTitleStatus::QueryLimitReached
     );
     assert_eq!(app.request_search_query().unwrap().len(), 2);
 
-    assert!(app.handle_request_search_paste("\nA\t"));
+    assert!(app.handle_paste("\nA\t"));
     assert_ne!(
         app.request_search_title_status(),
         SearchTitleStatus::QueryLimitReached

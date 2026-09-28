@@ -171,5 +171,6 @@ mod focus_input;
 mod request_search;
 mod request_tree;
 mod settings_general;
+mod settings_paste;
 mod settings_proxy;
 mod settings_recording;
