@@ -8,6 +8,7 @@
 /.wirelens/
 /requirements.md
 /what_i_just_did.md
+/agent_journal.md
 /tasks/
 *.pem
 *.key

@@ -52,8 +52,8 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
 - This is aim to be a serious production-ready project and do not treat it as a demo when implementing features. Every delivery should be a complete feature and don't implement things halfway.
 - For newly added code, do some proper abstractions like traits or generics to provide extensibility, especially at the interface level but avoid over-engineering (like adding a helper function only to take arguments and create a struct with them but without doing anything else). It is encouraged to create helper functions to improve maintainability and readability but avoid splitting a continuous logic into multiple functions, especially those that are unlikely to be reused and require lengthy naming to explain their purpose.
 - Avoid making a file or module overly lengthy. If the newly added code causes this, it is encouraged to perform some idiomatic and appropriate module/file splitting (at this point, adjustments and refactoring of the existing code architecture without breaking are allowed). However, it is not encouraged to rigidly split some highly cohesive code.
-- Keep `requirements.md` and `what_i_just_did.md` local-only and out of Git. Track `agent_journal.md` and carry it across branches.
-- After code implementation (remember that plan or doc changes are not included), use subagents to review the changes. Spawn two subagents with their jobs described below. Notice that the main agent will do all the programmatic checkings (cargo test, cargo fmt, clippy and so on) so subagents should not do these again. Wait for all of them, then make appropriate modifications to the change based on the review opinions.
+- Keep `requirements.md` and `agent_journal.md` local-only and out of Git. Track `agent_journal.md` and carry it across branches but never commit it.
+- After code implementation (remember that plan or doc changes are not included), use subagents to review the changes. For rust code implementation specifically, spawn two subagents with their jobs described below. Notice that the main agent will do all the programmatic checkings (cargo test, cargo fmt, clippy and so on) so subagents should not do these again. Wait for all of them, then make appropriate modifications to the change based on the review opinions.
     - One subagent for design pattern and maintainability review, with (and not limited to) these responsibilities:
         - discovering repeating patterns that can be elegantly abstracted and properly encapsulated, and offer design advices as a senior professional engineer
         - hunting for common anti-patterns in rust
@@ -63,7 +63,7 @@ Persistent settings live in `~/.fluxcope/config.yml`. The `proxy` YAML section i
         - putting forward suggestions that can make the data structure architecture & code structure more organized and elegant.
         - should also pay attention to the stale code that was probably forgotten to be deleted during the change of implementation approach by main agent.
     - One for performance checks to identify if there's any room of improvement to time consumption or memory usage. It's work would include and not limited to: hunting for common optimization points in rust like unnecessary memory cloning, looking for room of optimization on data structure & algorithm efficiency, and identify slow operations on hot paths.
-- After each code change you make, append a brief record of what you just did to the end of @agent_journal.md to allow me to know your work steps. Every record should mention the task objective and the time the change is made. Do not read it for context lookup, since it may contain info about iteration that has already been discarded. You may follow this template:
+- After each code change you make, append a brief record of what you just did to the end of @agent_journal.md to allow me to know your work steps. Do not commit changes in the journal. Every record should mention the task objective and the time the change is made. Do not read it for context lookup, since it may contain info about iteration that has already been discarded. You may follow this template:
 
 ```markdown
 ### Task 1: Some task done before
@@ -79,3 +79,10 @@ Date: yyyy/mm/dd hh:mm
 
 **Result**: some feature implemented/ bug fixed, verified with some tests in xxx.rs
 ```
+
+# Conventions
+
+## Branches Management
+
+- dev branches should be named like `[type like those of conventional commit]/[short-intention-description]`, for example "feat/theming-support" or "ci/preview-shell-installer"
+- For multiple features that would be released in the same version and need to be tested together, there should be an integration branch named like "integration/vX.Y.Z"
