@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preset dropdown scrollbar now sizes its thumb proportionally to visible items, reaches the bottom on the last page, and stays between the dropdown's upper and lower borders.
+
 ## [0.2.1](https://github.com/LorNtz/fluxcope/compare/v0.2.0...v0.2.1) - 2026-09-28
 
 ### Added
