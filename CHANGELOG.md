@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Create empty mapping presets from the settings dropdown, with generated unique names and the existing rename/save flow.
 - Terminal paste in active settings text inputs and the preset dropdown filter, with Unicode cursor insertion, control-character filtering, and existing validation and apply/cancel behavior.
 
+### Fixed
+
+- Preset dropdown scrollbar now sizes its thumb proportionally to visible items, reaches the bottom on the last page, and stays between the dropdown's upper and lower borders.
+
 ## [0.2.0](https://github.com/LorNtz/fluxcope/compare/v0.1.0...v0.2.0) - 2026-09-20
 
 ### Added

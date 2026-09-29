@@ -343,7 +343,9 @@ impl<Id> SelectWidget<'_, Id> {
         }
 
         if resolved.len() > layout.visible_option_count {
-            let mut scrollbar = ScrollbarState::new(resolved.len())
+            // Count viewport positions so Ratatui's extent is (N - V + 1) - 1 + V = N.
+            let max_scroll_offset = resolved.len() - layout.visible_option_count;
+            let mut scrollbar = ScrollbarState::new(max_scroll_offset + 1)
                 .position(layout.first_visible_filtered_index)
                 .viewport_content_length(layout.visible_option_count);
             StatefulWidget::render(
@@ -351,7 +353,10 @@ impl<Id> SelectWidget<'_, Id> {
                     .orientation(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
                     .end_symbol(None),
-                dropdown_area,
+                dropdown_area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
                 buf,
                 &mut scrollbar,
             );
@@ -436,6 +441,83 @@ mod tests {
         assert_eq!(rendered_cursor_x(&['e', '\u{301}']), 2);
         assert_eq!(rendered_cursor_x(&['👩', '\u{200d}', '💻']), 3);
         assert_eq!(rendered_cursor_x(&['界', '界', '界', '界']), 9);
+    }
+
+    #[test]
+    fn dropdown_scrollbar_preserves_border_corners() {
+        let items: Vec<_> = (0..12)
+            .map(|index| SelectItem::value(index, format!("Preset {index}")))
+            .collect();
+        let mut state = SelectState::new();
+        state.open_with_selected(&items, Some(&0), 6);
+        let widget = SelectWidget::new("Preset 0", &items, Some(&state));
+        let area = Rect::new(3, 2, 30, 11);
+        let dropdown = widget.layout(area).dropdown_area.unwrap();
+        let mut buf = Buffer::empty(area);
+        widget.overlay().render(area, &mut buf);
+
+        assert_eq!(buf[(dropdown.right() - 1, dropdown.y)].symbol(), "╮");
+        assert_eq!(
+            buf[(dropdown.right() - 1, dropdown.bottom() - 1)].symbol(),
+            "╯"
+        );
+    }
+
+    #[test]
+    fn dropdown_scrollbar_reaches_both_viewport_ends() {
+        let items: Vec<_> = (0..12)
+            .map(|index| SelectItem::value(index, format!("Preset {index}")))
+            .collect();
+        let mut state = SelectState::new();
+        state.open_with_selected(&items, Some(&0), 6);
+        let area = Rect::new(0, 0, 30, 11);
+        let widget = SelectWidget::new("Preset 0", &items, Some(&state));
+        let layout = widget.layout(area);
+        let dropdown = layout.dropdown_area.unwrap();
+        let options = layout.options_area.unwrap();
+        let scrollbar_x = dropdown.right() - 1;
+        let mut buf = Buffer::empty(area);
+        widget.overlay().render(area, &mut buf);
+
+        assert_eq!(buf[(scrollbar_x, options.y)].symbol(), "█");
+        assert_eq!(buf[(scrollbar_x, options.bottom() - 1)].symbol(), "║");
+
+        for _ in 0..items.len() {
+            state.scroll_down(&items, layout.visible_option_count);
+        }
+        let widget = SelectWidget::new("Preset 0", &items, Some(&state));
+        assert_eq!(
+            widget
+                .layout(area)
+                .option_at(Position::new(options.x, options.bottom() - 1)),
+            Some(items.len() - 1)
+        );
+        widget.overlay().render(area, &mut buf);
+
+        assert_eq!(buf[(scrollbar_x, options.bottom() - 1)].symbol(), "█");
+        assert_eq!(buf[(scrollbar_x, options.y)].symbol(), "║");
+    }
+
+    #[test]
+    fn dropdown_scrollbar_thumb_matches_visible_fraction() {
+        let items: Vec<_> = (0..12)
+            .map(|index| SelectItem::value(index, format!("Preset {index}")))
+            .collect();
+        let mut state = SelectState::new();
+        state.open_with_selected(&items, Some(&0), 6);
+        let widget = SelectWidget::new("Preset 0", &items, Some(&state));
+        let area = Rect::new(0, 0, 30, 11);
+        let layout = widget.layout(area);
+        let options = layout.options_area.unwrap();
+        let scrollbar_x = layout.dropdown_area.unwrap().right() - 1;
+        let mut buf = Buffer::empty(area);
+        widget.overlay().render(area, &mut buf);
+
+        // Six of twelve rows are visible, so the thumb occupies half the six-row track.
+        let thumb_height = (options.y..options.bottom())
+            .filter(|y| buf[(scrollbar_x, *y)].symbol() == "█")
+            .count();
+        assert_eq!(thumb_height, 3);
     }
 
     #[test]
