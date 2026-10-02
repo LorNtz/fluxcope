@@ -301,6 +301,55 @@ fn editing_captures_shortcuts_and_paste_limit_feedback_clears_on_success() {
 }
 
 #[test]
+fn editing_limit_counts_bytes_and_rejects_overflow_without_changing_query_or_cursor() {
+    let mut app = App::new(ui_settings(false));
+    app.handle_key_event(key(KeyCode::Char('/')));
+    let query = "é".repeat(256);
+    assert!(app.handle_paste(&query));
+    let Some(RequestSearchDispatch::Run(request)) = app.take_request_search_dispatch() else {
+        panic!("accepted query should dispatch");
+    };
+    assert_eq!(request.query.as_ref(), query);
+    app.handle_key_event(key(KeyCode::Home));
+
+    assert!(app.handle_paste("👩\u{200d}💻"));
+    app.handle_key_event(key(KeyCode::Char('x')));
+    assert_eq!(app.request_search_query(), Some(query.as_str()));
+    assert_eq!(app.request_search_input().unwrap().cursor(), 0);
+    assert_eq!(
+        app.request_search_title_status(),
+        SearchTitleStatus::QueryLimitReached
+    );
+    assert!(app.take_request_search_dispatch().is_none());
+
+    app.handle_key_event(key(KeyCode::Delete));
+    app.handle_key_event(key(KeyCode::Char('A')));
+    assert_eq!(
+        app.request_search_query(),
+        Some(format!("A{}", "é".repeat(255)).as_str())
+    );
+    assert_ne!(
+        app.request_search_title_status(),
+        SearchTitleStatus::QueryLimitReached
+    );
+}
+
+#[test]
+fn request_search_edits_whole_graphemes_without_dispatching_cursor_moves() {
+    let mut app = App::new(ui_settings(false));
+    begin_query(&mut app, "Ae\u{301}👩\u{200d}💻Z");
+    let _ = app.take_request_search_dispatch();
+
+    app.handle_key_event(key(KeyCode::Left));
+    app.handle_key_event(key(KeyCode::Left));
+    assert!(app.take_request_search_dispatch().is_none());
+    app.handle_key_event(key(KeyCode::Backspace));
+    app.handle_key_event(key(KeyCode::Delete));
+    app.handle_key_event(key(KeyCode::Char('X')));
+    assert_eq!(app.request_search_query(), Some("AXZ"));
+}
+
+#[test]
 fn editing_auto_expand_openings_are_removed_on_cancel() {
     let mut app = App::new(ui_settings(true));
     app.add_request(captured("https://a.com/base/one"));

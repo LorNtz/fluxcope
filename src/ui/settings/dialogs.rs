@@ -3,13 +3,14 @@ use std::borrow::Cow;
 use ratatui::{
     Frame,
     layout::{Alignment, Margin, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
 use crate::app::{
     ActionDialog, BODY_TEXT_TAB_WIDTH, RULE_EDITOR_KEY_HINTS, RuleEditField, RuleEditorState,
+    SettingsClickTarget,
 };
 
 use super::content::{
@@ -17,6 +18,7 @@ use super::content::{
     settings_field_layout_for_rows,
 };
 use super::controls::{SETTING_TEXT_FIELD_HEIGHT, SettingsTextInputControl};
+use super::hit_regions::ClickRegion;
 use super::settings_key_hint_text;
 use crate::ui::chrome::centered_rect;
 use crate::ui::terminal_text::{fit_text_to_width, text_width};
@@ -25,8 +27,9 @@ pub(super) fn render_rule_editor_popup(
     frame: &mut Frame,
     editor: RuleEditorState<'_>,
     parent: Rect,
-) {
-    let area = rule_editor_area(parent);
+) -> (Rect, Vec<ClickRegion>) {
+    let area = rule_editor_area(parent).intersection(frame.area());
+    let mut regions = Vec::new();
     frame.render_widget(Clear, area);
     let mut block = Block::default()
         .title(editor.title)
@@ -44,8 +47,8 @@ pub(super) fn render_rule_editor_popup(
         vertical: 1,
         horizontal: 1,
     });
-    if inner.height < SETTING_TEXT_FIELD_HEIGHT.saturating_mul(2) || inner.width == 0 {
-        return;
+    if inner.is_empty() {
+        return (area, regions);
     }
 
     let from_selected = editor.active_field == RuleEditField::From;
@@ -76,22 +79,35 @@ pub(super) fn render_rule_editor_popup(
     let field_layout = settings_field_layout_for_rows(&rows, SettingsFieldLayoutConfig::default());
 
     for (index, row) in rows.iter().enumerate() {
+        let row_area = Rect::new(
+            inner.x.saturating_add(1),
+            inner
+                .y
+                .saturating_add(SETTING_TEXT_FIELD_HEIGHT.saturating_mul(index as u16)),
+            field_width,
+            SETTING_TEXT_FIELD_HEIGHT,
+        )
+        .intersection(inner);
+        let start = regions.len();
         frame.render_widget(
             SettingsFieldRowWidget {
                 row,
                 layout: field_layout,
+                index,
+                regions: &mut regions,
             },
-            Rect::new(
-                inner.x.saturating_add(1),
-                inner.y.saturating_add(
-                    SETTING_TEXT_FIELD_HEIGHT
-                        .saturating_mul(u16::try_from(index).unwrap_or(u16::MAX)),
-                ),
-                field_width,
-                SETTING_TEXT_FIELD_HEIGHT,
-            ),
+            row_area,
         );
+        let field = if index == 0 {
+            RuleEditField::From
+        } else {
+            RuleEditField::To
+        };
+        for region in &mut regions[start..] {
+            region.set_rule_field(field);
+        }
     }
+    (area, regions)
 }
 
 pub(in crate::ui) fn rule_editor_area(parent: Rect) -> Rect {
@@ -113,8 +129,12 @@ pub(in crate::ui) fn action_dialog_area(dialog: &ActionDialog, parent: Rect) -> 
     centered_rect(width, height, parent)
 }
 
-pub(super) fn render_action_dialog(frame: &mut Frame, dialog: &ActionDialog, parent: Rect) {
-    let area = action_dialog_area(dialog, parent);
+pub(super) fn render_action_dialog(
+    frame: &mut Frame,
+    dialog: &ActionDialog,
+    parent: Rect,
+) -> (Rect, Vec<ClickRegion>) {
+    let area = action_dialog_area(dialog, parent).intersection(frame.area());
     frame.render_widget(Clear, area);
 
     frame.render_widget(
@@ -127,12 +147,29 @@ pub(super) fn render_action_dialog(frame: &mut Frame, dialog: &ActionDialog, par
         area,
     );
 
+    let mut regions = Vec::with_capacity(dialog.actions.len() + 1);
+    if area.width >= 5 && area.height > 0 {
+        let close_area = Rect::new(area.right() - 4, area.y, 3, 1);
+        let style = if dialog.focused_action == dialog.close_action {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Reset)
+        };
+        frame.render_widget(Paragraph::new("[x]").style(style), close_area);
+        regions.push(ClickRegion::new(
+            close_area,
+            SettingsClickTarget::DialogAction(dialog.close_action),
+        ));
+    }
+
     let inner = area.inner(Margin {
         vertical: 1,
         horizontal: 1,
     });
     if inner.is_empty() {
-        return;
+        return (area, regions);
     }
 
     let button_height = 3.min(inner.height);
@@ -142,14 +179,14 @@ pub(super) fn render_action_dialog(frame: &mut Frame, dialog: &ActionDialog, par
         inner.width,
         button_height,
     );
-    render_action_buttons(frame, dialog, button_area);
+    render_action_buttons(frame, dialog, button_area, &mut regions);
 
     let message_height = button_area.y.saturating_sub(inner.y);
     let line_count = u16::try_from(dialog.message_lines.len())
         .unwrap_or(u16::MAX)
         .min(message_height);
     if line_count == 0 {
-        return;
+        return (area, regions);
     }
 
     let message_y = inner
@@ -165,9 +202,15 @@ pub(super) fn render_action_dialog(frame: &mut Frame, dialog: &ActionDialog, par
         Paragraph::new(lines).alignment(Alignment::Center),
         Rect::new(inner.x, message_y, inner.width, line_count),
     );
+    (area, regions)
 }
 
-fn render_action_buttons(frame: &mut Frame, dialog: &ActionDialog, area: Rect) {
+fn render_action_buttons(
+    frame: &mut Frame,
+    dialog: &ActionDialog,
+    area: Rect,
+    regions: &mut Vec<ClickRegion>,
+) {
     if area.height < 3 || dialog.actions.is_empty() {
         return;
     }
@@ -175,7 +218,13 @@ fn render_action_buttons(frame: &mut Frame, dialog: &ActionDialog, area: Rect) {
     let labels = dialog
         .actions
         .iter()
-        .map(|action| format!("{} [{}]", action.label, action.key_hint))
+        .map(|action| {
+            if action.key_hint.is_empty() {
+                action.label.to_owned()
+            } else {
+                format!("{} [{}]", action.label, action.key_hint)
+            }
+        })
         .collect::<Vec<_>>();
     let mut widths = labels
         .iter()
@@ -202,12 +251,24 @@ fn render_action_buttons(frame: &mut Frame, dialog: &ActionDialog, area: Rect) {
     }
     let mut x = area.x + area.width.saturating_sub(total_width) / 2;
 
-    for (label, width) in labels.iter().zip(widths) {
-        let button_area = Rect::new(x, area.y, width, 3);
+    for ((action, label), width) in dialog.actions.iter().zip(&labels).zip(widths) {
+        let button_area = Rect::new(x, area.y, width, 3).intersection(area);
+        let style = if action.kind == dialog.focused_action {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        regions.push(ClickRegion::new(
+            button_area,
+            SettingsClickTarget::DialogAction(action.kind),
+        ));
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
+                .border_type(BorderType::Rounded)
+                .border_style(style),
             button_area,
         );
         let label_area = button_area.inner(Margin {
@@ -220,7 +281,9 @@ fn render_action_buttons(frame: &mut Frame, dialog: &ActionDialog, area: Rect) {
             label.clone()
         };
         frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center),
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(style),
             label_area,
         );
         x = x.saturating_add(width).saturating_add(gap);
@@ -232,9 +295,11 @@ fn action_buttons_full_width(dialog: &ActionDialog) -> u16 {
         .actions
         .iter()
         .map(|action| {
-            text_width(action.label)
-                .saturating_add(text_width(action.key_hint))
-                .saturating_add(7)
+            text_width(action.label).saturating_add(if action.key_hint.is_empty() {
+                4
+            } else {
+                text_width(action.key_hint).saturating_add(7)
+            })
         })
         .collect::<Vec<_>>();
 

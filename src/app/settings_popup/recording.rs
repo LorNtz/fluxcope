@@ -1,9 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::settings::RecordingPrefilterPatternSettings;
-
-use super::field_editor::edit_text_value;
 use super::{EditMode, SettingsKeyHint, SettingsPaneFocus, SettingsPopup, SettingsTopic};
+use crate::{settings::RecordingPrefilterPatternSettings, text_input::TextInputState};
 
 const PREFILTER_TABLE_KEY_HINTS: &[SettingsKeyHint] = &[
     SettingsKeyHint {
@@ -173,46 +171,47 @@ impl SettingsPopup {
         &mut self,
         key: KeyEvent,
     ) -> super::SettingsPopupAction {
-        let mut apply = None;
-        let mut close = None;
-
-        if let EditMode::PrefilterEditor {
-            index,
-            value,
-            cursor,
-        } = &mut self.mode
-        {
+        if key.code == KeyCode::Enter {
+            self.apply_current_prefilter_pattern();
+        } else if let EditMode::PrefilterEditor { index, input } = &mut self.mode {
             match key.code {
-                KeyCode::Esc => close = Some(*index),
-                KeyCode::Enter => apply = Some((*index, value.clone())),
+                KeyCode::Esc => {
+                    let index = *index;
+                    self.select_prefilter_pattern(index);
+                }
                 KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Char(_) => {
-                    edit_text_value(key, value, cursor);
+                    input.handle_key(key);
                 }
                 _ => {}
             }
         }
-
-        if let Some((index, value)) = apply {
-            if let Some(pattern) = self
-                .draft
-                .recording
-                .prefilter
-                .include_url_patterns
-                .get_mut(index)
-            {
-                pattern.pattern = value;
-                self.draft.clear_error();
-            }
-            close = Some(index);
-        }
-        if let Some(index) = close {
-            self.select_prefilter_pattern(index);
-        }
-
         super::SettingsPopupAction::None
     }
 
-    fn start_prefilter_pattern_editor(&mut self, index: usize) {
+    pub(super) fn apply_current_prefilter_pattern(&mut self) -> bool {
+        let mode = std::mem::replace(&mut self.mode, EditMode::Browse);
+        let EditMode::PrefilterEditor { index, input } = mode else {
+            self.mode = mode;
+            return true;
+        };
+        let Some(pattern) = self
+            .draft
+            .recording
+            .prefilter
+            .include_url_patterns
+            .get_mut(index)
+        else {
+            self.mode = EditMode::PrefilterEditor { index, input };
+            return false;
+        };
+        // Patterns intentionally accept arbitrary text; matching handles invalid patterns.
+        pattern.pattern = input.into_text();
+        self.draft.clear_error();
+        self.select_prefilter_pattern(index);
+        true
+    }
+
+    pub(super) fn start_prefilter_pattern_editor(&mut self, index: usize) {
         let Some(value) = self
             .draft
             .recording
@@ -225,8 +224,7 @@ impl SettingsPopup {
         };
         self.mode = EditMode::PrefilterEditor {
             index,
-            cursor: value.chars().count(),
-            value,
+            input: TextInputState::new(value),
         };
     }
 
@@ -311,14 +309,10 @@ impl SettingsPopup {
 
     pub(crate) fn prefilter_pattern_edit(&self) -> Option<PrefilterPatternEditState<'_>> {
         match &self.mode {
-            EditMode::PrefilterEditor {
-                index,
-                value,
-                cursor,
-            } => Some(PrefilterPatternEditState {
+            EditMode::PrefilterEditor { index, input } => Some(PrefilterPatternEditState {
                 index: *index,
-                value,
-                cursor: *cursor,
+                value: input.text(),
+                cursor: input.cursor(),
             }),
             _ => None,
         }

@@ -7,7 +7,6 @@ mod request_tree;
 mod requests;
 mod settings_draft;
 mod settings_popup;
-mod single_line_input;
 
 #[cfg(test)]
 mod tests;
@@ -37,16 +36,17 @@ pub use focus::{PanelFocus, PopupFocus};
 pub use panels::{CertificatePopup, LogPanel, RequestListPanel};
 pub(crate) use request_list_search::SearchTitleStatus;
 pub(crate) use request_tree::RequestTreeNodeSnapshot;
-#[cfg(test)]
-pub(crate) use settings_popup::ProxyRow;
 pub use settings_popup::{
     ActionDialog, FieldEditKind, SettingsPaneFocus, SettingsPopup, SettingsPopupAction,
     SettingsTopic,
 };
+#[cfg(test)]
+pub(crate) use settings_popup::{DialogActionKind, ProxyRow};
 pub(crate) use settings_popup::{
     PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PrefilterPatternEditState, ProxyRuleTable, ProxyWidget,
     RULE_EDITOR_KEY_HINTS, RecordingWidget, RuleEditField, RuleEditorState, SelectTarget,
-    SettingsKeyHint, SettingsScrollRequest, SettingsSelectId, validate_settings,
+    SettingsClickTarget, SettingsKeyHint, SettingsScrollRequest, SettingsSelectId,
+    validate_settings,
 };
 
 #[cfg(feature = "benchmark")]

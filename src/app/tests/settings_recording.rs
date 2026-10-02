@@ -226,3 +226,80 @@ fn settings_popup_prefilter_editor_escape_discards_changes() {
     );
     assert_eq!(app.settings_popup.active_prefilter_pattern(), Some(0));
 }
+
+#[test]
+fn settings_prefilter_clicks_apply_inline_text_before_toggling_or_leaving() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut settings = AppSettings::default();
+    settings.recording.prefilter.enable = false;
+    settings.recording.prefilter.include_url_patterns = vec![
+        RecordingPrefilterPatternSettings::new("雪e\u{301}終"),
+        RecordingPrefilterPatternSettings::new("other"),
+    ];
+    let mut popup = SettingsPopup::new();
+    popup.open(settings);
+    popup.handle_click(Click::Topic(SettingsTopic::Recording), false, false);
+    popup.handle_click(
+        Click::PrefilterRow {
+            index: 0,
+            toggle: false,
+        },
+        false,
+        false,
+    );
+    assert!(popup.prefilter_pattern_edit().is_none());
+    popup.handle_click(
+        Click::PrefilterRow {
+            index: 0,
+            toggle: false,
+        },
+        true,
+        false,
+    );
+    popup.handle_click(
+        Click::PrefilterInput {
+            index: 0,
+            cursor: Some("雪e".len()),
+        },
+        false,
+        false,
+    );
+    popup.handle_click(
+        Click::PrefilterInput {
+            index: 0,
+            cursor: None,
+        },
+        false,
+        false,
+    );
+    popup.handle_paste("新");
+    popup.handle_click(
+        Click::PrefilterRow {
+            index: 1,
+            toggle: true,
+        },
+        true,
+        false,
+    );
+    assert!(popup.prefilter_pattern_edit().is_none());
+    assert_eq!(popup.active_prefilter_pattern(), Some(1));
+    let prefilter = &popup.draft().recording.prefilter;
+    assert_eq!(prefilter.include_url_patterns[0].pattern, "雪新e\u{301}終");
+    assert!(!prefilter.include_url_patterns[1].enable);
+    assert!(!prefilter.enable);
+    popup.handle_click(
+        Click::PrefilterInput {
+            index: 1,
+            cursor: None,
+        },
+        false,
+        false,
+    );
+    popup.handle_paste("[");
+    popup.handle_click(Click::Outside, false, false);
+    assert!(popup.is_confirming_unsaved());
+    assert_eq!(
+        popup.draft().recording.prefilter.include_url_patterns[1].pattern,
+        "other["
+    );
+}

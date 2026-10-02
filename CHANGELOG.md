@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Direct mouse interaction throughout settings: clickable topics, checkboxes, inputs, preset options and dialog controls; whole-table focus including empty tables; same-row double-click table editing; Unicode-aware cursor placement and one-layer outside-click dismissal.
+
+### Changed
+
+- Unsaved settings confirmation now offers bottom Save [s]/Apply [a] and Discard [d] buttons with working shortcuts and an initially focused top-right close control. Close, Esc and outside-click preserve the draft instead of discarding it.
+- Clarify settings mouse module responsibilities and group interaction tests by behavior rather than development iteration.
+- Settings inputs, preset filtering and request search now share one text input state/widget with grapheme-aware editing and consistent mouse positioning. Request search retains its 512-byte limit and atomic paste rejection; settings and filters remain uncapped.
+
 ### Fixed
 
 - Preset dropdown scrollbar now sizes its thumb proportionally to visible items, reaches the bottom on the last page, and stays between the dropdown's upper and lower borders.
+- Rejected inline settings edits retain their text and focus on Enter or when clicking elsewhere inside settings. Valid click-away edits, including clicks on blank space, exit editing and update only the draft until Save/Apply; mapping editors retain explicit Enter-to-apply and outside-click-to-cancel behavior.
 
 ## [0.2.1](https://github.com/LorNtz/fluxcope/compare/v0.2.0...v0.2.1) - 2026-09-28
 

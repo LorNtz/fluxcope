@@ -1,4 +1,4 @@
-use crate::text_input::{byte_index_for_char, paste_text_value};
+use crate::text_input::{InputEditOutcome, TextInputState};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::borrow::Cow;
 
@@ -69,8 +69,7 @@ impl SelectResolvedItems {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SelectState {
     open: bool,
-    filter: String,
-    filter_cursor: usize,
+    filter: TextInputState,
     focused_filtered_index: usize,
     scroll_offset: usize,
 }
@@ -85,12 +84,15 @@ impl SelectState {
     }
 
     pub(crate) fn filter(&self) -> &str {
-        &self.filter
+        self.filter.text()
     }
 
-    pub(crate) fn filter_prefix(&self) -> &str {
-        let end = byte_index_for_char(&self.filter, self.filter_cursor);
-        &self.filter[..end]
+    pub(crate) fn filter_cursor(&self) -> usize {
+        self.filter.cursor()
+    }
+
+    pub(crate) fn set_filter_cursor(&mut self, cursor: usize) {
+        self.filter.set_cursor(cursor);
     }
 
     pub(crate) fn focused_filtered_index(&self) -> usize {
@@ -109,7 +111,6 @@ impl SelectState {
     ) {
         self.open = true;
         self.filter.clear();
-        self.filter_cursor = 0;
         self.focused_filtered_index = Self::selected_item_index(items, selected).unwrap_or(0);
         self.scroll_offset = 0;
         self.clamp_focus(items);
@@ -119,16 +120,15 @@ impl SelectState {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.filter.clear();
-        self.filter_cursor = 0;
         self.focused_filtered_index = 0;
         self.scroll_offset = 0;
     }
 
     pub(crate) fn resolve_items<Id>(&self, items: &[SelectItem<'_, Id>]) -> SelectResolvedItems {
-        let indices = if self.filter.is_empty() {
+        let indices = if self.filter.text().is_empty() {
             (0..items.len()).collect()
         } else {
-            let filter = self.filter.to_lowercase();
+            let filter = self.filter.text().to_lowercase();
             items
                 .iter()
                 .enumerate()
@@ -213,20 +213,10 @@ impl SelectState {
                 self.move_page_down(items, max_visible_items);
                 SelectOutcome::None
             }
-            KeyCode::Backspace => {
-                self.backspace();
-                SelectOutcome::None
-            }
-            KeyCode::Left => {
-                self.filter_cursor = self.filter_cursor.saturating_sub(1);
-                SelectOutcome::None
-            }
-            KeyCode::Right => {
-                self.filter_cursor = self.filter_cursor.saturating_add(1).min(self.filter_len());
-                SelectOutcome::None
-            }
-            KeyCode::Char(ch) => {
-                self.insert_char(ch);
+            KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Char(_) => {
+                if self.filter.handle_key(key) == InputEditOutcome::Changed {
+                    self.reset_filter_position();
+                }
                 SelectOutcome::None
             }
             _ => SelectOutcome::None,
@@ -234,7 +224,7 @@ impl SelectState {
     }
 
     pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
-        if !self.open || !paste_text_value(pasted, &mut self.filter, &mut self.filter_cursor) {
+        if !self.open || self.filter.paste(pasted) != InputEditOutcome::Changed {
             return false;
         }
         self.reset_filter_position();
@@ -304,25 +294,6 @@ impl SelectState {
         self.ensure_focus_visible(max_visible_items);
     }
 
-    fn insert_char(&mut self, ch: char) {
-        let index = byte_index_for_char(&self.filter, self.filter_cursor);
-        self.filter.insert(index, ch);
-        self.filter_cursor += 1;
-        self.reset_filter_position();
-    }
-
-    fn backspace(&mut self) {
-        if self.filter_cursor == 0 {
-            return;
-        }
-
-        let remove_start = byte_index_for_char(&self.filter, self.filter_cursor - 1);
-        let remove_end = byte_index_for_char(&self.filter, self.filter_cursor);
-        self.filter.replace_range(remove_start..remove_end, "");
-        self.filter_cursor -= 1;
-        self.reset_filter_position();
-    }
-
     fn reset_filter_position(&mut self) {
         // Zero is also the empty-result sentinel; no item resolution is needed.
         self.focused_filtered_index = 0;
@@ -352,10 +323,6 @@ impl SelectState {
                 .saturating_add(1)
                 .saturating_sub(max_visible_items);
         }
-    }
-
-    fn filter_len(&self) -> usize {
-        self.filter.chars().count()
     }
 }
 
@@ -438,5 +405,19 @@ mod tests {
 
         assert_eq!(state.resolve_items(&items).item_index(0), Some(1));
         assert_eq!(state.resolve_items(&items).len(), 1);
+    }
+
+    #[test]
+    fn filter_editing_moves_and_deletes_whole_graphemes() {
+        let items = items();
+        let mut state = SelectState::new();
+        state.open_with_selected(&items, Some(&0), 4);
+        state.handle_paste("a👨‍👩‍👧e\u{301}z");
+        state.handle_key(key(KeyCode::Left), &items, 4);
+        state.handle_key(key(KeyCode::Backspace), &items, 4);
+        state.handle_key(key(KeyCode::Left), &items, 4);
+        state.handle_paste("X");
+        assert_eq!(state.filter(), "aX👨‍👩‍👧z");
+        assert!(state.is_open());
     }
 }

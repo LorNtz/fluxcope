@@ -334,5 +334,6 @@ mod request_list;
 mod root_layout;
 mod settings_dialogs;
 mod settings_fields;
+mod settings_mouse;
 mod settings_proxy;
 mod settings_recording;

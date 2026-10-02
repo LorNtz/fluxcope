@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Margin, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{
@@ -9,10 +9,13 @@ use ratatui::{
     },
 };
 
-use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SettingsPopup};
+use crate::app::{
+    BODY_TEXT_TAB_WIDTH, ProxyRuleTable, RuleEditField, SettingsClickTarget, SettingsPopup,
+};
 use crate::settings::{ProxyMapLocalRule, ProxyMapRemoteRule, ProxyPresetSettings};
 
 use super::SETTINGS_TABLE_MIN_HEIGHT;
+use super::hit_regions::ClickRegion;
 use crate::ui::terminal_text::fit_text_to_width;
 
 #[derive(Clone, Copy)]
@@ -179,6 +182,46 @@ impl ProxyRuleTableWidget<'_> {
 
     pub(super) fn viewport(&self, height: u16) -> SettingsTableViewport {
         SettingsTableViewport::new(self.row_count(), self.scroll_offset, height)
+    }
+
+    pub(super) fn click_regions(&self, area: Rect, regions: &mut Vec<ClickRegion>) {
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let viewport = self.viewport(area.height);
+        let width = if viewport.overflowing(self.row_count()) {
+            inner.width.saturating_sub(1).max(1)
+        } else {
+            inner.width
+        };
+        let (from_width, _) = rule_table_column_widths(width);
+        for index in viewport.visible_range(self.row_count()) {
+            let Some(y) = viewport.row_y(area, index).filter(|y| *y < inner.bottom()) else {
+                continue;
+            };
+            let row = Rect::new(inner.x, y, width, 1);
+            let target = |toggle, field| SettingsClickTarget::RuleRow {
+                table: self.table,
+                index,
+                toggle,
+                field,
+            };
+            regions.push(ClickRegion::new(row, target(false, RuleEditField::From)));
+            regions.push(ClickRegion::new(
+                Rect::new(row.x, row.y, row.width.min(4), 1),
+                target(true, RuleEditField::From),
+            ));
+            let to_x = row
+                .x
+                .saturating_add(6)
+                .saturating_add(from_width as u16)
+                .min(row.right());
+            regions.push(ClickRegion::new(
+                Rect::new(to_x, row.y, row.right().saturating_sub(to_x), 1),
+                target(false, RuleEditField::To),
+            ));
+        }
     }
 }
 

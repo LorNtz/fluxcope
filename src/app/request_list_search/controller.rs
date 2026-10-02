@@ -2,14 +2,12 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::{
-    app::{
-        App,
-        single_line_input::{InputEditOutcome, InputViewport, SingleLineInput},
-    },
+    app::App,
     request_search::{RequestSearchDispatch, SearchJobOutcome, SearchRequest, SearchResults},
+    text_input::{InputEditOutcome, TextInputState},
 };
 
 use super::{
@@ -45,52 +43,13 @@ impl App {
                     self.request_search.commit_editing();
                 }
             }
-            KeyCode::Left if key.modifiers.is_empty() => {
-                self.request_search
-                    .input_mut()
-                    .map(SingleLineInput::move_left);
-            }
-            KeyCode::Right if key.modifiers.is_empty() => {
-                self.request_search
-                    .input_mut()
-                    .map(SingleLineInput::move_right);
-            }
-            KeyCode::Home if key.modifiers.is_empty() => {
-                self.request_search
-                    .input_mut()
-                    .map(SingleLineInput::move_home);
-            }
-            KeyCode::End if key.modifiers.is_empty() => {
-                self.request_search
-                    .input_mut()
-                    .map(SingleLineInput::move_end);
-            }
-            KeyCode::Backspace if key.modifiers.is_empty() => {
+            _ => {
                 let outcome = self
                     .request_search
                     .input_mut()
-                    .map_or(InputEditOutcome::Unchanged, SingleLineInput::backspace);
+                    .map_or(InputEditOutcome::Unchanged, |input| input.handle_key(key));
                 self.apply_request_search_input_edit(outcome);
             }
-            KeyCode::Delete if key.modifiers.is_empty() => {
-                let outcome = self
-                    .request_search
-                    .input_mut()
-                    .map_or(InputEditOutcome::Unchanged, SingleLineInput::delete);
-                self.apply_request_search_input_edit(outcome);
-            }
-            KeyCode::Char(character)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                let outcome = self
-                    .request_search
-                    .input_mut()
-                    .map_or(InputEditOutcome::Unchanged, |input| {
-                        input.insert_char(character)
-                    });
-                self.apply_request_search_input_edit(outcome);
-            }
-            _ => {}
         }
     }
 
@@ -308,20 +267,18 @@ impl App {
         self.request_search.is_refreshing()
     }
 
-    pub(crate) fn request_search_input_viewport(&self, width: usize) -> Option<InputViewport<'_>> {
-        self.request_search
-            .input()
-            .map(|input| input.viewport(width))
+    pub(crate) fn request_search_input(&self) -> Option<&TextInputState> {
+        self.request_search.input()
     }
 
-    pub(crate) fn set_request_search_cursor_from_column(
-        &mut self,
-        width: usize,
-        column: usize,
-    ) -> bool {
+    pub(crate) fn request_search_input_revision(&self) -> u64 {
+        self.request_search.next_generation
+    }
+
+    pub(crate) fn set_request_search_cursor(&mut self, cursor: usize) -> bool {
         self.request_search
             .input_mut()
-            .is_some_and(|input| input.set_cursor_from_column(width, column))
+            .is_some_and(|input| input.set_cursor(cursor))
     }
 
     #[cfg(test)]

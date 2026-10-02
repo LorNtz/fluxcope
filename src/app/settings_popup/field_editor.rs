@@ -2,7 +2,7 @@ use super::{
     EditMode, FieldApplyOutcome, FieldEditHint, FieldEditKind, FieldEditState, ProxyWidget,
     SettingsPopup, SettingsPopupAction, SettingsTopic,
 };
-use crate::text_input::byte_index_for_char;
+use crate::text_input::TextInputState;
 use crossterm::event::{KeyCode, KeyEvent};
 
 impl SettingsPopup {
@@ -10,56 +10,47 @@ impl SettingsPopup {
         self.clear_field_hint(kind);
         self.mode = EditMode::Field {
             kind,
-            cursor: value.chars().count(),
-            value,
+            input: TextInputState::new(value),
         };
     }
 
     pub(super) fn handle_field_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
-        let mut apply_value = None;
-        let mut clear_hint = None;
-        let mut close = false;
-
-        match &mut self.mode {
-            EditMode::Field {
-                kind,
-                value,
-                cursor,
-                ..
-            } => match key.code {
-                KeyCode::Esc => {
-                    clear_hint = Some(*kind);
-                    close = true;
-                }
-                KeyCode::Enter => {
-                    apply_value = Some((*kind, value.clone()));
-                }
-                KeyCode::Backspace | KeyCode::Char(_) => {
-                    edit_text_value(key, value, cursor);
-                    clear_hint = Some(*kind);
-                }
-                KeyCode::Left | KeyCode::Right => {
-                    edit_text_value(key, value, cursor);
-                }
-                _ => {}
-            },
-            _ => return SettingsPopupAction::None,
+        if key.code == KeyCode::Enter {
+            self.apply_current_field();
+            return SettingsPopupAction::None;
         }
-
-        if let Some(kind) = clear_hint {
-            self.clear_field_hint(kind);
-        }
-        if let Some((kind, value)) = apply_value {
-            match self.apply_field_value(kind, value) {
-                FieldApplyOutcome::CloseEditor => close = true,
-                FieldApplyOutcome::KeepEditing => {}
+        let EditMode::Field { kind, input } = &mut self.mode else {
+            return SettingsPopupAction::None;
+        };
+        let kind = *kind;
+        match key.code {
+            KeyCode::Esc => {
+                self.clear_field_hint(kind);
+                self.mode = EditMode::Browse;
             }
+            KeyCode::Backspace | KeyCode::Char(_) => {
+                input.handle_key(key);
+                self.clear_field_hint(kind);
+            }
+            KeyCode::Left | KeyCode::Right => {
+                input.handle_key(key);
+            }
+            _ => {}
         }
-        if close {
-            self.mode = EditMode::Browse;
-        }
-
         SettingsPopupAction::None
+    }
+
+    pub(super) fn apply_current_field(&mut self) -> bool {
+        let mode = std::mem::replace(&mut self.mode, EditMode::Browse);
+        let EditMode::Field { kind, mut input } = mode else {
+            self.mode = mode;
+            return true;
+        };
+        if self.apply_field_value(kind, &mut input) == FieldApplyOutcome::KeepEditing {
+            self.mode = EditMode::Field { kind, input };
+            return false;
+        }
+        true
     }
 
     pub(super) fn start_selected_edit(&mut self) {
@@ -113,9 +104,13 @@ impl SettingsPopup {
         }
     }
 
-    fn apply_field_value(&mut self, kind: FieldEditKind, value: String) -> FieldApplyOutcome {
+    fn apply_field_value(
+        &mut self,
+        kind: FieldEditKind,
+        input: &mut TextInputState,
+    ) -> FieldApplyOutcome {
         match kind {
-            FieldEditKind::ServerPort => match value.parse::<u16>() {
+            FieldEditKind::ServerPort => match input.text().parse::<u16>() {
                 Ok(port) if port > 0 => {
                     self.draft.server.port = port;
                     self.draft.clear_error();
@@ -124,20 +119,21 @@ impl SettingsPopup {
                 _ => {
                     self.draft
                         .set_error("server.port must be between 1 and 65535");
+                    return FieldApplyOutcome::KeepEditing;
                 }
             },
             FieldEditKind::CertificateStoreDir => {
-                self.draft.certificate.store_dir = value;
+                self.draft.certificate.store_dir = std::mem::take(input).into_text();
                 self.draft.clear_error();
                 self.clear_field_hint(kind);
             }
             FieldEditKind::CertificatePemFilename => {
-                self.draft.certificate.pem_filename = value;
+                self.draft.certificate.pem_filename = std::mem::take(input).into_text();
                 self.draft.clear_error();
                 self.clear_field_hint(kind);
             }
             FieldEditKind::ProxyPresetName => {
-                return self.apply_proxy_preset_name(value);
+                return self.apply_proxy_preset_name(input.text().to_owned());
             }
         }
         FieldApplyOutcome::CloseEditor
@@ -147,12 +143,10 @@ impl SettingsPopup {
         match &self.mode {
             EditMode::Field {
                 kind: active_field,
-                value,
-                cursor,
-                ..
+                input,
             } if *active_field == kind => Some(FieldEditState {
-                value,
-                cursor: *cursor,
+                value: input.text(),
+                cursor: input.cursor(),
             }),
             _ => None,
         }
@@ -170,30 +164,5 @@ impl SettingsPopup {
         {
             self.field_hint = None;
         }
-    }
-}
-
-pub(super) fn edit_text_value(key: KeyEvent, value: &mut String, cursor: &mut usize) {
-    match key.code {
-        KeyCode::Backspace => {
-            if *cursor > 0 {
-                let remove_start = byte_index_for_char(value, *cursor - 1);
-                let remove_end = byte_index_for_char(value, *cursor);
-                value.replace_range(remove_start..remove_end, "");
-                *cursor -= 1;
-            }
-        }
-        KeyCode::Left => {
-            *cursor = cursor.saturating_sub(1);
-        }
-        KeyCode::Right => {
-            *cursor = cursor.saturating_add(1).min(value.chars().count());
-        }
-        KeyCode::Char(ch) => {
-            let index = byte_index_for_char(value, *cursor);
-            value.insert(index, ch);
-            *cursor += 1;
-        }
-        _ => {}
     }
 }

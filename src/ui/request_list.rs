@@ -4,7 +4,7 @@ use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Alignment, Margin, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
 };
@@ -15,11 +15,19 @@ use super::chrome::panel_block_owned;
 use super::terminal_text::{terminal_grapheme_width, text_width, truncate_text_to_width};
 use super::{App, MouseHandler, PanelFocus, RequestTreeNodeSnapshot, View};
 use crate::app::SearchTitleStatus;
+use crate::text_input::{InputCursorMap, TextInput};
 
 pub(super) struct RequestListView {
     area: Rect,
     cache: RequestTreeRenderCache,
-    search_field: Option<Rect>,
+    search_field: Option<SearchInputHitRegion>,
+}
+
+struct SearchInputHitRegion {
+    field: Rect,
+    input: InputCursorMap,
+    revision: u64,
+    cursor: usize,
 }
 
 #[derive(Default)]
@@ -46,6 +54,9 @@ impl View for RequestListView {
     }
 
     fn set_area(&mut self, area: Rect) {
+        if self.area != area {
+            self.search_field = None;
+        }
         self.area = area;
     }
 
@@ -101,13 +112,19 @@ impl View for RequestListView {
 impl MouseHandler for RequestListView {
     fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         if app.is_request_search_editing() {
-            if let (MouseEventKind::Down(_), Some(field)) = (mouse.kind, self.search_field)
-                && field.contains((mouse.column, mouse.row).into())
+            if let (MouseEventKind::Down(_), Some(region)) = (mouse.kind, &self.search_field)
+                && region.revision == app.request_search_input_revision()
+                && app
+                    .request_search_input()
+                    .is_some_and(|input| input.cursor() == region.cursor)
+                && region.field.contains((mouse.column, mouse.row).into())
             {
-                let input_x = field.x.saturating_add(2);
-                let input_width = usize::from(field.width.saturating_sub(2));
-                let column = usize::from(mouse.column.saturating_sub(input_x));
-                app.set_request_search_cursor_from_column(input_width, column);
+                // The prefix behaves like the first visible input column, even
+                // when the query is horizontally scrolled.
+                let position = Position::new(mouse.column.max(region.input.area().x), mouse.row);
+                if let Some(cursor) = region.input.cursor_at(position) {
+                    app.set_request_search_cursor(cursor);
+                }
             }
             return true;
         }
@@ -248,7 +265,11 @@ fn render_search_highlights(frame: &mut Frame, app: &App, tree_area: Rect, rende
     }
 }
 
-fn render_search_overlay(frame: &mut Frame, app: &App, panel_area: Rect) -> Option<Rect> {
+fn render_search_overlay(
+    frame: &mut Frame,
+    app: &App,
+    panel_area: Rect,
+) -> Option<SearchInputHitRegion> {
     if !app.is_request_search_editing() || panel_area.width < 3 || panel_area.height < 3 {
         return None;
     }
@@ -280,19 +301,26 @@ fn render_search_overlay(frame: &mut Frame, app: &App, panel_area: Rect) -> Opti
     if !bordered {
         frame.render_widget(Clear, overlay);
     }
-    let input_width = usize::from(field.width.saturating_sub(2));
-    let viewport = app.request_search_input_viewport(input_width)?;
-    let line = Line::from(vec![
-        Span::raw("/ "),
-        Span::raw(viewport.before_cursor),
-        Span::styled(
-            viewport.cursor,
-            Style::default().add_modifier(Modifier::REVERSED),
-        ),
-        Span::raw(viewport.after_cursor),
-    ]);
-    frame.render_widget(Paragraph::new(line), field);
-    Some(field)
+    let input = app.request_search_input()?;
+    let prefix_width = field.width.min(2);
+    frame.render_widget(
+        Paragraph::new("/ "),
+        Rect::new(field.x, field.y, prefix_width, field.height),
+    );
+    let input_area = Rect::new(
+        field.x.saturating_add(prefix_width),
+        field.y,
+        field.width.saturating_sub(prefix_width),
+        field.height,
+    );
+    let cursor_map = TextInput::new(input.text(), Some(input.cursor()))
+        .render_with_cursor_map(input_area, frame.buffer_mut());
+    Some(SearchInputHitRegion {
+        field,
+        input: cursor_map,
+        revision: app.request_search_input_revision(),
+        cursor: input.cursor(),
+    })
 }
 
 pub(super) fn build_request_tree_items(app: &mut App) -> Vec<TreeItem<'static, String>> {
