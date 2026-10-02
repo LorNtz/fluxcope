@@ -1,10 +1,11 @@
 use super::terminal_text::{fit_text, text_width, text_width_bounded};
 use crate::app::BODY_TEXT_TAB_WIDTH;
 use crate::select::{SelectItem, SelectItemRole, SelectResolvedItems, SelectState};
+use crate::text_input::{InputCursorMap, TextInput};
 use ratatui::{
     buffer::Buffer,
     layout::{Margin, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     widgets::{
         Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, StatefulWidget, Widget,
@@ -133,7 +134,7 @@ impl<'a, Id> SelectWidget<'a, Id> {
         layout.dropdown_area = Some(dropdown_area);
         layout.options_area = Some(options_area);
         layout.first_visible_filtered_index = state.scroll_offset().min(max_start);
-        layout.visible_option_count = visible_option_count;
+        layout.visible_option_count = visible_option_count.min(filtered_count);
         layout
     }
 
@@ -199,11 +200,14 @@ impl<'a, Id> SelectWidget<'a, Id> {
         }
     }
 
-    fn field_text(&self) -> &str {
-        match self.state {
-            Some(state) if state.is_open() && !state.filter().is_empty() => state.filter(),
-            _ => self.selected_label.as_ref(),
-        }
+    pub(super) fn render_with_cursor_map(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+    ) -> (Rect, Option<InputCursorMap>) {
+        let field_area = self.field_area(area);
+        let input = self.render_field(field_area, self.style, buf, true);
+        (field_area, input)
     }
 }
 
@@ -213,7 +217,7 @@ impl<Id> Widget for SelectWidget<'_, Id> {
             return;
         }
 
-        self.render_field(self.field_area(area), self.style, buf);
+        let _ = self.render_field(self.field_area(area), self.style, buf, false);
     }
 }
 
@@ -237,9 +241,15 @@ impl<Id> Widget for SelectDropdownOverlay<'_, Id> {
 }
 
 impl<Id> SelectWidget<'_, Id> {
-    fn render_field(&self, area: Rect, style: Style, buf: &mut Buffer) {
+    fn render_field(
+        &self,
+        area: Rect,
+        style: Style,
+        buf: &mut Buffer,
+        map_cursor: bool,
+    ) -> Option<InputCursorMap> {
         if area.width < 3 || area.height < SELECT_FIELD_HEIGHT {
-            return;
+            return None;
         }
 
         let block = Block::default()
@@ -249,7 +259,7 @@ impl<Id> SelectWidget<'_, Id> {
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.is_empty() {
-            return;
+            return None;
         }
 
         let arrow = if self.is_open() { "▴" } else { "▾" };
@@ -261,22 +271,38 @@ impl<Id> SelectWidget<'_, Id> {
 
         let text_area_width = inner.width.saturating_sub(2);
         if text_area_width == 0 {
-            return;
+            return None;
         }
-        render_fitted_text(
-            self.field_text(),
-            Rect::new(inner.x, inner.y, text_area_width, 1),
-            style,
-            buf,
-        );
-
-        if let Some(state) = self.state.filter(|state| state.is_open()) {
-            let cursor =
-                usize::from(text_width(state.filter_prefix())).min(usize::from(text_area_width));
-            let cursor_x = inner.x.saturating_add(usize_to_u16(cursor));
-            if cursor_x < arrow_x {
-                buf[(cursor_x, inner.y)].set_style(style.add_modifier(Modifier::REVERSED));
+        if self.is_open() {
+            if self.state.is_some_and(|state| state.filter().is_empty()) {
+                render_fitted_text(
+                    self.selected_label.as_ref(),
+                    Rect::new(inner.x, inner.y, text_area_width, 1),
+                    style,
+                    buf,
+                );
             }
+            let text_area = Rect::new(inner.x, inner.y, text_area_width, 1);
+            let input = TextInput::new(
+                self.state.map_or("", SelectState::filter),
+                self.state.map(SelectState::filter_cursor),
+            )
+            .tab_width(BODY_TEXT_TAB_WIDTH)
+            .style(style);
+            if map_cursor {
+                Some(input.render_with_cursor_map(text_area, buf))
+            } else {
+                input.render(text_area, buf);
+                None
+            }
+        } else {
+            render_fitted_text(
+                self.selected_label.as_ref(),
+                Rect::new(inner.x, inner.y, text_area_width, 1),
+                style,
+                buf,
+            );
+            None
         }
     }
 
@@ -394,6 +420,7 @@ fn usize_to_u16(value: usize) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     #[test]
     fn select_uses_terminal_cells_for_width_and_clipping() {
@@ -440,7 +467,34 @@ mod tests {
         assert_eq!(rendered_cursor_x(&['界']), 3);
         assert_eq!(rendered_cursor_x(&['e', '\u{301}']), 2);
         assert_eq!(rendered_cursor_x(&['👩', '\u{200d}', '💻']), 3);
-        assert_eq!(rendered_cursor_x(&['界', '界', '界', '界']), 9);
+    }
+
+    #[test]
+    fn scrolled_filter_clicks_follow_visible_wide_text() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let items = [SelectItem::value(0, "anything")];
+        let mut state = SelectState::new();
+        state.open_with_selected(&items, Some(&0), 4);
+        for character in "abc界e\u{301}z".chars() {
+            state.handle_key(
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                &items,
+                4,
+            );
+        }
+        let widget = SelectWidget::new("anything", &items, Some(&state));
+        let area = Rect::new(0, 0, 9, 3);
+        let mut buffer = Buffer::empty(area);
+        let (_, map) = widget.render_with_cursor_map(area, &mut buffer);
+        let map = map.expect("open filter cursor geometry");
+        assert_eq!(buffer[(1, 1)].symbol(), "界");
+        assert_eq!(map.cursor_at(Position::new(1, 1)), Some(3));
+        assert_eq!(map.cursor_at(Position::new(2, 1)), Some(3));
+        assert_eq!(map.cursor_at(Position::new(3, 1)), Some("abc界".len()));
+        assert_eq!(
+            map.cursor_at(Position::new(5, 1)),
+            Some("abc界e\u{301}z".len())
+        );
     }
 
     #[test]

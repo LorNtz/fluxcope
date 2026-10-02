@@ -20,6 +20,7 @@ use crate::{
             MutationEffect, apply_mapping_mutation, find_mapping_preset_index,
         },
     },
+    text_input::TextInputState,
 };
 use crossterm::event::KeyEvent;
 use std::sync::LazyLock;
@@ -434,17 +435,15 @@ impl SettingsPopup {
                 from,
                 to,
                 active_field,
-                from_cursor,
-                to_cursor,
                 ..
             } => Some(RuleEditorState {
                 table: *table,
                 title: table.editor_title(),
-                from,
-                to,
+                from: from.text(),
+                to: to.text(),
                 active_field: *active_field,
-                from_cursor: *from_cursor,
-                to_cursor: *to_cursor,
+                from_cursor: from.cursor(),
+                to_cursor: to.cursor(),
             }),
             _ => None,
         }
@@ -454,16 +453,12 @@ impl SettingsPopup {
         let Some((from, to)) = self.rule_values(table, index) else {
             return;
         };
-        let from_cursor = from.chars().count();
-        let to_cursor = to.chars().count();
         self.mode = EditMode::RuleEditor {
             table,
             index,
-            from,
-            to,
+            from: TextInputState::new(from),
+            to: TextInputState::new(to),
             active_field: RuleEditField::From,
-            from_cursor,
-            to_cursor,
         };
     }
 

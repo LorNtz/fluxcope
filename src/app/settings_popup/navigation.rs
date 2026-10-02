@@ -1,6 +1,5 @@
-use super::field_editor::edit_text_value;
 use super::{
-    EditMode, ProxyRuleTable, ProxyWidget, RecordingWidget, RuleEditField,
+    DialogActionKind, EditMode, ProxyRuleTable, ProxyWidget, RecordingWidget, RuleEditField,
     SETTINGS_BROWSE_KEY_HINTS, SETTINGS_CHECKBOX_BROWSE_KEY_HINTS,
     SETTINGS_EMPTY_RULE_TABLE_KEY_HINTS, SETTINGS_FIELD_BROWSE_KEY_HINTS,
     SETTINGS_FIELD_EDIT_KEY_HINTS, SETTINGS_RULE_TABLE_BROWSE_KEY_HINTS,
@@ -8,14 +7,14 @@ use super::{
     SETTINGS_TOPIC_KEY_HINTS, SettingsKeyHint, SettingsPaneFocus, SettingsPopup,
     SettingsPopupAction, SettingsScrollRequest, SettingsTopic,
 };
-use crate::text_input::paste_text_value;
+use crate::text_input::InputEditOutcome;
 use crossterm::event::{KeyCode, KeyEvent};
 use tui_scrollview::ScrollViewState;
 
 impl SettingsPopup {
     pub(crate) fn key_hints(&self) -> &'static [SettingsKeyHint] {
         match self.mode {
-            EditMode::UnsavedConfirm => &[],
+            EditMode::UnsavedConfirm { .. } => &[],
             EditMode::Field { .. } => SETTINGS_FIELD_EDIT_KEY_HINTS,
             EditMode::PrefilterEditor { .. } => SETTINGS_FIELD_EDIT_KEY_HINTS,
             EditMode::PrefilterTable { .. } => self.prefilter_table_key_hints(),
@@ -68,7 +67,7 @@ impl SettingsPopup {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
         let action = match self.mode {
-            EditMode::UnsavedConfirm => self.handle_unsaved_confirm_key(key),
+            EditMode::UnsavedConfirm { .. } => self.handle_unsaved_confirm_key(key),
             EditMode::Field { .. } => self.handle_field_key(key),
             EditMode::PrefilterTable { .. } => self.handle_prefilter_table_key(key),
             EditMode::PrefilterEditor { .. } => self.handle_prefilter_editor_key(key),
@@ -83,26 +82,23 @@ impl SettingsPopup {
 
     pub(crate) fn handle_paste(&mut self, pasted: &str) -> bool {
         let changed = match &mut self.mode {
-            EditMode::Field { value, cursor, .. }
-            | EditMode::PrefilterEditor { value, cursor, .. } => {
-                paste_text_value(pasted, value, cursor)
+            EditMode::Field { input, .. } | EditMode::PrefilterEditor { input, .. } => {
+                input.paste(pasted) == InputEditOutcome::Changed
             }
             EditMode::RuleEditor {
                 from,
                 to,
                 active_field,
-                from_cursor,
-                to_cursor,
                 ..
             } => match active_field {
-                RuleEditField::From => paste_text_value(pasted, from, from_cursor),
-                RuleEditField::To => paste_text_value(pasted, to, to_cursor),
+                RuleEditField::From => from.paste(pasted) == InputEditOutcome::Changed,
+                RuleEditField::To => to.paste(pasted) == InputEditOutcome::Changed,
             },
             EditMode::Select { state, .. } => state.handle_paste(pasted),
             EditMode::Browse
             | EditMode::RuleTable { .. }
             | EditMode::PrefilterTable { .. }
-            | EditMode::UnsavedConfirm => return false,
+            | EditMode::UnsavedConfirm { .. } => return false,
         };
         if changed {
             if let EditMode::Field { kind, .. } = self.mode {
@@ -114,46 +110,29 @@ impl SettingsPopup {
     }
 
     pub fn handle_key_while_transaction_pending(&mut self, key: KeyEvent) -> SettingsPopupAction {
-        let mut action = match key.code {
-            KeyCode::Esc => self.handle_escape(),
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.focus = SettingsPaneFocus::Topics;
-                SettingsPopupAction::None
-            }
+        if !matches!(self.mode, EditMode::Browse) {
+            self.mark_transaction_pending();
+            return SettingsPopupAction::None;
+        }
+        match key.code {
+            KeyCode::Esc => self.mark_transaction_pending(),
+            KeyCode::Char('h') | KeyCode::Left => self.focus = SettingsPaneFocus::Topics,
             KeyCode::Char('l') | KeyCode::Right => {
                 self.focus = SettingsPaneFocus::Content;
                 self.request_selected_visible();
-                SettingsPopupAction::None
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.select_next();
-                SettingsPopupAction::None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.select_previous();
-                SettingsPopupAction::None
-            }
+            KeyCode::Char('j') | KeyCode::Down => self.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::PageDown => {
                 self.scroll.scroll_page_down();
-                SettingsPopupAction::None
             }
             KeyCode::PageUp => {
                 self.scroll.scroll_page_up();
-                SettingsPopupAction::None
             }
-            _ => {
-                self.draft
-                    .set_error("settings transaction is pending; wait for it to finish");
-                SettingsPopupAction::None
-            }
-        };
-        if action == SettingsPopupAction::Close {
-            self.draft
-                .set_error("settings transaction is pending; wait for it to finish");
-            action = SettingsPopupAction::None;
+            _ => self.mark_transaction_pending(),
         }
         self.bump_presentation_revision();
-        action
+        SettingsPopupAction::None
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
@@ -221,10 +200,57 @@ impl SettingsPopup {
     }
 
     fn handle_unsaved_confirm_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
+        let EditMode::UnsavedConfirm { focused_action } = &mut self.mode else {
+            return SettingsPopupAction::None;
+        };
         match key.code {
-            KeyCode::Enter => self.save_action(),
-            KeyCode::Esc => SettingsPopupAction::Close,
+            KeyCode::Enter => {
+                let action = *focused_action;
+                self.activate_dialog_action(action)
+            }
+            KeyCode::Esc => self.activate_dialog_action(DialogActionKind::KeepEditing),
+            KeyCode::Char('s')
+                if self.context.persistence == crate::settings::PersistenceMode::Persistent =>
+            {
+                self.activate_dialog_action(DialogActionKind::Save)
+            }
+            KeyCode::Char('a')
+                if self.context.persistence == crate::settings::PersistenceMode::Ephemeral =>
+            {
+                self.activate_dialog_action(DialogActionKind::Save)
+            }
+            KeyCode::Char('d') => self.activate_dialog_action(DialogActionKind::Discard),
+            KeyCode::Tab | KeyCode::Right => {
+                *focused_action = match focused_action {
+                    DialogActionKind::Save => DialogActionKind::Discard,
+                    DialogActionKind::Discard => DialogActionKind::KeepEditing,
+                    DialogActionKind::KeepEditing => DialogActionKind::Save,
+                };
+                SettingsPopupAction::None
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                *focused_action = match focused_action {
+                    DialogActionKind::Save => DialogActionKind::KeepEditing,
+                    DialogActionKind::Discard => DialogActionKind::Save,
+                    DialogActionKind::KeepEditing => DialogActionKind::Discard,
+                };
+                SettingsPopupAction::None
+            }
             _ => SettingsPopupAction::None,
+        }
+    }
+
+    pub(super) fn activate_dialog_action(
+        &mut self,
+        action: DialogActionKind,
+    ) -> SettingsPopupAction {
+        match action {
+            DialogActionKind::Save => self.save_action(),
+            DialogActionKind::Discard => SettingsPopupAction::Close,
+            DialogActionKind::KeepEditing => {
+                self.mode = EditMode::Browse;
+                SettingsPopupAction::None
+            }
         }
     }
 
@@ -295,31 +321,22 @@ impl SettingsPopup {
     fn handle_rule_editor_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
         match key.code {
             KeyCode::Esc => {
-                if let EditMode::RuleEditor { table, index, .. } = &self.mode {
-                    let table = *table;
-                    let index = *index;
-                    self.mode = EditMode::RuleTable {
-                        table,
-                        selected_rule: self.clamp_rule_index(table, index),
-                    };
-                }
+                self.handle_escape();
             }
             KeyCode::Enter => {
+                let mode = std::mem::replace(&mut self.mode, EditMode::Browse);
                 let EditMode::RuleEditor {
                     table,
                     index,
                     from,
                     to,
                     ..
-                } = &self.mode
+                } = mode
                 else {
+                    self.mode = mode;
                     return SettingsPopupAction::None;
                 };
-                let table = *table;
-                let index = *index;
-                let from = from.clone();
-                let to = to.clone();
-                self.apply_rule_editor_value(table, index, from, to);
+                self.apply_rule_editor_value(table, index, from.into_text(), to.into_text());
                 self.mode = EditMode::RuleTable {
                     table,
                     selected_rule: self.clamp_rule_index(table, index),
@@ -333,15 +350,13 @@ impl SettingsPopup {
                     from,
                     to,
                     active_field,
-                    from_cursor,
-                    to_cursor,
                     ..
                 } = &mut self.mode
                 {
                     match active_field {
-                        RuleEditField::From => edit_text_value(key, from, from_cursor),
-                        RuleEditField::To => edit_text_value(key, to, to_cursor),
-                    }
+                        RuleEditField::From => from.handle_key(key),
+                        RuleEditField::To => to.handle_key(key),
+                    };
                 }
             }
             _ => {}
@@ -350,10 +365,12 @@ impl SettingsPopup {
         SettingsPopupAction::None
     }
 
-    fn handle_escape(&mut self) -> SettingsPopupAction {
+    pub(super) fn handle_escape(&mut self) -> SettingsPopupAction {
         match &self.mode {
             EditMode::Browse if self.is_dirty() => {
-                self.mode = EditMode::UnsavedConfirm;
+                self.mode = EditMode::UnsavedConfirm {
+                    focused_action: DialogActionKind::KeepEditing,
+                };
                 SettingsPopupAction::None
             }
             EditMode::Browse => SettingsPopupAction::Close,
@@ -448,7 +465,7 @@ impl SettingsPopup {
         self.request_selected_visible();
     }
 
-    fn toggle_selected_checkbox(&mut self) {
+    pub(super) fn toggle_selected_checkbox(&mut self) {
         self.clamp_selected_row();
         match (self.topic, self.selected_row) {
             (SettingsTopic::Recording, _) => self.toggle_selected_recording_checkbox(),

@@ -33,7 +33,7 @@ fn app_with_mapping_paste_editor(table: ProxyRuleTable) -> App {
 }
 
 #[test]
-fn mapping_paste_inserts_unicode_at_character_cursor_in_both_fields_and_tables() {
+fn mapping_paste_inserts_unicode_before_the_cursor_in_both_fields_and_tables() {
     for table in [ProxyRuleTable::Remote, ProxyRuleTable::Local] {
         let mut app = app_with_mapping_paste_editor(table);
         let original_to = match table {
@@ -46,15 +46,14 @@ fn mapping_paste_inserts_unicode_at_character_cursor_in_both_fields_and_tables()
             assert!(app.handle_paste("雪🙂/片"));
             assert_eq!(app.settings_popup.presentation_revision(), before + 1);
             let editor = app.settings_popup.rule_editor().unwrap();
-            let (value, cursor, original) = match field {
-                RuleEditField::From => (editor.from, editor.from_cursor, "https://example.com/α終"),
-                RuleEditField::To => (editor.to, editor.to_cursor, original_to),
+            let (value, original) = match field {
+                RuleEditField::From => (editor.from, "https://example.com/α終"),
+                RuleEditField::To => (editor.to, original_to),
             };
             assert_eq!(
                 value,
                 format!("{}雪🙂/片終", original.trim_end_matches('終'))
             );
-            assert_eq!(cursor, original.chars().count() - 1 + 4);
             assert_eq!(editor.table, table);
             assert_eq!(editor.active_field, field);
             app.handle_key_event(key(KeyCode::Backspace));
@@ -244,7 +243,6 @@ fn settings_paste_targets_each_active_field_without_applying() {
         assert!(app.handle_paste(pasted));
         let edit = app.settings_popup.active_field_edit(kind).unwrap();
         assert_eq!(edit.value, expected);
-        assert_eq!(edit.cursor, original.chars().count() - left + 1);
         app.handle_paste("\r\n\t\u{1b}\0");
         assert_eq!(
             app.settings_popup.active_field_edit(kind).unwrap().value,
@@ -300,8 +298,14 @@ fn settings_paste_preserves_port_validation_and_field_cancellation() {
     app.handle_key_event(key(KeyCode::Enter));
     assert_eq!(app.settings_popup.draft().server.port, 8080);
     assert!(app.settings_popup.error().is_some());
-    app.handle_key_event(key(KeyCode::Enter));
-    for _ in 0..4 {
+    assert_eq!(
+        app.settings_popup
+            .active_field_edit(FieldEditKind::ServerPort)
+            .unwrap()
+            .value,
+        "65536"
+    );
+    for _ in 0..5 {
         app.handle_key_event(key(KeyCode::Backspace));
     }
     app.handle_paste("9090\r\n");
@@ -385,7 +389,6 @@ fn settings_paste_edits_only_the_active_prefilter_and_cancel_keeps_applied_value
     app.handle_paste("雪\r\n");
     let edit = app.settings_popup.prefilter_pattern_edit().unwrap();
     assert_eq!(edit.value, "https://example.com/雪終");
-    assert_eq!(edit.cursor, "https://example.com/雪".chars().count());
     assert_eq!(app.settings_popup.draft(), &settings);
     app.handle_key_event(key(KeyCode::Enter));
     let expected = vec![
@@ -453,7 +456,6 @@ fn settings_paste_filters_presets_at_unicode_cursor_without_committing() {
     app.handle_paste("雪\n");
     let state = app.settings_popup.select_state(target).unwrap();
     assert_eq!(state.filter(), "前雪猫");
-    assert_eq!(state.filter_prefix(), "前雪");
     app.handle_key_event(key(KeyCode::Backspace));
     assert_eq!(
         app.settings_popup.select_state(target).unwrap().filter(),
@@ -488,4 +490,113 @@ fn settings_paste_keeps_creation_available_without_an_implicit_commit() {
     assert_eq!(proxy.presets.len(), 1);
     assert_eq!(proxy.active_preset.as_deref(), Some("Preset 1"));
     assert_eq!(proxy.presets[0].name, "Preset 1");
+}
+
+#[test]
+fn settings_fields_delete_whole_graphemes_without_truncating_long_values() {
+    for (kind, topic, row) in [
+        (
+            FieldEditKind::CertificateStoreDir,
+            SettingsTopic::Certificate,
+            0,
+        ),
+        (
+            FieldEditKind::CertificatePemFilename,
+            SettingsTopic::Certificate,
+            1,
+        ),
+        (FieldEditKind::ProxyPresetName, SettingsTopic::Proxy, 1),
+    ] {
+        let mut app = App::with_settings(
+            settings_with_proxy_presets("dev"),
+            RecordingState::default(),
+        );
+        app.open_settings_popup();
+        app.settings_popup.select_topic_for_tests(topic);
+        focus_settings_content(&mut app);
+        for _ in 0..row {
+            app.handle_key_event(key(KeyCode::Down));
+        }
+        app.handle_key_event(key(KeyCode::Enter));
+        let original = app
+            .settings_popup
+            .active_field_edit(kind)
+            .unwrap()
+            .value
+            .to_owned();
+        let prefix = "x".repeat(520);
+        app.handle_paste(&format!("{prefix}a👨‍👩‍👧e\u{301}z"));
+        app.handle_key_event(key(KeyCode::Left));
+        app.handle_key_event(key(KeyCode::Backspace));
+        app.handle_key_event(key(KeyCode::Backspace));
+        app.handle_paste("X");
+        assert_eq!(
+            app.settings_popup.active_field_edit(kind).unwrap().value,
+            format!("{original}{prefix}aXz"),
+        );
+        assert!(app.take_settings_save_request().is_none());
+    }
+}
+
+#[test]
+fn mapping_fields_delete_whole_graphemes() {
+    for table in [ProxyRuleTable::Remote, ProxyRuleTable::Local] {
+        let mut app = app_with_mapping_paste_editor(table);
+        for field in [RuleEditField::From, RuleEditField::To] {
+            let original = match field {
+                RuleEditField::From => app.settings_popup.rule_editor().unwrap().from,
+                RuleEditField::To => app.settings_popup.rule_editor().unwrap().to,
+            }
+            .to_owned();
+            app.handle_paste("/a👨‍👩‍👧e\u{301}z");
+            app.handle_key_event(key(KeyCode::Left));
+            app.handle_key_event(key(KeyCode::Backspace));
+            app.handle_key_event(key(KeyCode::Backspace));
+            app.handle_paste("X");
+            let editor = app.settings_popup.rule_editor().unwrap();
+            assert_eq!(
+                match field {
+                    RuleEditField::From => editor.from,
+                    RuleEditField::To => editor.to,
+                },
+                format!("{original}/aXz"),
+            );
+            app.handle_key_event(key(KeyCode::Tab));
+        }
+        assert!(!app.settings_popup.is_dirty());
+        app.handle_key_event(key(KeyCode::Esc));
+        assert!(!app.settings_popup.is_dirty());
+    }
+}
+
+#[test]
+fn prefilter_input_deletes_whole_graphemes_before_apply() {
+    let mut app = App::new(ui_settings(true));
+    app.open_settings_popup();
+    app.settings_popup
+        .draft_mut_for_tests()
+        .recording
+        .prefilter
+        .include_url_patterns = vec![RecordingPrefilterPatternSettings::new(
+        "https://example.com/",
+    )];
+    app.settings_popup
+        .select_topic_for_tests(SettingsTopic::Recording);
+    app.settings_popup.select_prefilter_pattern(0);
+    app.handle_key_event(key(KeyCode::Enter));
+    app.handle_paste("a👨‍👩‍👧e\u{301}z");
+    app.handle_key_event(key(KeyCode::Left));
+    app.handle_key_event(key(KeyCode::Backspace));
+    app.handle_key_event(key(KeyCode::Backspace));
+    app.handle_paste("X");
+    app.handle_key_event(key(KeyCode::Enter));
+    assert_eq!(
+        app.settings_popup
+            .draft()
+            .recording
+            .prefilter
+            .include_url_patterns[0]
+            .pattern,
+        "https://example.com/aXz",
+    );
 }

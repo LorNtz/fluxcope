@@ -3,21 +3,23 @@ use std::borrow::Cow;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::Line,
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
-use tui_textarea::{CursorMove, TextArea};
 
 use crate::app::{
-    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, SelectTarget, SettingsPopup, SettingsSelectId,
+    BODY_TEXT_TAB_WIDTH, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, SelectTarget, SettingsClickTarget,
+    SettingsPopup, SettingsSelectId,
 };
 use crate::select::{SelectItem, SelectState};
+use crate::text_input::TextInput;
 use crate::ui::select_widget::SelectWidget;
 
 use super::content::{
     SettingsControlActivity, SettingsControlView, SettingsFieldStyle, SettingsSelectLayout,
 };
+use super::hit_regions::ClickRegion;
 
 pub(in crate::ui) const SETTING_TEXT_FIELD_HEIGHT: u16 = 3;
 // Border columns plus the explicit leading/trailing spaces in the rendered textarea text.
@@ -54,36 +56,38 @@ impl SettingsControlView for SettingsTextInputControl<'_> {
         }
     }
 
-    fn render(&self, area: Rect, style: SettingsFieldStyle, buf: &mut Buffer) {
+    fn click_target(&self, row: usize) -> SettingsClickTarget {
+        SettingsClickTarget::Field { row, cursor: None }
+    }
+
+    fn render(
+        &self,
+        row: usize,
+        area: Rect,
+        style: SettingsFieldStyle,
+        buf: &mut Buffer,
+    ) -> Option<ClickRegion> {
         if area.is_empty() {
-            return;
+            return None;
         }
 
         let field_width = self.render_width(area.width);
         if field_width < 3 || area.height < SETTING_TEXT_FIELD_HEIGHT {
-            return;
+            return None;
         }
 
-        let mut textarea = TextArea::new(vec![format!(" {} ", self.value.as_ref())]);
-        textarea.set_style(style.control);
-        textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(style.control),
-        );
-        textarea.set_cursor_line_style(Style::default());
-        if let Some(cursor) = self.cursor {
-            let cursor = u16::try_from(cursor.saturating_add(1)).unwrap_or(u16::MAX);
-            textarea.move_cursor(CursorMove::Jump(0, cursor));
-            textarea.set_cursor_style(style.control.add_modifier(Modifier::REVERSED));
-        } else {
-            textarea.set_cursor_style(Style::default());
-        }
-        (&textarea).render(
-            Rect::new(area.x, area.y, field_width, SETTING_TEXT_FIELD_HEIGHT),
-            buf,
-        );
+        let field_area = Rect::new(area.x, area.y, field_width, SETTING_TEXT_FIELD_HEIGHT);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(style.control);
+        let inner = block.inner(field_area);
+        block.render(field_area, buf);
+        let input = TextInput::new(self.value.as_ref(), self.cursor)
+            .padding(1)
+            .tab_width(BODY_TEXT_TAB_WIDTH)
+            .style(style.control)
+            .render_with_cursor_map(inner, buf);
         if let Some(hint) = self.hint
             && area.height > SETTING_TEXT_FIELD_HEIGHT
         {
@@ -97,6 +101,11 @@ impl SettingsControlView for SettingsTextInputControl<'_> {
                 buf,
             );
         }
+        Some(ClickRegion::input(
+            field_area,
+            self.click_target(row),
+            input,
+        ))
     }
 }
 
@@ -109,14 +118,28 @@ impl SettingsControlView for SettingsCheckboxControl {
         1
     }
 
-    fn render(&self, area: Rect, style: SettingsFieldStyle, buf: &mut Buffer) {
+    fn click_target(&self, row: usize) -> SettingsClickTarget {
+        SettingsClickTarget::Checkbox { row }
+    }
+
+    fn render(
+        &self,
+        row: usize,
+        area: Rect,
+        style: SettingsFieldStyle,
+        buf: &mut Buffer,
+    ) -> Option<ClickRegion> {
         if area.is_empty() {
-            return;
+            return None;
         }
 
         let mark = if self.checked { "[✓]" } else { "[ ]" };
         Paragraph::new(Line::styled(mark, style.control))
             .render(Rect::new(area.x, area.y, area.width.min(3), 1), buf);
+        Some(ClickRegion::new(
+            Rect::new(area.x, area.y, area.width.min(3), 1),
+            self.click_target(row),
+        ))
     }
 }
 
@@ -181,8 +204,33 @@ impl SettingsControlView for SettingsSelectControl<'_> {
         }
     }
 
-    fn render(&self, area: Rect, style: SettingsFieldStyle, buf: &mut Buffer) {
-        self.widget(style.control).render(area, buf);
+    fn click_target(&self, _row: usize) -> SettingsClickTarget {
+        SettingsClickTarget::Select(self.target)
+    }
+
+    fn render(
+        &self,
+        row: usize,
+        area: Rect,
+        style: SettingsFieldStyle,
+        buf: &mut Buffer,
+    ) -> Option<ClickRegion> {
+        let (field_area, input) = self.widget(style.control).render_with_cursor_map(area, buf);
+        if field_area.width < 3 || field_area.height < 3 {
+            return None;
+        }
+        Some(match input {
+            Some(input) => ClickRegion::input(
+                field_area,
+                SettingsClickTarget::SelectFilter { cursor: None },
+                input,
+            ),
+            None if self.is_open() => ClickRegion::new(
+                field_area,
+                SettingsClickTarget::SelectFilter { cursor: None },
+            ),
+            None => ClickRegion::new(field_area, self.click_target(row)),
+        })
     }
 
     fn has_overlay(&self) -> bool {

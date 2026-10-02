@@ -24,7 +24,7 @@ mod dialogs;
 use dialogs::{render_action_dialog, render_rule_editor_popup};
 mod hit_regions;
 use hit_regions::SettingsHitRegions;
-mod mouse;
+mod mouse_interaction;
 mod pages;
 use pages::settings_content_items_with_error as build_settings_content_items;
 mod prefilter;
@@ -100,11 +100,15 @@ pub(super) fn settings_popup_layout(area: Rect) -> SettingsPopupLayout {
 
 pub(super) struct SettingsPopupView {
     hit_regions: Option<SettingsHitRegions>,
+    mouse_state: mouse_interaction::SettingsMouseState,
 }
 
 impl SettingsPopupView {
     pub(super) fn new() -> Self {
-        Self { hit_regions: None }
+        Self {
+            hit_regions: None,
+            mouse_state: mouse_interaction::SettingsMouseState::default(),
+        }
     }
 
     pub(super) fn render(&mut self, frame: &mut Frame, app: &mut App) {
@@ -113,6 +117,7 @@ impl SettingsPopupView {
 
     pub(super) fn clear(&mut self) {
         self.hit_regions = None;
+        self.mouse_state.reset();
     }
 
     pub(super) fn handle_mouse(
@@ -121,15 +126,43 @@ impl SettingsPopupView {
         app: &mut App,
         root_area: Rect,
     ) -> bool {
+        use crossterm::event::MouseEventKind;
+        if !matches!(
+            mouse.kind,
+            MouseEventKind::Down(_)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) {
+            return true;
+        }
+        self.handle_mouse_at(mouse, app, root_area, std::time::Instant::now())
+    }
+
+    pub(super) fn handle_mouse_at(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        app: &mut App,
+        root_area: Rect,
+        now: std::time::Instant,
+    ) -> bool {
         let Some(hit_regions) = self
             .hit_regions
             .as_ref()
             .filter(|regions| regions.matches(root_area, &app.settings_popup))
         else {
+            self.mouse_state.reset();
             return true;
         };
 
-        mouse::handle_settings_popup_mouse(mouse, app, hit_regions);
+        mouse_interaction::handle_settings_popup_mouse(
+            mouse,
+            app,
+            hit_regions,
+            &mut self.mouse_state,
+            now,
+        );
         true
     }
 }
@@ -169,22 +202,25 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
     frame.render_widget(block, area);
 
     render_settings_topics(frame, &app.settings_popup, layout.topics);
-    let hit_regions = render_settings_content(
+    let mut hit_regions = render_settings_content(
         frame,
         &mut app.settings_popup,
         layout.content_panel,
         root_area,
-    );
-
-    if let Some(dialog) = app.settings_popup.unsaved_dialog() {
-        render_action_dialog(frame, &dialog, area);
-    }
+    )
+    .unwrap_or_else(|| SettingsHitRegions::empty(root_area, &app.settings_popup, Rect::default()));
 
     if let Some(editor) = app.settings_popup.rule_editor() {
-        render_rule_editor_popup(frame, editor, area);
+        let (area, controls) = render_rule_editor_popup(frame, editor, area);
+        hit_regions.set_overlay(area, controls);
     }
 
-    hit_regions
+    if let Some(dialog) = app.settings_popup.unsaved_dialog() {
+        let (area, controls) = render_action_dialog(frame, &dialog, area);
+        hit_regions.set_overlay(area, controls);
+    }
+
+    Some(hit_regions)
 }
 
 fn settings_key_hint_text(hints: &[SettingsKeyHint], max_width: u16) -> String {
@@ -314,8 +350,9 @@ fn render_settings_content(
         })
         .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
 
+        let mut controls = Vec::new();
         for (item, area) in content_layout.item_areas() {
-            item.render(&mut scroll_view, area, field_layout);
+            item.render(&mut scroll_view, area, field_layout, &mut controls);
         }
 
         for (item, area) in content_layout.item_areas() {
@@ -328,7 +365,7 @@ fn render_settings_content(
             item.render_overlay(&mut scroll_view, area, field_layout, overlay_bounds);
         }
         let hit_regions =
-            SettingsHitRegions::from_rendered(root_area, popup, area, &content_layout);
+            SettingsHitRegions::from_rendered(root_area, popup, area, &content_layout, controls);
 
         (scroll_target, scrolling_enabled, scroll_view, hit_regions)
     };

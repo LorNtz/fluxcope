@@ -346,6 +346,91 @@ fn request_search_mouse_click_positions_cursor_and_outside_click_is_modal() {
 }
 
 #[test]
+fn request_search_scrolled_wide_grapheme_clicks_insert_at_its_start() {
+    for cell in [0, 1] {
+        let mut app = App::new(ui_settings(false));
+        let prefix = "a".repeat(80);
+        let query = format!("{prefix}界e\u{301}👩\u{200d}💻z");
+        type_search_query(&mut app, &query);
+        let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+        let wide = find_buffer_text(&buffer, ui.request_list.area(), "界")
+            .expect("scrolled query should show its wide character");
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                wide.x + cell,
+                wide.y,
+            ),
+            &mut app,
+        );
+        app.handle_key_event(key(KeyCode::Char('X')));
+        assert_eq!(
+            app.request_search_query(),
+            Some(format!("{prefix}X界e\u{301}👩\u{200d}💻z").as_str())
+        );
+    }
+}
+
+#[test]
+fn request_search_prefix_clicks_follow_first_visible_column_when_scrolled() {
+    for prefix_column in [0, 1] {
+        let mut app = App::new(ui_settings(false));
+        let query = "0123456789abcdefghijklmnopqrstuvwxyz";
+        type_search_query(&mut app, query);
+        let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 40, 12);
+        let prefix = find_buffer_text(&buffer, ui.request_list.area(), "/ ")
+            .expect("search prefix should render");
+        let first_visible = buffer[(prefix.x + 2, prefix.y)].symbol();
+        let cursor = query.find(first_visible).expect("visible query character");
+        assert!(cursor > 0, "query should be horizontally scrolled");
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prefix.x + prefix_column,
+                prefix.y,
+            ),
+            &mut app,
+        );
+        app.handle_key_event(key(KeyCode::Char('X')));
+        let expected = format!("{}X{}", &query[..cursor], &query[cursor..]);
+        assert_eq!(app.request_search_query(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn request_search_ignores_cursor_maps_from_before_an_edit_or_cursor_move() {
+    for change_text in [false, true] {
+        let mut app = App::new(ui_settings(false));
+        type_search_query(&mut app, "abc");
+        let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 12);
+        let prefix = find_buffer_text(&buffer, ui.request_list.area(), "/ abc")
+            .expect("search input should render");
+        if change_text {
+            app.handle_key_event(key(KeyCode::Backspace));
+            app.handle_key_event(key(KeyCode::Char('d')));
+        } else {
+            app.handle_key_event(key(KeyCode::Home));
+        }
+
+        ui.handle_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                prefix.x + 3,
+                prefix.y,
+            ),
+            &mut app,
+        );
+        app.handle_key_event(key(KeyCode::Char('X')));
+        assert_eq!(
+            app.request_search_query(),
+            Some(if change_text { "abdX" } else { "Xabc" })
+        );
+    }
+}
+
+#[test]
 fn request_search_refresh_title_keeps_last_results_and_adds_marker() {
     let mut app = App::new(ui_settings(false));
     app.add_request(captured(0, "https://a.com/api/item"));

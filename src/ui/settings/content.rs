@@ -9,9 +9,10 @@ use ratatui::{
 };
 use tui_scrollview::ScrollView;
 
-use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SelectTarget};
+use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SelectTarget, SettingsClickTarget};
 
-use super::prefilter::{PrefilterTableHitRegion, PrefilterTableWidget};
+use super::hit_regions::ClickRegion;
+use super::prefilter::PrefilterTableWidget;
 use super::tables::ProxyRuleTableWidget;
 use crate::ui::terminal_text::{fit_text_to_width, text_width};
 
@@ -169,7 +170,15 @@ pub(super) trait SettingsControlView {
     fn activity(&self) -> SettingsControlActivity {
         SettingsControlActivity::Idle
     }
-    fn render(&self, area: Rect, style: SettingsFieldStyle, buf: &mut Buffer);
+    fn render(
+        &self,
+        row: usize,
+        area: Rect,
+        style: SettingsFieldStyle,
+        buf: &mut Buffer,
+    ) -> Option<ClickRegion>;
+
+    fn click_target(&self, row: usize) -> SettingsClickTarget;
 
     fn has_overlay(&self) -> bool {
         false
@@ -214,7 +223,14 @@ impl<'a> SettingsFieldRow<'a> {
         self.control.height_for_width(control_width).max(1)
     }
 
-    fn render_into(&self, area: Rect, layout: SettingsFieldLayout, buf: &mut Buffer) {
+    fn render_into(
+        &self,
+        row: usize,
+        area: Rect,
+        layout: SettingsFieldLayout,
+        buf: &mut Buffer,
+        regions: &mut Vec<ClickRegion>,
+    ) {
         if area.is_empty() {
             return;
         }
@@ -230,7 +246,16 @@ impl<'a> SettingsFieldRow<'a> {
         if !areas.label.is_empty() {
             Line::styled(self.label.as_ref(), style.control).render(areas.label, buf);
         }
-        self.control.render(areas.control, style, buf);
+        let label = Rect::new(
+            areas.label.x,
+            areas.label.y,
+            self.label_width().min(areas.label.width),
+            areas.label.height,
+        );
+        regions.push(ClickRegion::new(label, self.control.click_target(row)));
+        if let Some(region) = self.control.render(row, areas.control, style, buf) {
+            regions.push(region);
+        }
     }
 
     fn render_overlay(
@@ -267,11 +292,14 @@ impl<'a> SettingsFieldRow<'a> {
 pub(super) struct SettingsFieldRowWidget<'a, 'b> {
     pub(super) row: &'b SettingsFieldRow<'a>,
     pub(super) layout: SettingsFieldLayout,
+    pub(super) index: usize,
+    pub(super) regions: &'b mut Vec<ClickRegion>,
 }
 
 impl Widget for SettingsFieldRowWidget<'_, '_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.row.render_into(area, self.layout, buf);
+        self.row
+            .render_into(self.index, area, self.layout, buf, self.regions);
     }
 }
 
@@ -301,10 +329,16 @@ impl SettingsFullWidthTable<'_> {
         }
     }
 
-    fn render(&self, scroll_view: &mut ScrollView, area: Rect) {
+    fn render(&self, scroll_view: &mut ScrollView, area: Rect, regions: &mut Vec<ClickRegion>) {
         match self {
-            Self::Proxy(table) => scroll_view.render_widget(table, area),
-            Self::Prefilter(table) => scroll_view.render_widget(table, area),
+            Self::Proxy(table) => {
+                scroll_view.render_widget(table, area);
+                table.click_regions(area, regions);
+            }
+            Self::Prefilter(table) => scroll_view.render_widget(
+                super::prefilter::PrefilterTableRender { table, regions },
+                area,
+            ),
         }
     }
 
@@ -335,13 +369,6 @@ impl SettingsFullWidthTable<'_> {
                         hit: SettingsTableHit::Prefilter,
                     })
             }
-        }
-    }
-
-    pub(super) fn prefilter_hit_region(&self, area: Rect) -> Option<PrefilterTableHitRegion> {
-        match self {
-            Self::Prefilter(table) => Some(table.hit_region(area)),
-            Self::Proxy(_) => None,
         }
     }
 }
@@ -376,14 +403,27 @@ impl SettingsContentItem<'_> {
         scroll_view: &mut ScrollView,
         area: Rect,
         layout: SettingsFieldLayout,
+        regions: &mut Vec<ClickRegion>,
     ) {
         match self {
             Self::Line(line) => scroll_view.render_widget(Paragraph::new(line.clone()), area),
             Self::Divider { title } => scroll_view.render_widget(SettingsDivider { title }, area),
-            Self::Field { field, .. } => {
-                scroll_view.render_widget(SettingsFieldRowWidget { row: field, layout }, area)
+            Self::Field { row, field } => scroll_view.render_widget(
+                SettingsFieldRowWidget {
+                    row: field,
+                    index: *row,
+                    layout,
+                    regions,
+                },
+                area,
+            ),
+            Self::FullWidthTable { row, table } => {
+                regions.push(ClickRegion::new(
+                    area,
+                    SettingsClickTarget::Table { row: *row },
+                ));
+                table.render(scroll_view, area, regions);
             }
-            Self::FullWidthTable { table, .. } => table.render(scroll_view, area),
         }
     }
 

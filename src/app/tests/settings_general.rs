@@ -152,7 +152,7 @@ fn dirty_settings_popup_esc_opens_unsaved_confirm() {
 }
 
 #[test]
-fn unsaved_confirm_esc_discards_and_closes_settings() {
+fn unsaved_confirm_esc_returns_to_dirty_settings() {
     let mut app = App::new(ui_settings(true));
     app.handle_key_event(key(KeyCode::Char('m')));
     app.settings_popup
@@ -163,12 +163,15 @@ fn unsaved_confirm_esc_discards_and_closes_settings() {
 
     app.handle_key_event(key(KeyCode::Esc));
 
-    assert!(!app.settings_popup.visible);
+    assert!(app.settings_popup.visible);
+    assert!(!app.settings_popup.is_confirming_unsaved());
+    assert!(app.settings_popup.is_dirty());
+    assert!(!app.settings_popup.draft().recording.start_record_on_launch);
     assert!(app.take_settings_save_request().is_none());
 }
 
 #[test]
-fn unsaved_confirm_enter_queues_save_request() {
+fn unsaved_confirm_save_selection_queues_save_request() {
     let mut app = App::new(ui_settings(true));
     app.handle_key_event(key(KeyCode::Char('m')));
     app.settings_popup
@@ -177,6 +180,7 @@ fn unsaved_confirm_enter_queues_save_request() {
         .start_record_on_launch = false;
     app.handle_key_event(key(KeyCode::Esc));
 
+    app.handle_key_event(key(KeyCode::Tab));
     app.handle_key_event(key(KeyCode::Enter));
 
     assert!(app.take_settings_save_request().is_some());
@@ -349,4 +353,240 @@ fn pending_transaction_keeps_popup_readable_but_blocks_edits_and_saves() {
     assert_eq!(app.settings_popup.draft(), &before);
     assert!(app.take_settings_save_request().is_none());
     assert!(app.settings_popup.error().is_some());
+}
+
+#[test]
+fn settings_clicks_retain_rejected_text_and_apply_before_switching_topics() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut popup = SettingsPopup::new();
+    popup.open(AppSettings::default());
+    popup.handle_click(
+        Click::Field {
+            row: 0,
+            cursor: None,
+        },
+        false,
+        false,
+    );
+    for _ in 0..popup
+        .active_field_edit(FieldEditKind::ServerPort)
+        .unwrap()
+        .value
+        .len()
+    {
+        popup.handle_key(key(KeyCode::Backspace));
+    }
+    popup.handle_paste("65536");
+    popup.handle_click(Click::Topic(SettingsTopic::Certificate), false, false);
+    assert_eq!(popup.topic, SettingsTopic::Server);
+    assert_eq!(
+        popup
+            .active_field_edit(FieldEditKind::ServerPort)
+            .unwrap()
+            .value,
+        "65536"
+    );
+    assert_eq!(
+        popup.handle_click(Click::Outside, false, false),
+        SettingsPopupAction::None
+    );
+    popup.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        popup
+            .active_field_edit(FieldEditKind::ServerPort)
+            .unwrap()
+            .value,
+        "65536"
+    );
+    for _ in 0..5 {
+        popup.handle_key(key(KeyCode::Backspace));
+    }
+    popup.handle_paste("9191");
+    popup.handle_click(Click::Topic(SettingsTopic::Certificate), false, false);
+    assert_eq!(popup.draft().server.port, 9191);
+    assert_eq!(popup.topic, SettingsTopic::Certificate);
+    assert_eq!(popup.focus, SettingsPaneFocus::Topics);
+}
+
+#[test]
+fn settings_input_chrome_keeps_cursor_and_new_input_starts_at_end() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut settings = AppSettings::default();
+    settings.certificate.store_dir = "/tmp/e\u{301}雪".to_string();
+    settings.certificate.pem_filename = "ca.pem".to_string();
+    let mut popup = SettingsPopup::new();
+    popup.open(settings);
+    popup.handle_click(Click::Topic(SettingsTopic::Certificate), false, false);
+    popup.handle_click(
+        Click::Field {
+            row: 0,
+            cursor: Some("/tmp/e".len()),
+        },
+        false,
+        false,
+    );
+    popup.handle_click(
+        Click::Field {
+            row: 0,
+            cursor: None,
+        },
+        false,
+        false,
+    );
+    popup.handle_paste("新");
+    popup.handle_click(
+        Click::Field {
+            row: 1,
+            cursor: None,
+        },
+        false,
+        false,
+    );
+    assert_eq!(popup.draft().certificate.store_dir, "/tmp/新e\u{301}雪");
+    popup.handle_key(key(KeyCode::Char('X')));
+    assert_eq!(
+        popup
+            .active_field_edit(FieldEditKind::CertificatePemFilename)
+            .unwrap()
+            .value,
+        "ca.pemX"
+    );
+    popup.handle_key(key(KeyCode::Backspace));
+    popup.handle_click(
+        Click::Field {
+            row: 1,
+            cursor: Some(usize::MAX),
+        },
+        false,
+        false,
+    );
+    popup.handle_paste(".crt");
+    popup.handle_click(Click::Outside, false, false);
+    assert_eq!(popup.draft().certificate.pem_filename, "ca.pem.crt");
+    assert!(popup.is_confirming_unsaved());
+}
+
+#[test]
+fn settings_confirmation_focus_cycles_and_explicit_actions_preserve_or_discard_draft() {
+    use crate::app::{DialogActionKind as Action, SettingsClickTarget as Click};
+    let mut popup = SettingsPopup::new();
+    popup.open(AppSettings::default());
+    popup.draft_mut_for_tests().server.port = 9191;
+    popup.handle_click(Click::Outside, false, false);
+    assert_eq!(
+        popup.unsaved_dialog().unwrap().focused_action,
+        Action::KeepEditing
+    );
+    assert_eq!(
+        popup.handle_key(key(KeyCode::Enter)),
+        SettingsPopupAction::None
+    );
+    assert!(!popup.is_confirming_unsaved());
+    assert_eq!(popup.draft().server.port, 9191);
+    popup.handle_click(Click::Outside, false, false);
+    for (code, expected) in [
+        (KeyCode::Tab, Action::Save),
+        (KeyCode::Right, Action::Discard),
+        (KeyCode::BackTab, Action::Save),
+        (KeyCode::Left, Action::KeepEditing),
+    ] {
+        popup.handle_key(key(code));
+        assert_eq!(popup.unsaved_dialog().unwrap().focused_action, expected);
+    }
+    popup.handle_click(Click::Outside, false, false);
+    assert!(!popup.is_confirming_unsaved());
+    assert_eq!(popup.draft().server.port, 9191);
+    popup.handle_click(Click::Outside, false, false);
+    assert_eq!(
+        popup.handle_click(Click::DialogAction(Action::Discard), false, false),
+        SettingsPopupAction::Close
+    );
+}
+
+#[test]
+fn settings_pending_actions_preserve_inline_text_and_confirmation_draft() {
+    use crate::app::{DialogActionKind as Action, SettingsClickTarget as Click};
+    let mut popup = SettingsPopup::new();
+    popup.open(AppSettings::default());
+    popup.handle_click(
+        Click::Field {
+            row: 0,
+            cursor: Some(0),
+        },
+        false,
+        false,
+    );
+    popup.handle_paste("9");
+    let value = popup
+        .active_field_edit(FieldEditKind::ServerPort)
+        .unwrap()
+        .value
+        .to_owned();
+    for target in [
+        Click::Outside,
+        Click::Topic(SettingsTopic::Recording),
+        Click::Checkbox { row: 0 },
+    ] {
+        assert_eq!(
+            popup.handle_click(target, false, true),
+            SettingsPopupAction::None
+        );
+        assert_eq!(
+            popup
+                .active_field_edit(FieldEditKind::ServerPort)
+                .unwrap()
+                .value,
+            value
+        );
+    }
+    for code in [KeyCode::Esc, KeyCode::Down, KeyCode::Enter] {
+        popup.handle_key_while_transaction_pending(key(code));
+        assert_eq!(
+            popup
+                .active_field_edit(FieldEditKind::ServerPort)
+                .unwrap()
+                .value,
+            value
+        );
+    }
+    popup.handle_key(key(KeyCode::Esc));
+    popup.draft_mut_for_tests().server.port = 9191;
+    popup.handle_click(Click::Outside, false, false);
+    for action in [Action::Save, Action::Discard, Action::KeepEditing] {
+        assert_eq!(
+            popup.handle_click(Click::DialogAction(action), false, true),
+            SettingsPopupAction::None
+        );
+        assert!(popup.is_confirming_unsaved());
+        assert_eq!(popup.draft().server.port, 9191);
+    }
+}
+
+#[test]
+fn settings_confirmation_save_validates_and_failures_preserve_the_draft() {
+    use crate::app::{DialogActionKind as Action, SettingsClickTarget as Click};
+    let mut popup = SettingsPopup::new();
+    popup.open(AppSettings::default());
+    popup.draft_mut_for_tests().server.port = 0;
+    popup.handle_click(Click::Outside, false, false);
+    assert_eq!(
+        popup.handle_click(Click::DialogAction(Action::Save), false, false),
+        SettingsPopupAction::None
+    );
+    assert!(popup.visible);
+    assert_eq!(popup.draft().server.port, 0);
+    assert!(popup.error().is_some());
+    popup.draft_mut_for_tests().server.port = 9191;
+    popup.handle_click(Click::Outside, false, false);
+    let SettingsPopupAction::Save(draft) =
+        popup.handle_click(Click::DialogAction(Action::Save), false, false)
+    else {
+        panic!("valid confirmation must request a save");
+    };
+    assert_eq!(draft.server.port, 9191);
+    popup.mark_save_failed("write failed".to_string());
+    assert!(popup.visible);
+    assert_eq!(popup.draft().server.port, 9191);
+    assert!(popup.is_dirty());
+    assert!(popup.error().is_some());
 }

@@ -6,6 +6,7 @@ use crate::{
     settings::{
         AppSettings, ConfigMode, SettingsUiContext, mapping_ops::find_mapping_preset_index,
     },
+    text_input::TextInputState,
 };
 use tui_scrollview::ScrollViewState;
 
@@ -13,6 +14,7 @@ use super::settings_draft::SettingsDraft;
 
 mod recording;
 pub(crate) use recording::{PrefilterPatternEditState, RecordingWidget};
+mod click_actions;
 mod field_editor;
 mod navigation;
 mod proxy;
@@ -269,6 +271,7 @@ pub(crate) struct RuleEditorState<'a> {
 pub enum DialogActionKind {
     Save,
     Discard,
+    KeepEditing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,6 +286,8 @@ pub struct ActionDialog {
     pub title: &'static str,
     pub message_lines: Vec<&'static str>,
     pub actions: Vec<DialogAction>,
+    pub focused_action: DialogActionKind,
+    pub close_action: DialogActionKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -290,6 +295,49 @@ pub enum SettingsPopupAction {
     None,
     Save(Arc<AppSettings>),
     Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsClickTarget {
+    Topic(SettingsTopic),
+    Background,
+    Table {
+        row: usize,
+    },
+    Field {
+        row: usize,
+        cursor: Option<usize>,
+    },
+    Checkbox {
+        row: usize,
+    },
+    Select(SelectTarget),
+    SelectOption {
+        index: usize,
+    },
+    SelectFilter {
+        cursor: Option<usize>,
+    },
+    PrefilterRow {
+        index: usize,
+        toggle: bool,
+    },
+    PrefilterInput {
+        index: usize,
+        cursor: Option<usize>,
+    },
+    RuleRow {
+        table: ProxyRuleTable,
+        index: usize,
+        toggle: bool,
+        field: RuleEditField,
+    },
+    RuleField {
+        field: RuleEditField,
+        cursor: Option<usize>,
+    },
+    DialogAction(DialogActionKind),
+    Outside,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,26 +589,24 @@ enum EditMode {
     RuleEditor {
         table: ProxyRuleTable,
         index: usize,
-        from: String,
-        to: String,
+        from: TextInputState,
+        to: TextInputState,
         active_field: RuleEditField,
-        from_cursor: usize,
-        to_cursor: usize,
     },
     PrefilterTable {
         selected_pattern: usize,
     },
     PrefilterEditor {
         index: usize,
-        value: String,
-        cursor: usize,
+        input: TextInputState,
     },
     Field {
         kind: FieldEditKind,
-        value: String,
-        cursor: usize,
+        input: TextInputState,
     },
-    UnsavedConfirm,
+    UnsavedConfirm {
+        focused_action: DialogActionKind,
+    },
 }
 
 enum SelectCommitEffect {
@@ -681,25 +727,33 @@ impl SettingsPopup {
     }
 
     pub fn is_confirming_unsaved(&self) -> bool {
-        matches!(self.mode, EditMode::UnsavedConfirm)
+        matches!(self.mode, EditMode::UnsavedConfirm { .. })
     }
 
     pub fn unsaved_dialog(&self) -> Option<ActionDialog> {
-        self.is_confirming_unsaved().then(|| ActionDialog {
+        let EditMode::UnsavedConfirm { focused_action } = self.mode else {
+            return None;
+        };
+        Some(ActionDialog {
             title: "Unsaved Settings",
             message_lines: vec!["You have unsaved setting changes."],
             actions: vec![
                 DialogAction {
                     label: self.commit_label(),
-                    key_hint: "Enter",
+                    key_hint: match self.context.persistence {
+                        crate::settings::PersistenceMode::Persistent => "s",
+                        crate::settings::PersistenceMode::Ephemeral => "a",
+                    },
                     kind: DialogActionKind::Save,
                 },
                 DialogAction {
                     label: "Discard",
-                    key_hint: "Esc",
+                    key_hint: "d",
                     kind: DialogActionKind::Discard,
                 },
             ],
+            focused_action,
+            close_action: DialogActionKind::KeepEditing,
         })
     }
 
@@ -727,6 +781,12 @@ impl SettingsPopup {
         self.mode = EditMode::Browse;
         self.draft.set_error(message);
         self.visible = true;
+    }
+
+    pub(crate) fn mark_transaction_pending(&mut self) {
+        self.draft
+            .set_error("settings transaction is pending; wait for it to finish");
+        self.bump_presentation_revision();
     }
 
     pub fn validate(&self) -> Result<(), String> {

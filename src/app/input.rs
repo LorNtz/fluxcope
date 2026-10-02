@@ -127,12 +127,19 @@ impl App {
                     return;
                 }
                 let action = self.settings_popup.handle_key(key);
-                match action {
-                    SettingsPopupAction::None => {}
-                    SettingsPopupAction::Save(draft) => self.queue_settings_save(draft),
-                    SettingsPopupAction::Close => self.close_settings_popup(),
-                }
+                self.handle_settings_popup_action(action);
             }
+        }
+    }
+
+    pub(crate) fn handle_settings_popup_action(&mut self, action: SettingsPopupAction) {
+        match action {
+            SettingsPopupAction::None => {}
+            SettingsPopupAction::Save(draft) => self.queue_settings_save(draft),
+            SettingsPopupAction::Close if self.settings_transaction_pending() => {
+                self.settings_popup.mark_transaction_pending();
+            }
+            SettingsPopupAction::Close => self.close_settings_popup(),
         }
     }
 
@@ -294,9 +301,7 @@ impl App {
 
     fn queue_settings_save(&mut self, draft: std::sync::Arc<crate::settings::AppSettings>) {
         if self.settings_transaction_pending() {
-            self.settings_popup.mark_save_failed(
-                "settings transaction is pending; wait for it to finish".to_string(),
-            );
+            self.settings_popup.mark_transaction_pending();
             return;
         }
         self.pending_settings_save = Some(draft);

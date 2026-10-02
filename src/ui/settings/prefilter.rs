@@ -1,46 +1,26 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Margin, Position, Rect},
-    style::{Color, Modifier, Style},
+    layout::Rect,
+    style::{Color, Style},
     text::Line,
     widgets::{
         Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
         StatefulWidget, Widget,
     },
 };
-use tui_textarea::{CursorMove, TextArea};
 
-use crate::app::{BODY_TEXT_TAB_WIDTH, PrefilterPatternEditState, SettingsPopup};
+use crate::app::{
+    BODY_TEXT_TAB_WIDTH, PrefilterPatternEditState, SettingsClickTarget, SettingsPopup,
+};
 use crate::settings::RecordingPrefilterPatternSettings;
+use crate::text_input::TextInput;
 
+use super::hit_regions::ClickRegion;
 use super::tables::{RuleParentState, SettingsTableViewport, settings_table_height};
 use crate::ui::terminal_text::fit_text_to_width;
 
 const PREFILTER_ON_COLUMN_WIDTH: usize = 4;
 const PREFILTER_COLUMN_GAP: usize = 1;
-
-#[derive(Clone, Copy)]
-pub(super) struct PrefilterTableHitRegion {
-    area: Rect,
-    inner: Rect,
-    viewport: SettingsTableViewport,
-    row_count: usize,
-    checkbox_end: u16,
-}
-
-impl PrefilterTableHitRegion {
-    pub(super) fn pattern_hit(self, position: Position) -> Option<(usize, bool)> {
-        if !self.inner.contains(position) {
-            return None;
-        }
-
-        let index = self
-            .viewport
-            .visible_range(self.row_count)
-            .find(|index| self.viewport.row_y(self.area, *index) == Some(position.y))?;
-        Some((index, position.x < self.checkbox_end))
-    }
-}
 
 pub(in crate::ui) struct PrefilterTableWidget<'a> {
     patterns: &'a [RecordingPrefilterPatternSettings],
@@ -73,28 +53,21 @@ impl PrefilterTableWidget<'_> {
     pub(super) fn viewport(&self, height: u16) -> SettingsTableViewport {
         SettingsTableViewport::new(self.row_count(), self.scroll_offset, height)
     }
+}
 
-    pub(super) fn hit_region(&self, area: Rect) -> PrefilterTableHitRegion {
-        let inner = area.inner(Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        let viewport = self.viewport(area.height);
-        let checkbox_end = inner
-            .x
-            .saturating_add(u16::try_from(PREFILTER_ON_COLUMN_WIDTH).unwrap_or(u16::MAX));
-        PrefilterTableHitRegion {
-            area,
-            inner,
-            viewport,
-            row_count: self.row_count(),
-            checkbox_end,
-        }
+pub(super) struct PrefilterTableRender<'a, 'b> {
+    pub(super) table: &'b PrefilterTableWidget<'a>,
+    pub(super) regions: &'b mut Vec<ClickRegion>,
+}
+
+impl Widget for PrefilterTableRender<'_, '_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.table.render_into(area, buf, self.regions);
     }
 }
 
-impl Widget for &PrefilterTableWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+impl PrefilterTableWidget<'_> {
+    fn render_into(&self, area: Rect, buf: &mut Buffer, regions: &mut Vec<ClickRegion>) {
         if area.is_empty() {
             return;
         }
@@ -154,6 +127,25 @@ impl Widget for &PrefilterTableWidget<'_> {
                 break;
             }
             let row_area = Rect::new(inner.x, y, table_width, 1);
+            regions.push(ClickRegion::new(
+                row_area,
+                SettingsClickTarget::PrefilterRow {
+                    index,
+                    toggle: false,
+                },
+            ));
+            regions.push(ClickRegion::new(
+                Rect::new(
+                    row_area.x,
+                    row_area.y,
+                    row_area.width.min(PREFILTER_ON_COLUMN_WIDTH as u16),
+                    1,
+                ),
+                SettingsClickTarget::PrefilterRow {
+                    index,
+                    toggle: true,
+                },
+            ));
             let row_selected = self.active_pattern == Some(index);
             let row_style = if row_selected {
                 Style::default().bg(Color::White).fg(Color::DarkGray)
@@ -169,7 +161,19 @@ impl Widget for &PrefilterTableWidget<'_> {
                     checkbox_style,
                     buf,
                 );
-                render_pattern_editor(edit, prefilter_pattern_area(row_area), buf);
+                let input_area = prefilter_pattern_area(row_area);
+                let input = TextInput::new(edit.value, Some(edit.cursor))
+                    .tab_width(BODY_TEXT_TAB_WIDTH)
+                    .style(Style::default().fg(Color::Indexed(208)))
+                    .render_with_cursor_map(input_area, buf);
+                regions.push(ClickRegion::input(
+                    input_area,
+                    SettingsClickTarget::PrefilterInput {
+                        index,
+                        cursor: None,
+                    },
+                    input,
+                ));
                 continue;
             }
             render_prefilter_table_columns(
@@ -255,20 +259,6 @@ fn prefilter_pattern_area(area: Rect) -> Rect {
 
 fn pattern_mark(enabled: bool) -> &'static str {
     if enabled { "[✓]" } else { "[ ]" }
-}
-
-fn render_pattern_editor(edit: PrefilterPatternEditState<'_>, area: Rect, buf: &mut Buffer) {
-    if area.is_empty() {
-        return;
-    }
-    let mut textarea = TextArea::new(vec![edit.value.to_string()]);
-    let style = Style::default().fg(Color::Indexed(208));
-    textarea.set_style(style);
-    textarea.set_cursor_line_style(style);
-    textarea.set_cursor_style(style.add_modifier(Modifier::REVERSED));
-    let cursor = u16::try_from(edit.cursor).unwrap_or(u16::MAX);
-    textarea.move_cursor(CursorMove::Jump(0, cursor));
-    (&textarea).render(area, buf);
 }
 
 pub(super) fn prefilter_table_widget(

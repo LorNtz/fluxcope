@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::request_search::{SearchJobOutcome, SearchRequestKey, SearchResults};
 
-use super::single_line_input::SingleLineInput;
+use crate::text_input::TextInputState;
 
 mod controller;
 
@@ -53,7 +53,7 @@ struct TransientReasons {
 
 #[derive(Clone, Debug)]
 struct EditingSearch {
-    input: SingleLineInput,
+    input: TextInputState,
     active: Option<ActiveSearch>,
     rollback: EditingRollback,
     transient_openings: HashMap<Vec<String>, TransientReasons>,
@@ -97,6 +97,7 @@ enum OutcomeApplication {
 }
 
 const MAX_STALE_MATCH_PROBES: usize = 64;
+const MAX_REQUEST_SEARCH_BYTES: usize = 512;
 
 #[derive(Debug, Default)]
 pub(crate) struct RequestListSearch {
@@ -127,8 +128,9 @@ impl RequestListSearch {
                 return;
             }
         };
+        self.next_generation = self.next_generation.wrapping_add(1);
         self.mode = RequestSearchMode::Editing(EditingSearch {
-            input: SingleLineInput::default(),
+            input: TextInputState::with_max_bytes(MAX_REQUEST_SEARCH_BYTES),
             active: None,
             rollback: EditingRollback {
                 selected_path,
@@ -141,14 +143,14 @@ impl RequestListSearch {
         self.dispatch = Some(DispatchIntent::Cancel);
     }
 
-    fn input_mut(&mut self) -> Option<&mut SingleLineInput> {
+    fn input_mut(&mut self) -> Option<&mut TextInputState> {
         match &mut self.mode {
             RequestSearchMode::Editing(editing) => Some(&mut editing.input),
             RequestSearchMode::Idle | RequestSearchMode::Committed(_) => None,
         }
     }
 
-    fn input(&self) -> Option<&SingleLineInput> {
+    fn input(&self) -> Option<&TextInputState> {
         match &self.mode {
             RequestSearchMode::Editing(editing) => Some(&editing.input),
             RequestSearchMode::Idle | RequestSearchMode::Committed(_) => None,

@@ -1001,10 +1001,142 @@ fn unsaved_confirm_enter_validation_error_returns_to_settings() {
     app.settings_popup.draft_mut_for_tests().server.port = 0;
     app.handle_key_event(key(KeyCode::Esc));
 
+    app.handle_key_event(key(KeyCode::Tab));
     app.handle_key_event(key(KeyCode::Enter));
 
     assert!(app.settings_popup.visible);
     assert!(!app.settings_popup.is_confirming_unsaved());
     assert!(app.settings_popup.error().is_some());
     assert!(app.take_settings_save_request().is_none());
+}
+
+#[test]
+fn settings_rule_clicks_keep_fields_atomic_and_checkbox_clicks_out_of_editor() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut popup = SettingsPopup::new();
+    popup.open(settings_with_proxy_presets("dev"));
+    popup.select_topic_for_tests(SettingsTopic::Proxy);
+    popup.add_remote_rule_after(None);
+    popup.draft_mut_for_tests().proxy.as_mut().unwrap().enable = false;
+    popup.draft_mut_for_tests().proxy.as_mut().unwrap().presets[0]
+        .map_remote
+        .enable = false;
+    popup.draft_mut_for_tests().proxy.as_mut().unwrap().presets[0]
+        .map_remote
+        .rules[0]
+        .from = "e\u{301}雪".to_string();
+    let before = popup.draft().clone();
+    let row = Click::RuleRow {
+        table: ProxyRuleTable::Remote,
+        index: 0,
+        toggle: false,
+        field: RuleEditField::To,
+    };
+    popup.handle_click(row, false, false);
+    assert!(popup.rule_editor().is_none());
+    popup.handle_click(row, true, false);
+    assert_eq!(popup.rule_editor().unwrap().active_field, RuleEditField::To);
+    popup.handle_paste("/unfinished");
+    popup.handle_click(
+        Click::RuleField {
+            field: RuleEditField::From,
+            cursor: Some("e".len()),
+        },
+        false,
+        false,
+    );
+    popup.handle_paste("x");
+    assert_eq!(popup.draft(), &before);
+    popup.handle_click(Click::Outside, false, true);
+    assert_eq!(popup.rule_editor().unwrap().from, "xe\u{301}雪");
+    popup.handle_click(Click::Outside, false, false);
+    assert!(popup.rule_editor().is_none());
+    assert_eq!(
+        popup.active_proxy_table_rule(ProxyRuleTable::Remote),
+        Some(0)
+    );
+    assert_eq!(popup.draft(), &before);
+    popup.handle_click(
+        Click::RuleRow {
+            table: ProxyRuleTable::Remote,
+            index: 0,
+            toggle: true,
+            field: RuleEditField::From,
+        },
+        true,
+        false,
+    );
+    assert!(popup.rule_editor().is_none());
+    let proxy = popup.draft().proxy.as_ref().unwrap();
+    assert!(!proxy.enable);
+    assert!(!proxy.presets[0].map_remote.enable);
+    assert!(!proxy.presets[0].map_remote.rules[0].enable);
+}
+
+#[test]
+fn settings_preset_clicks_retain_rejected_name_and_position_filter_cursor() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut popup = SettingsPopup::new();
+    popup.open(settings_with_proxy_presets("dev"));
+    popup.handle_click(Click::Topic(SettingsTopic::Proxy), false, false);
+    let row = popup.proxy_widget_row(ProxyWidget::PresetName).unwrap();
+    popup.handle_click(Click::Field { row, cursor: None }, false, false);
+    for _ in 0..3 {
+        popup.handle_key(key(KeyCode::Backspace));
+    }
+    popup.handle_paste("qa");
+    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    assert!(popup.active_select_target().is_none());
+    assert_eq!(
+        popup
+            .active_field_edit(FieldEditKind::ProxyPresetName)
+            .unwrap()
+            .value,
+        "qa"
+    );
+    popup.handle_paste("-new");
+    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    assert_eq!(popup.active_proxy_preset().unwrap().name, "qa-new");
+    popup.handle_paste("雪終");
+    popup.handle_click(
+        Click::SelectFilter {
+            cursor: Some("雪".len()),
+        },
+        false,
+        false,
+    );
+    popup.handle_click(Click::SelectFilter { cursor: None }, false, false);
+    popup.handle_paste("新");
+    assert_eq!(
+        popup
+            .select_state(SelectTarget::ProxyPreset)
+            .unwrap()
+            .filter(),
+        "雪新終"
+    );
+    popup.handle_click(Click::Outside, false, false);
+    assert!(popup.active_select_target().is_none());
+    assert!(!popup.is_confirming_unsaved());
+    assert_eq!(popup.active_proxy_preset().unwrap().name, "qa-new");
+}
+
+#[test]
+fn settings_virtual_preset_browsing_and_dropdown_outside_never_materialize_it() {
+    use crate::app::SettingsClickTarget as Click;
+    let mut popup = SettingsPopup::new();
+    popup.open(AppSettings::default());
+    popup.handle_click(Click::Topic(SettingsTopic::Proxy), false, false);
+    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    assert_eq!(
+        popup.handle_click(Click::Outside, false, false),
+        SettingsPopupAction::None
+    );
+    assert!(popup.draft().proxy.is_none());
+    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    popup.handle_click(Click::SelectOption { index: 0 }, false, false);
+    assert!(popup.draft().proxy.is_none());
+    assert_eq!(
+        popup.handle_click(Click::Outside, false, false),
+        SettingsPopupAction::Close
+    );
 }
