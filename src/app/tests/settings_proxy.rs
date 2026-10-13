@@ -122,10 +122,7 @@ fn empty_default_preset_browsing_and_selection_preserve_settings() {
             .select_topic_for_tests(SettingsTopic::Proxy);
         focus_settings_content(&mut app);
         app.handle_key_event(key(KeyCode::Enter));
-        assert_eq!(
-            app.settings_popup.active_select_target(),
-            Some(SelectTarget::ProxyPreset)
-        );
+        assert!(app.settings_popup.select_state().is_some());
         app.handle_key_event(key(KeyCode::Esc));
         app.handle_key_event(key(KeyCode::Enter));
         assert!(app.settings_popup.commit_active_select_filtered_index(0));
@@ -386,7 +383,7 @@ fn settings_popup_create_preset_from_absent_proxy_is_disabled() {
     assert!(!preset.map_local.enable);
     assert!(preset.map_remote.rules.is_empty());
     assert!(preset.map_local.rules.is_empty());
-    assert_eq!(app.settings_popup.active_select_target(), None);
+    assert!(app.settings_popup.select_state().is_none());
     assert!(app.settings_popup.is_dirty());
 }
 
@@ -452,7 +449,7 @@ fn settings_popup_create_preset_uses_smallest_unused_trimmed_identity() {
         assert!(!created.map_local.enable);
         assert!(created.map_remote.rules.is_empty());
         assert!(created.map_local.rules.is_empty());
-        assert_eq!(app.settings_popup.active_select_target(), None);
+        assert!(app.settings_popup.select_state().is_none());
     }
     let proxy = app.settings_popup.draft().proxy.as_ref().unwrap();
     assert_eq!(proxy.presets.len(), original.len() + 2);
@@ -529,10 +526,7 @@ fn settings_popup_stale_active_preset_can_select_existing_preset() {
 
     focus_settings_content(&mut app);
     app.handle_key_event(key(KeyCode::Enter));
-    assert_eq!(
-        app.settings_popup.active_select_target(),
-        Some(SelectTarget::ProxyPreset)
-    );
+    assert!(app.settings_popup.select_state().is_some());
     assert!(app.settings_popup.commit_active_select_filtered_index(1));
 
     assert_eq!(
@@ -1085,8 +1079,8 @@ fn settings_preset_clicks_retain_rejected_name_and_position_filter_cursor() {
         popup.handle_key(key(KeyCode::Backspace));
     }
     popup.handle_paste("qa");
-    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
-    assert!(popup.active_select_target().is_none());
+    popup.handle_click(Click::Select, false, false);
+    assert!(popup.select_state().is_none());
     assert_eq!(
         popup
             .active_field_edit(FieldEditKind::ProxyPresetName)
@@ -1095,7 +1089,7 @@ fn settings_preset_clicks_retain_rejected_name_and_position_filter_cursor() {
         "qa"
     );
     popup.handle_paste("-new");
-    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    popup.handle_click(Click::Select, false, false);
     assert_eq!(popup.active_proxy_preset().unwrap().name, "qa-new");
     popup.handle_paste("雪終");
     popup.handle_click(
@@ -1107,15 +1101,9 @@ fn settings_preset_clicks_retain_rejected_name_and_position_filter_cursor() {
     );
     popup.handle_click(Click::SelectFilter { cursor: None }, false, false);
     popup.handle_paste("新");
-    assert_eq!(
-        popup
-            .select_state(SelectTarget::ProxyPreset)
-            .unwrap()
-            .filter(),
-        "雪新終"
-    );
+    assert_eq!(popup.select_state().unwrap().filter(), "雪新終");
     popup.handle_click(Click::Outside, false, false);
-    assert!(popup.active_select_target().is_none());
+    assert!(popup.select_state().is_none());
     assert!(!popup.is_confirming_unsaved());
     assert_eq!(popup.active_proxy_preset().unwrap().name, "qa-new");
 }
@@ -1126,13 +1114,13 @@ fn settings_virtual_preset_browsing_and_dropdown_outside_never_materialize_it() 
     let mut popup = SettingsPopup::new();
     popup.open(AppSettings::default());
     popup.handle_click(Click::Topic(SettingsTopic::Proxy), false, false);
-    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    popup.handle_click(Click::Select, false, false);
     assert_eq!(
         popup.handle_click(Click::Outside, false, false),
         SettingsPopupAction::None
     );
     assert!(popup.draft().proxy.is_none());
-    popup.handle_click(Click::Select(SelectTarget::ProxyPreset), false, false);
+    popup.handle_click(Click::Select, false, false);
     popup.handle_click(Click::SelectOption { index: 0 }, false, false);
     assert!(popup.draft().proxy.is_none());
     assert_eq!(

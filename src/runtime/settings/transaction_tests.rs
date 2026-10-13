@@ -5,8 +5,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    SettingsRevision, SettingsTransactionOrigin, SettingsTransactionOutcome,
-    SettingsTransactionPhase,
+    SettingsRevision, SettingsTransactionOutcome, SettingsTransactionPhase,
     test_support::{FailurePoint, SettingsRuntimeFixture, TerminalDelivery, create_preset},
 };
 use crate::{
@@ -46,7 +45,6 @@ async fn revision_starts_at_one_and_stale_revision_changes_nothing() {
         .mutate(
             create_preset("one"),
             SettingsRevision::INITIAL,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -57,7 +55,6 @@ async fn revision_starts_at_one_and_stale_revision_changes_nothing() {
         .mutate(
             create_preset("stale"),
             SettingsRevision::INITIAL,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -79,18 +76,8 @@ async fn serial_same_revision_writers_have_exactly_one_winner() {
     let second_cancel = CancellationToken::new();
 
     let (left, right) = tokio::join!(
-        first.mutate_mapping(
-            create_preset("first"),
-            revision,
-            SettingsTransactionOrigin::Mcp,
-            first_cancel,
-        ),
-        second.mutate_mapping(
-            create_preset("second"),
-            revision,
-            SettingsTransactionOrigin::Mcp,
-            second_cancel,
-        ),
+        first.mutate_mapping(create_preset("first"), revision, first_cancel,),
+        second.mutate_mapping(create_preset("second"), revision, second_cancel,),
     );
 
     let results = [left, right];
@@ -114,7 +101,6 @@ async fn dirty_tui_draft_rejects_mcp_write_before_work_is_admitted() {
         .mutate(
             create_preset("blocked"),
             before.revision,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -134,12 +120,7 @@ async fn admitted_transaction_blocks_tui_edits_and_saves_until_terminal_delivery
     let client = fixture.client();
     let task = tokio::spawn(async move {
         client
-            .mutate_mapping(
-                create_preset("pending"),
-                revision,
-                SettingsTransactionOrigin::Mcp,
-                CancellationToken::new(),
-            )
+            .mutate_mapping(create_preset("pending"), revision, CancellationToken::new())
             .await
     });
     barrier.entered().await;
@@ -179,12 +160,7 @@ async fn domain_validation_failure_is_atomic_and_reports_validation_stage() {
     };
 
     let error = fixture
-        .mutate(
-            invalid,
-            before.revision,
-            SettingsTransactionOrigin::Mcp,
-            CancellationToken::new(),
-        )
+        .mutate(invalid, before.revision, CancellationToken::new())
         .await
         .expect_err("validation failure");
 
@@ -203,7 +179,6 @@ async fn policy_compilation_failure_changes_no_authoritative_state() {
         .mutate(
             create_preset("compile-fails"),
             before.revision,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -226,7 +201,6 @@ async fn failed_write_or_fsync_changes_nothing_and_aborts_once() {
             .mutate(
                 create_preset("io-fails"),
                 before.revision,
-                SettingsTransactionOrigin::Mcp,
                 CancellationToken::new(),
             )
             .await
@@ -250,7 +224,6 @@ async fn rename_failure_from_committing_preserves_live_and_file_state_and_aborts
         .mutate(
             create_preset("rename-fails"),
             before.revision,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -273,7 +246,6 @@ async fn persistent_success_reports_persistent_metadata_and_updates_file_and_pol
         .mutate(
             complete_preset("dev"),
             before.revision,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -313,7 +285,6 @@ async fn read_only_and_temporary_success_are_ephemeral_and_never_write() {
             .mutate(
                 create_preset("ephemeral"),
                 before.revision,
-                SettingsTransactionOrigin::Mcp,
                 CancellationToken::new(),
             )
             .await
@@ -342,7 +313,6 @@ async fn unchanged_mutation_skips_compile_persistence_policy_swap_and_revision_a
                 name: Some("dev".to_string()),
             },
             before.revision,
-            SettingsTransactionOrigin::Mcp,
             CancellationToken::new(),
         )
         .await
@@ -368,12 +338,7 @@ async fn complete_initial_preset_is_preserved_and_never_activated_implicitly() {
     let revision = fixture.snapshot().revision;
 
     fixture
-        .mutate(
-            complete_preset("dev"),
-            revision,
-            SettingsTransactionOrigin::Mcp,
-            CancellationToken::new(),
-        )
+        .mutate(complete_preset("dev"), revision, CancellationToken::new())
         .await
         .expect("complete preset");
 
@@ -403,7 +368,6 @@ async fn active_preset_commit_swaps_precompiled_policy_before_publishing_new_set
                     name: Some("second".to_string()),
                 },
                 revision,
-                SettingsTransactionOrigin::Mcp,
                 CancellationToken::new(),
             )
             .await
@@ -434,12 +398,7 @@ async fn clean_open_popup_refreshes_only_after_successful_finalization() {
     let client = fixture.client();
     let task = tokio::spawn(async move {
         client
-            .mutate_mapping(
-                create_preset("popup"),
-                revision,
-                SettingsTransactionOrigin::Mcp,
-                CancellationToken::new(),
-            )
+            .mutate_mapping(create_preset("popup"), revision, CancellationToken::new())
             .await
     });
     barrier.entered().await;
@@ -463,12 +422,7 @@ async fn cancellation_during_temp_write_or_fsync_aborts_before_rename() {
         let client = fixture.client();
         let task = tokio::spawn(async move {
             client
-                .mutate_mapping(
-                    create_preset("cancelled"),
-                    before.revision,
-                    SettingsTransactionOrigin::Mcp,
-                    child,
-                )
+                .mutate_mapping(create_preset("cancelled"), before.revision, child)
                 .await
         });
         barrier.entered().await;
@@ -496,12 +450,7 @@ async fn cancellation_at_precommit_barrier_aborts_and_clears_pending_token_once(
     let client = fixture.client();
     let task = tokio::spawn(async move {
         client
-            .mutate_mapping(
-                create_preset("cancelled"),
-                before.revision,
-                SettingsTransactionOrigin::Mcp,
-                child,
-            )
+            .mutate_mapping(create_preset("cancelled"), before.revision, child)
             .await
     });
     barrier.entered().await;
@@ -534,12 +483,7 @@ async fn cancellation_after_committing_transition_cannot_interrupt_commit() {
     let client = fixture.client();
     let task = tokio::spawn(async move {
         client
-            .mutate_mapping(
-                create_preset("committing"),
-                revision,
-                SettingsTransactionOrigin::Mcp,
-                child,
-            )
+            .mutate_mapping(create_preset("committing"), revision, child)
             .await
     });
     barrier.entered().await;
@@ -570,12 +514,7 @@ async fn cancellation_after_committed_transition_still_delivers_finalize() {
     let client = fixture.client();
     let task = tokio::spawn(async move {
         client
-            .mutate_mapping(
-                create_preset("committed"),
-                revision,
-                SettingsTransactionOrigin::Mcp,
-                child,
-            )
+            .mutate_mapping(create_preset("committed"), revision, child)
             .await
     });
     barrier.entered().await;
@@ -606,7 +545,6 @@ async fn changed_transaction_reserves_terminal_delivery_before_commit() {
             .mutate_mapping(
                 create_preset("reserved"),
                 revision,
-                SettingsTransactionOrigin::Mcp,
                 CancellationToken::new(),
             )
             .await
@@ -637,7 +575,6 @@ async fn shutdown_aborts_precommit_but_drains_committing_and_committed_transacti
                 .mutate_mapping(
                     create_preset("shutdown"),
                     revision,
-                    SettingsTransactionOrigin::Mcp,
                     CancellationToken::new(),
                 )
                 .await
@@ -681,12 +618,7 @@ async fn slow_compile_and_persistence_never_block_runtime_event_loop() {
         let client = fixture.client();
         let task = tokio::spawn(async move {
             client
-                .mutate_mapping(
-                    create_preset("slow"),
-                    revision,
-                    SettingsTransactionOrigin::Mcp,
-                    CancellationToken::new(),
-                )
+                .mutate_mapping(create_preset("slow"), revision, CancellationToken::new())
                 .await
         });
         barrier.entered().await;

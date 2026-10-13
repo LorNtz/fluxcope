@@ -475,3 +475,44 @@ fn body_viewer_jump_query_can_refine_before_overlay_render() {
     assert_eq!(editor.cursor.row, 0);
     assert_eq!(editor.cursor.col, 3);
 }
+
+#[test]
+fn body_viewer_jump_can_refine_when_every_label_is_ambiguous() {
+    let mut app = App::new(ui_settings(true));
+    let mut req = captured(0, "https://a.com/api");
+    req.req_body = Some(format!(
+        "xx {}",
+        "asdfghjklqwertyuiopzxcvbnm"
+            .chars()
+            .map(|label| format!("1{label}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    app.add_request(req);
+    app.focus_panel(PanelFocus::Detail);
+    app.detail_panel.select_tab(MainDisplayTab::RequestBody);
+    app.enter_current_body_viewer();
+
+    app.handle_key_event(key(KeyCode::Char('s')));
+    app.handle_key_event(key(KeyCode::Char('1')));
+    let (ui, _) = render_to_buffer_with_size(&mut app, 200, 28);
+    let text_area = body_editor_text_area(ui.detail.area());
+    assert!(
+        app.detail_panel
+            .body_viewer
+            .rendered_jump_targets(text_area)
+            .is_empty()
+    );
+
+    app.handle_key_event(key(KeyCode::Char('a')));
+    let (ui, buffer) = render_to_buffer_with_size(&mut app, 200, 28);
+    let text_area = body_editor_text_area(ui.detail.area());
+    let label_position =
+        find_buffer_text(&buffer, text_area, "aa").expect("refined jump label should render");
+    assert_eq!(buffer[label_position].bg, Color::Green);
+
+    app.handle_key_event(key(KeyCode::Char('a')));
+    let editor = app.detail_panel.body_viewer.editor_mut().unwrap();
+    assert_eq!(editor.cursor.row, 0);
+    assert_eq!(editor.cursor.col, 3);
+}

@@ -224,11 +224,6 @@ struct DecodeJob {
     cancellation: Arc<DecodeCancellation>,
 }
 
-struct DecodeCompletion {
-    key: DecodeKey,
-    result: DecodeResult,
-}
-
 #[cfg(test)]
 pub(crate) fn start_decode_service(
     policy: DecodePolicy,
@@ -285,7 +280,7 @@ async fn run_decode_service(
     metrics: Arc<DecodeMetrics>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let mut active: JoinSet<DecodeCompletion> = JoinSet::new();
+    let mut active: JoinSet<DecodeResult> = JoinSet::new();
     let mut jobs_open = true;
     loop {
         if !jobs_open && active.is_empty() {
@@ -304,15 +299,15 @@ async fn run_decode_service(
                     metrics.superseded.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                if completion.result.limited {
+                if completion.limited {
                     metrics.output_limited.fetch_add(1, Ordering::Relaxed);
                 }
-                if completion.result.error.is_some() {
+                if completion.error.is_some() {
                     metrics.failed.fetch_add(1, Ordering::Relaxed);
                 }
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
-                    sent = results.send(completion.result) => {
+                    sent = results.send(completion) => {
                         if sent.is_err() {
                             break;
                         }
@@ -354,19 +349,16 @@ async fn run_decode_service(
                     {
                         Ok(lease) => lease,
                         Err(error) => {
-                            return DecodeCompletion {
+                            return DecodeResult {
                                 key,
-                                result: DecodeResult {
-                                    key,
-                                    text: "(Body decode was not admitted)".to_owned(),
-                                    limited: false,
-                                    error: Some(error.message),
-                                },
+                                text: "(Body decode was not admitted)".to_owned(),
+                                limited: false,
+                                error: Some(error.message),
                             };
                         }
                     };
                     let worker_flag = Arc::clone(&job.cancellation);
-                    let result = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         let _active_lease = active_lease;
                         decode_job_cancellable(job, &worker_policy, &worker_flag.flag)
                     })
@@ -376,8 +368,7 @@ async fn run_decode_service(
                         text: "(Body decode worker failed)".to_string(),
                         limited: false,
                         error: Some(error.to_string()),
-                    });
-                    DecodeCompletion { key, result }
+                    })
                 });
             }
         }

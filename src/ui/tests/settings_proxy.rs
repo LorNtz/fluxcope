@@ -224,17 +224,10 @@ fn settings_popup_create_preset_mouse_commits_filtered_action() {
         let content_width = content_area.width.saturating_sub(1).max(1);
         let items = settings_content_items_for_test(&app.settings_popup, root_area);
         let field_layout = settings_field_layout(&items);
-        let content_height =
-            settings_content_height(&items, content_area.height, field_layout, content_width);
-        let layout = settings_select_layout(
-            &items,
-            Some(SelectTarget::ProxyPreset),
-            field_layout,
-            content_width,
-            content_height,
-        )
-        .expect("preset selector remains available")
-        .layout;
+        let content_height = settings_content_height(&items, content_area.height);
+        let layout = settings_select_layout(&items, field_layout, content_width, content_height)
+            .expect("preset selector remains available")
+            .layout;
         let options_area = layout
             .options_area
             .expect("creation action remains visible");
@@ -270,7 +263,7 @@ fn settings_popup_create_preset_mouse_commits_filtered_action() {
         assert!(preset.map_local.rules.is_empty());
         assert!(!preset.map_remote.enable);
         assert!(!preset.map_local.enable);
-        assert_eq!(app.settings_popup.active_select_target(), None);
+        assert!(app.settings_popup.select_state().is_none());
         assert!(app.settings_popup.is_dirty());
     }
 }
@@ -431,17 +424,10 @@ fn settings_popup_proxy_preset_select_handles_mouse_selection() {
     let content_width = content_area.width.saturating_sub(1).max(1);
     let items = settings_content_items_for_test(&app.settings_popup, root_area);
     let field_layout = settings_field_layout(&items);
-    let content_height =
-        settings_content_height(&items, content_area.height, field_layout, content_width);
-    let layout = settings_select_layout(
-        &items,
-        Some(SelectTarget::ProxyPreset),
-        field_layout,
-        content_width,
-        content_height,
-    )
-    .expect("proxy preset select layout should exist")
-    .layout;
+    let content_height = settings_content_height(&items, content_area.height);
+    let layout = settings_select_layout(&items, field_layout, content_width, content_height)
+        .expect("proxy preset select layout should exist")
+        .layout;
     let box_click = Position::new(
         content_area.x + layout.box_area.x + 1,
         content_area.y + layout.box_area.y + 1,
@@ -460,17 +446,10 @@ fn settings_popup_proxy_preset_select_handles_mouse_selection() {
     let (mut ui, _buffer) = render_to_buffer(&mut app);
     let items = settings_content_items_for_test(&app.settings_popup, root_area);
     let field_layout = settings_field_layout(&items);
-    let content_height =
-        settings_content_height(&items, content_area.height, field_layout, content_width);
-    let layout = settings_select_layout(
-        &items,
-        Some(SelectTarget::ProxyPreset),
-        field_layout,
-        content_width,
-        content_height,
-    )
-    .expect("proxy preset select layout should exist")
-    .layout;
+    let content_height = settings_content_height(&items, content_area.height);
+    let layout = settings_select_layout(&items, field_layout, content_width, content_height)
+        .expect("proxy preset select layout should exist")
+        .layout;
     let options_area = layout
         .options_area
         .expect("open preset select should expose option rows");
@@ -514,11 +493,11 @@ fn settings_popup_mouse_rejects_hit_regions_after_presentation_changes() {
     let content_area = settings_content_test_area(buffer.area);
     let preset =
         find_buffer_text(&buffer, content_area, "dev").expect("active proxy preset should render");
-    app.settings_popup.start_select(SelectTarget::ProxyPreset);
+    app.settings_popup.start_proxy_preset_select();
     assert!(app.settings_popup.scroll_active_select_down());
     assert_eq!(
         app.settings_popup
-            .select_state(SelectTarget::ProxyPreset)
+            .select_state()
             .expect("proxy preset select should be open")
             .scroll_offset(),
         1
@@ -531,7 +510,7 @@ fn settings_popup_mouse_rejects_hit_regions_after_presentation_changes() {
 
     assert_eq!(
         app.settings_popup
-            .select_state(SelectTarget::ProxyPreset)
+            .select_state()
             .expect("stale hit regions should not reset the open select")
             .scroll_offset(),
         1
@@ -557,10 +536,7 @@ fn settings_popup_mouse_movement_preserves_rendered_hit_regions() {
         &mut app,
     );
 
-    assert_eq!(
-        app.settings_popup.active_select_target(),
-        Some(SelectTarget::ProxyPreset)
-    );
+    assert!(app.settings_popup.select_state().is_some());
 }
 
 #[test]
@@ -571,28 +547,21 @@ fn settings_popup_proxy_preset_dropdown_does_not_change_content_height() {
         .select_topic_for_tests(SettingsTopic::Proxy);
     app.settings_popup.draft_mut_for_tests().proxy =
         Some(proxy_settings("dev", &["dev", "qa", "prod"]));
-    let content_width = 60;
     let root_area = Rect::new(0, 0, 100, 12);
     let closed_items = settings_content_items_for_test(&app.settings_popup, root_area);
-    let closed_layout = settings_field_layout(&closed_items);
-    let closed_height = settings_content_height(&closed_items, 0, closed_layout, content_width);
+    let closed_height = settings_content_height(&closed_items, 0);
     drop(closed_items);
 
     focus_settings_content(&mut app);
     app.handle_key_event(key(KeyCode::Enter));
-    assert_eq!(
-        app.settings_popup.active_select_target(),
-        Some(SelectTarget::ProxyPreset)
-    );
+    assert!(app.settings_popup.select_state().is_some());
 
     let open_items = settings_content_items_for_test(&app.settings_popup, root_area);
-    let open_layout = settings_field_layout(&open_items);
-    let open_height = settings_content_height(&open_items, 0, open_layout, content_width);
+    let open_height = settings_content_height(&open_items, 0);
 
     assert_eq!(closed_height, open_height);
     assert_eq!(
-        settings_select_control(&app.settings_popup, SelectTarget::ProxyPreset)
-            .height_for_width(content_width),
+        settings_select_control(&app.settings_popup).height(),
         crate::ui::select_widget::SELECT_FIELD_HEIGHT
     );
 }
@@ -613,24 +582,12 @@ fn settings_popup_proxy_select_overlay_anchors_to_shared_control_area() {
     let content_width = content_area.width.saturating_sub(1).max(1);
     let items = settings_content_items_for_test(&app.settings_popup, root_area);
     let field_layout = settings_field_layout(&items);
-    let content_height =
-        settings_content_height(&items, content_area.height, field_layout, content_width);
-    let row_area = Rect::new(
-        0,
-        0,
-        content_width,
-        items[0].height(field_layout, content_width),
-    );
+    let content_height = settings_content_height(&items, content_area.height);
+    let row_area = Rect::new(0, 0, content_width, items[0].height());
     let row_areas = field_layout.areas(row_area);
-    let select_layout = settings_select_layout(
-        &items,
-        Some(SelectTarget::ProxyPreset),
-        field_layout,
-        content_width,
-        content_height,
-    )
-    .expect("proxy preset select layout should exist")
-    .layout;
+    let select_layout = settings_select_layout(&items, field_layout, content_width, content_height)
+        .expect("proxy preset select layout should exist")
+        .layout;
 
     assert_eq!(select_layout.box_area.x, row_areas.control.x);
     assert_eq!(

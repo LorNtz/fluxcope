@@ -13,10 +13,7 @@ use crate::app::{
     SettingsClickTarget,
 };
 
-use super::content::{
-    SettingsFieldLayoutConfig, SettingsFieldRow, SettingsFieldRowWidget,
-    settings_field_layout_for_rows,
-};
+use super::content::{SettingsFieldRow, SettingsFieldRowWidget, settings_field_layout_for_rows};
 use super::controls::{SETTING_TEXT_FIELD_HEIGHT, SettingsTextInputControl};
 use super::hit_regions::ClickRegion;
 use super::settings_key_hint_text;
@@ -76,7 +73,7 @@ pub(super) fn render_rule_editor_popup(
             },
         ),
     ];
-    let field_layout = settings_field_layout_for_rows(&rows, SettingsFieldLayoutConfig::default());
+    let field_layout = settings_field_layout_for_rows(&rows);
 
     for (index, row) in rows.iter().enumerate() {
         let row_area = Rect::new(

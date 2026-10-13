@@ -125,7 +125,7 @@ fn handler(
         runtime,
         capture_changes: feed,
         body_work: Arc::new(BodyWorkAdmission::default()),
-        audit: crate::control::audit::InstanceAudit::default(),
+        audit: super::test_audit(),
         config_source: None,
     });
     let admission = Arc::clone(&handler.capture_searches);

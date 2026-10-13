@@ -127,13 +127,12 @@ impl SettingsTransactionClient {
         &self,
         mutation: MappingMutation,
         expected_revision: SettingsRevision,
-        origin: SettingsTransactionOrigin,
         cancelled: CancellationToken,
     ) -> Result<SettingsTransactionResult, ControlError> {
         self.submit(
             SettingsTransactionChange::Mapping(mutation),
             Some(expected_revision),
-            origin,
+            SettingsTransactionOrigin::Mcp,
             cancelled,
         )
         .await
@@ -463,8 +462,6 @@ async fn execute_transaction(
                     policy: commit.policy,
                     origin,
                     outcome: commit.outcome,
-                    affected: commit.affected.clone(),
-                    persistence: commit.persistence,
                 }),
             },
         )

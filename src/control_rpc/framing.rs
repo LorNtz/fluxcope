@@ -249,18 +249,6 @@ pub(crate) async fn read_validated_request_frame_with_call_lease<R>(
 where
     R: AsyncRead + Unpin,
 {
-    read_validated_request_frame_inner(reader, max_bytes, Some(lease), received_at).await
-}
-
-async fn read_validated_request_frame_inner<R>(
-    reader: &mut R,
-    max_bytes: usize,
-    lease: Option<Arc<CallLease>>,
-    received_at: Instant,
-) -> Result<ValidatedRequestFrame, ControlError>
-where
-    R: AsyncRead + Unpin,
-{
     let payload = read_frame_payload(reader, max_bytes).await?;
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
@@ -295,7 +283,12 @@ where
     .map_err(|_| ControlError::instance_unavailable("private RPC blocking worker failed"))
 }
 
-type SerializationWorkerOutput = (Vec<u8>, OwnedSemaphorePermit, usize);
+struct SerializationWorkerOutput {
+    serialized: Vec<u8>,
+    pessimistic_lease: OwnedSemaphorePermit,
+    #[cfg(test)]
+    allocation_growth_count: usize,
+}
 
 pub(crate) fn encode_json_frame<T>(
     value: &T,
@@ -310,7 +303,7 @@ where
         return Err(ControlError::frame_too_large(max_payload_bytes));
     }
     serialization.map_err(|error| ControlError::invalid_argument(error.to_string()))?;
-    writer.finish().map(|(bytes, _)| bytes)
+    writer.finish()
 }
 
 pub(crate) fn ensure_json_payload_within_limit<T>(
@@ -417,8 +410,14 @@ where
             return Err(ControlError::frame_too_large(max_bytes));
         }
         serialization.map_err(|error| ControlError::invalid_argument(error.to_string()))?;
-        let (serialized, allocation_growth_count) = writer.finish()?;
-        Ok((serialized, pessimistic_lease, allocation_growth_count))
+        #[cfg(test)]
+        let allocation_growth_count = writer.allocation_growth_count;
+        Ok(SerializationWorkerOutput {
+            serialized: writer.finish()?,
+            pessimistic_lease,
+            #[cfg(test)]
+            allocation_growth_count,
+        })
     })
 }
 
@@ -457,7 +456,11 @@ impl BenchmarkSerializationFixture {
             pessimistic_lease,
             call_lease,
         );
-        let (bytes, _lease, _capacity) = worker
+        let SerializationWorkerOutput {
+            serialized: bytes,
+            pessimistic_lease: _lease,
+            ..
+        } = worker
             .await
             .map_err(|_| ControlError::instance_unavailable("benchmark serializer failed"))??;
         Ok(bytes.len())
@@ -468,7 +471,12 @@ fn finish_serialized_frame(
     output: SerializationWorkerOutput,
     call_lease: Arc<CallLease>,
 ) -> Result<EncodedFrame, ControlError> {
-    let (serialized, mut pessimistic_lease, _allocation_growth_count) = output;
+    let SerializationWorkerOutput {
+        serialized,
+        mut pessimistic_lease,
+        #[cfg(test)]
+        allocation_growth_count,
+    } = output;
     let payload_allocation = serialized.capacity().saturating_sub(4);
     let actual_lease = pessimistic_lease.split(payload_allocation).ok_or_else(|| {
         ControlError::instance_unavailable("private RPC response lease accounting failed")
@@ -479,7 +487,7 @@ fn finish_serialized_frame(
         _response_lease: actual_lease,
         _call_lease: call_lease,
         #[cfg(test)]
-        allocation_growth_count: _allocation_growth_count,
+        allocation_growth_count,
     })
 }
 
@@ -512,6 +520,7 @@ struct CappedFrameWriter {
     bytes: Vec<u8>,
     max_payload_bytes: usize,
     overflowed: bool,
+    #[cfg(test)]
     allocation_growth_count: usize,
 }
 
@@ -526,16 +535,17 @@ impl CappedFrameWriter {
             bytes,
             max_payload_bytes,
             overflowed: false,
+            #[cfg(test)]
             allocation_growth_count: 1,
         })
     }
 
-    fn finish(mut self) -> Result<(Vec<u8>, usize), ControlError> {
+    fn finish(mut self) -> Result<Vec<u8>, ControlError> {
         let payload_length = self.bytes.len().saturating_sub(4);
         let payload_length = u32::try_from(payload_length)
             .map_err(|_| ControlError::frame_too_large(self.max_payload_bytes))?;
         self.bytes[..4].copy_from_slice(&payload_length.to_be_bytes());
-        Ok((self.bytes, self.allocation_growth_count))
+        Ok(self.bytes)
     }
 
     fn reserve_for(&mut self, additional: usize) -> io::Result<()> {
@@ -561,7 +571,10 @@ impl CappedFrameWriter {
         self.bytes
             .try_reserve_exact(target.saturating_sub(self.bytes.len()))
             .map_err(|_| io::Error::other("private RPC frame allocation failed"))?;
-        self.allocation_growth_count = self.allocation_growth_count.saturating_add(1);
+        #[cfg(test)]
+        {
+            self.allocation_growth_count = self.allocation_growth_count.saturating_add(1);
+        }
         Ok(())
     }
 }

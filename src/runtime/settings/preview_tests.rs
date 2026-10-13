@@ -40,12 +40,7 @@ async fn preview_is_isolated_and_commit_rejects_stale_preview() {
     assert_eq!(fixture.policy_swap_count(), 0);
     let unrelated = fixture.preset("second");
     let committed = fixture
-        .mutate(
-            mutation.clone(),
-            preview.revision,
-            SettingsTransactionOrigin::Mcp,
-            CancellationToken::new(),
-        )
+        .mutate(mutation.clone(), preview.revision, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(fixture.preset("second"), unrelated);
@@ -66,12 +61,7 @@ async fn preview_is_isolated_and_commit_rejects_stale_preview() {
         ControlErrorCode::SettingsRevisionConflict
     );
     let stale_commit = fixture
-        .mutate(
-            mutation,
-            preview.revision,
-            SettingsTransactionOrigin::Mcp,
-            CancellationToken::new(),
-        )
+        .mutate(mutation, preview.revision, CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(
@@ -137,12 +127,7 @@ async fn preview_explains_remote_then_local_using_original_rule_indexes() {
         },
     ] {
         revision = fixture
-            .mutate(
-                mutation,
-                revision,
-                SettingsTransactionOrigin::Mcp,
-                CancellationToken::new(),
-            )
+            .mutate(mutation, revision, CancellationToken::new())
             .await
             .unwrap()
             .revision;

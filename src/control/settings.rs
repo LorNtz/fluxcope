@@ -12,7 +12,7 @@ use crate::{
     },
     settings::{
         AppSettings, ConfigMode, PersistenceMode,
-        mapping_ops::{MappingExplanation, MappingObjectRef, MappingValidationResult},
+        mapping_ops::{MappingExplanation, MappingValidationResult},
     },
 };
 #[derive(Clone, Debug)]
@@ -36,8 +36,6 @@ pub(crate) struct FinalizedSettingsTransaction {
     pub(crate) policy: Option<RequestPolicy>,
     pub(crate) origin: SettingsTransactionOrigin,
     pub(crate) outcome: SettingsTransactionOutcome,
-    pub(crate) affected: MappingObjectRef,
-    pub(crate) persistence: PersistenceMode,
 }
 
 impl PartialEq for FinalizedSettingsTransaction {
@@ -45,8 +43,6 @@ impl PartialEq for FinalizedSettingsTransaction {
         self.settings == other.settings
             && self.origin == other.origin
             && self.outcome == other.outcome
-            && self.affected == other.affected
-            && self.persistence == other.persistence
     }
 }
 

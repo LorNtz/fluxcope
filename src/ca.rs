@@ -25,15 +25,15 @@ pub struct CaData {
 
 impl CaData {
     /// Create new CaData from a Certificate
-    fn from_cert(cert: &Certificate, key: &KeyPair) -> Result<Self> {
+    fn from_cert(cert: &Certificate, key: &KeyPair) -> Self {
         let cert_der = cert.der().to_vec();
         let key_der = key.serialize_der();
         let cert_pem = cert.pem();
-        Ok(CaData {
+        CaData {
             cert_der,
             key_der,
             cert_pem,
-        })
+        }
     }
 
     /// Load CaData from DER files on disk
@@ -131,7 +131,7 @@ pub fn create_or_load_ca(cert_dir: &Path, pem_filename: &str) -> Result<CaData> 
         }
 
         let (cert, key) = create_ca()?;
-        let data = CaData::from_cert(&cert, &key)?;
+        let data = CaData::from_cert(&cert, &key);
         data.save(cert_dir, pem_filename)?;
         log::info!("CA certificate saved to {:?}", cert_dir);
         Ok(data)
@@ -204,7 +204,7 @@ mod tests {
         let pem_filename = "fluxcope-ca.pem";
         fs::create_dir(cert_dir.path().join(pem_filename))?;
         let (certificate, key) = create_ca()?;
-        let authority = CaData::from_cert(&certificate, &key)?;
+        let authority = CaData::from_cert(&certificate, &key);
 
         assert!(authority.save(cert_dir.path(), pem_filename).is_err());
 

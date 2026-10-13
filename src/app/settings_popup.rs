@@ -233,16 +233,6 @@ impl ProxyWidget {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SelectTarget {
-    ProxyPreset,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SettingsSelectId {
-    ProxyPreset(ProxyPresetChoice),
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyPresetChoice {
     Existing(usize),
@@ -311,7 +301,7 @@ pub(crate) enum SettingsClickTarget {
     Checkbox {
         row: usize,
     },
-    Select(SelectTarget),
+    Select,
     SelectOption {
         index: usize,
     },
@@ -579,7 +569,6 @@ pub(crate) const RULE_EDITOR_KEY_HINTS: &[SettingsKeyHint] = &[
 enum EditMode {
     Browse,
     Select {
-        target: SelectTarget,
         state: SelectState,
     },
     RuleTable {

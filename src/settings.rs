@@ -923,12 +923,17 @@ fn preserve_semantic_noop_entries(
 ) -> io::Result<()> {
     // Preserve explicit default entries without teaching each setting type how to track presence.
     let mut missing = Vec::new();
-    collect_missing_entries(Some(value), previous, &mut Vec::new(), &mut missing);
+    collect_missing_entries(value, previous, &mut Vec::new(), &mut missing);
 
     let mut batch = value.clone();
-    let inserted_all = missing
-        .iter()
-        .all(|entry| insert_config_entry(&mut batch, &entry.path, entry.value.clone()));
+    let inserted_all = missing.iter().all(|entry| {
+        insert_config_entry(
+            &mut batch,
+            &entry.parent_path,
+            entry.key.clone(),
+            entry.value.clone(),
+        )
+    });
     if inserted_all
         && let Ok(batch_settings) = serde_yaml::from_value::<AppSettings>(batch.clone())
         && batch_settings == *settings
@@ -940,7 +945,7 @@ fn preserve_semantic_noop_entries(
 
     for entry in missing {
         let mut candidate = value.clone();
-        if !insert_config_entry(&mut candidate, &entry.path, entry.value) {
+        if !insert_config_entry(&mut candidate, &entry.parent_path, entry.key, entry.value) {
             continue;
         }
 
@@ -1031,31 +1036,31 @@ fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
 }
 
 fn collect_missing_entries(
-    current: Option<&serde_yaml::Value>,
+    current: &serde_yaml::Value,
     previous: &serde_yaml::Value,
     path: &mut Vec<ConfigPathSegment>,
     missing: &mut Vec<MissingConfigEntry>,
 ) {
-    let Some(current) = current else {
-        missing.push(MissingConfigEntry {
-            path: path.clone(),
-            value: previous.clone(),
-        });
-        return;
-    };
-
     match (current, previous) {
         (serde_yaml::Value::Mapping(current), serde_yaml::Value::Mapping(previous)) => {
             for (key, previous_child) in previous {
-                path.push(ConfigPathSegment::Key(key.clone()));
-                collect_missing_entries(current.get(key), previous_child, path, missing);
-                path.pop();
+                if let Some(current_child) = current.get(key) {
+                    path.push(ConfigPathSegment::Key(key.clone()));
+                    collect_missing_entries(current_child, previous_child, path, missing);
+                    path.pop();
+                } else {
+                    missing.push(MissingConfigEntry {
+                        parent_path: path.clone(),
+                        key: key.clone(),
+                        value: previous_child.clone(),
+                    });
+                }
             }
         }
         (serde_yaml::Value::Sequence(current), serde_yaml::Value::Sequence(previous)) => {
             for (index, previous_child) in previous.iter().enumerate().take(current.len()) {
                 path.push(ConfigPathSegment::Index(index));
-                collect_missing_entries(Some(&current[index]), previous_child, path, missing);
+                collect_missing_entries(&current[index], previous_child, path, missing);
                 path.pop();
             }
         }
@@ -1066,15 +1071,11 @@ fn collect_missing_entries(
 fn insert_config_entry(
     value: &mut serde_yaml::Value,
     path: &[ConfigPathSegment],
+    key: serde_yaml::Value,
     entry: serde_yaml::Value,
 ) -> bool {
-    if path.is_empty() {
-        *value = entry;
-        return true;
-    }
-
     let mut current = value;
-    for segment in &path[..path.len() - 1] {
+    for segment in path {
         match segment {
             ConfigPathSegment::Key(key) => {
                 let serde_yaml::Value::Mapping(mapping) = current else {
@@ -1097,25 +1098,11 @@ fn insert_config_entry(
         }
     }
 
-    match path.last().expect("path is not empty") {
-        ConfigPathSegment::Key(key) => {
-            let serde_yaml::Value::Mapping(mapping) = current else {
-                return false;
-            };
-            mapping.insert(key.clone(), entry);
-            true
-        }
-        ConfigPathSegment::Index(index) => {
-            let serde_yaml::Value::Sequence(sequence) = current else {
-                return false;
-            };
-            if *index > sequence.len() {
-                return false;
-            }
-            sequence.insert(*index, entry);
-            true
-        }
-    }
+    let serde_yaml::Value::Mapping(mapping) = current else {
+        return false;
+    };
+    mapping.insert(key, entry);
+    true
 }
 
 fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serde_yaml::Value) {
@@ -1147,7 +1134,8 @@ fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serd
 
 #[derive(Clone)]
 struct MissingConfigEntry {
-    path: Vec<ConfigPathSegment>,
+    parent_path: Vec<ConfigPathSegment>,
+    key: serde_yaml::Value,
     value: serde_yaml::Value,
 }
 

@@ -230,11 +230,7 @@ pub fn audit_fixture(record_count: usize) -> AuditFixture {
         proxy_endpoint: "127.0.0.1:8989".parse().expect("benchmark endpoint"),
         run_id: RunId::from_str("AAAAAAAAAAAAAAAAAAAAAA").expect("benchmark run ID"),
     };
-    let audit = InstanceAudit::new(
-        scope.clone(),
-        ConfigMode::Temporary,
-        PersistenceMode::Ephemeral,
-    );
+    let audit = InstanceAudit::new(scope, ConfigMode::Temporary, PersistenceMode::Ephemeral);
     let now = 1_800_000_000_u64;
     for index in 0..record_count {
         audit.record(ControlCallAudit {
@@ -245,9 +241,6 @@ pub fn audit_fixture(record_count: usize) -> AuditFixture {
             operation: ControlOperationKind::SearchCaptures,
             mutation: None,
             outcome: ControlCallOutcome::Success {
-                instance: Some(scope.clone()),
-                config_mode: Some(ConfigMode::Temporary),
-                persistence: Some(PersistenceMode::Ephemeral),
                 settings_revision: None,
                 affected: None,
             },

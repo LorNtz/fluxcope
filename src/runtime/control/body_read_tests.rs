@@ -94,7 +94,7 @@ fn handler(
             runtime,
             capture_changes: feed,
             body_work: admission,
-            audit: crate::control::audit::InstanceAudit::default(),
+            audit: super::test_audit(),
             config_source: None,
         }),
         receiver,
@@ -367,7 +367,6 @@ async fn terminal_cache_hits_charge_the_decoded_representation_while_queued() {
             capture_id: CaptureSequence::new(7),
             capture_revision: 3,
             side: BodySide::Response,
-            representation: BodyRepresentation::Decoded,
         },
         DecodedBytes::new(Bytes::from_static(b"decoded"), Vec::new(), false),
     );

@@ -328,8 +328,7 @@ fn render_settings_content(
     let (scroll_target, scrolling_enabled, scroll_view, mut hit_regions) = {
         let items = build_settings_content_items(popup, table_max_height);
         let field_layout = calculate_settings_field_layout(&items);
-        let content_width =
-            settings_content_width_for_viewport(&items, field_layout, area.width, area.height);
+        let content_width = settings_content_width_for_viewport(&items, area.width, area.height);
         let content_layout =
             SettingsContentLayout::new(&items, field_layout, content_width, area.height);
         let scroll_target = match scroll_request {

@@ -1,5 +1,4 @@
 use crate::{
-    control::{CaptureStoreRuntimeStatus, InstanceRuntimeMetrics, MappingRuntimeStatus},
     control_rpc::{
         client::ControlRpcClient,
         protocol::{ControlError, ControlOperation, ControlResult, DeclaredClient, InstanceScope},
@@ -52,26 +51,6 @@ impl ControlRpcHandler for BenchmarkHandler {
                 recording_enabled: true,
                 retained_capture_count: 10_000,
                 settings_revision: 7,
-            }),
-            ControlOperation::GetStatus => Ok(ControlResult::GetStatus {
-                instance: self.instance.clone(),
-                local_proxy_url: format!("http://{}", self.instance.proxy_endpoint),
-                fluxcope_version: env!("CARGO_PKG_VERSION").to_owned(),
-                rpc_version: crate::control_rpc::protocol::RPC_VERSION,
-                config_source: None,
-                config_mode: self.config_mode,
-                persistence: self.persistence,
-                recording_enabled: true,
-                retained_capture_count: 10_000,
-                settings_revision: 7,
-                mapping: MappingRuntimeStatus::default(),
-                capture_store: CaptureStoreRuntimeStatus::default(),
-                capture_change_epoch: 1,
-                metrics: Box::new(InstanceRuntimeMetrics::default()),
-                private_rpc: crate::control::ControlRpcRuntimeStatus::default(),
-                body_work: Box::new(crate::control::BodyWorkRuntimeStatus::default()),
-                search_work: crate::control::SearchWorkRuntimeStatus::default(),
-                audit: Box::default(),
             }),
             _ => Err(ControlError::invalid_argument(
                 "benchmark handler does not implement this operation",

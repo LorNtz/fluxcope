@@ -1056,7 +1056,7 @@ pub(crate) fn explain_compiled_mapping(
     MappingExplanation {
         original_url: Some(uri),
         effective_url: trace.effective_uri,
-        local_path: trace.decision.local_path,
+        local_path: trace.local_path,
         matches,
         gates: validation.gates,
         diagnostics,

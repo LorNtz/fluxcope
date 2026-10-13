@@ -1479,7 +1479,7 @@ impl Broker {
             ));
         }
         let relayed_bytes = u64::try_from(page.content.len()).unwrap_or(u64::MAX);
-        let content = body_page_resource_contents(&requested, *page)?;
+        let content = body_page_resource_contents(&requested, *page);
         self.telemetry.record_bytes_relayed(relayed_bytes);
         Ok(ReadResourceResult::new(vec![content]))
     }

@@ -57,17 +57,8 @@ impl RuntimeControlClient {
         request: RuntimeRequest,
         cancelled: CancellationToken,
     ) -> Result<RuntimeReply, ControlError> {
-        let sender = if matches!(
-            &request,
-            RuntimeRequest::FinalizeSettingsTransaction { .. }
-                | RuntimeRequest::AbortSettingsTransaction { .. }
-        ) {
-            &self.terminal_commands
-        } else {
-            &self.commands
-        };
         let permit = tokio::select! {
-            permit = sender.reserve() => permit.map_err(|_| {
+            permit = self.commands.reserve() => permit.map_err(|_| {
                 ControlError::instance_unavailable("runtime command gateway is closed")
             })?,
             _ = cancelled.cancelled() => {

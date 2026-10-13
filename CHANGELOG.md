@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unsaved settings confirmation now offers bottom Save [s]/Apply [a] and Discard [d] buttons with working shortcuts and an initially focused top-right close control. Close, Esc and outside-click preserve the draft instead of discarding it.
 - Clarify settings mouse module responsibilities and group interaction tests by behavior rather than development iteration.
 - Settings inputs, preset filtering and request search now share one text input state/widget with grapheme-aware editing and consistent mouse positioning. Request search retains its 512-byte limit and atomic paste rejection; settings and filters remain uncapped.
+- Simplify internal RPC, capture, settings and UI representations by removing unused adapters, duplicate metadata and unexercised configurability; keep test-only instrumentation out of production builds.
 
 ### Fixed
 

@@ -43,9 +43,9 @@ pub use settings_popup::{
 #[cfg(test)]
 pub(crate) use settings_popup::{DialogActionKind, ProxyRow};
 pub(crate) use settings_popup::{
-    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PrefilterPatternEditState, ProxyRuleTable, ProxyWidget,
-    RULE_EDITOR_KEY_HINTS, RecordingWidget, RuleEditField, RuleEditorState, SelectTarget,
-    SettingsClickTarget, SettingsKeyHint, SettingsScrollRequest, SettingsSelectId,
+    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, PrefilterPatternEditState, ProxyPresetChoice,
+    ProxyRuleTable, ProxyWidget, RULE_EDITOR_KEY_HINTS, RecordingWidget, RuleEditField,
+    RuleEditorState, SettingsClickTarget, SettingsKeyHint, SettingsScrollRequest,
     validate_settings,
 };
 
