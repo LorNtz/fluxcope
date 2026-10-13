@@ -6,8 +6,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    FieldEditKind, ProxyRuleTable, ProxyWidget, RecordingWidget, SelectTarget, SettingsPaneFocus,
-    SettingsPopup, SettingsTopic,
+    FieldEditKind, ProxyRuleTable, ProxyWidget, RecordingWidget, SettingsPaneFocus, SettingsPopup,
+    SettingsTopic,
 };
 
 use super::content::{SettingsContentItem, SettingsFieldRow, SettingsFullWidthTable};
@@ -202,21 +202,12 @@ fn proxy_items(popup: &SettingsPopup, table_max_height: u16) -> Vec<SettingsCont
 }
 
 fn proxy_preset_select(popup: &SettingsPopup, row: usize) -> SettingsContentItem<'_> {
-    settings_select(popup, row, SelectTarget::ProxyPreset, "Preset")
-}
-
-fn settings_select<'a>(
-    popup: &'a SettingsPopup,
-    row: usize,
-    target: SelectTarget,
-    label: &'static str,
-) -> SettingsContentItem<'a> {
     SettingsContentItem::Field {
         row,
         field: SettingsFieldRow::new(
-            label,
-            popup.select_is_selected(target),
-            settings_select_control(popup, target),
+            "Preset",
+            popup.proxy_preset_is_selected(),
+            settings_select_control(popup),
         ),
     }
 }

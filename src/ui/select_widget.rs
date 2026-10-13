@@ -287,7 +287,6 @@ impl<Id> SelectWidget<'_, Id> {
                 self.state.map_or("", SelectState::filter),
                 self.state.map(SelectState::filter_cursor),
             )
-            .tab_width(BODY_TEXT_TAB_WIDTH)
             .style(style);
             if map_cursor {
                 Some(input.render_with_cursor_map(text_area, buf))

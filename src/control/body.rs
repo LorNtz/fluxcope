@@ -625,6 +625,7 @@ pub(crate) struct FoldedMatcher<'a> {
     failure: Box<[usize]>,
     boundaries: Box<[OriginalBoundary]>,
     next_boundary: usize,
+    #[cfg(test)]
     seen: usize,
     matched: usize,
     units_since_cancellation: usize,
@@ -659,6 +660,7 @@ impl<'a> FoldedMatcher<'a> {
             failure: failure.into_boxed_slice(),
             boundaries,
             next_boundary: 0,
+            #[cfg(test)]
             seen: 0,
             matched: 0,
             units_since_cancellation: 0,
@@ -678,7 +680,10 @@ impl<'a> FoldedMatcher<'a> {
         }
         self.boundaries[self.next_boundary] = boundary;
         self.next_boundary = (self.next_boundary + 1) % self.boundaries.len();
-        self.seen = self.seen.saturating_add(1);
+        #[cfg(test)]
+        {
+            self.seen = self.seen.saturating_add(1);
+        }
         while self.matched > 0 && value != self.query[self.matched] {
             self.matched = self.failure[self.matched - 1];
         }

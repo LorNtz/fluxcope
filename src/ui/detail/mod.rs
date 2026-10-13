@@ -42,7 +42,6 @@ struct DetailHeaderKey {
 
 struct DetailHeaderCache {
     key: DetailHeaderKey,
-    width: u16,
     model: HeaderTableModel,
 }
 
@@ -157,21 +156,14 @@ impl View for DetailView {
                 if !cache_matches {
                     let model = HeaderTableModel::for_tab(&req, key.tab, table_area.width)
                         .expect("table detail should use a header tab");
-                    self.header_table_cache = Some(DetailHeaderCache {
-                        key,
-                        width: table_area.width,
-                        model,
-                    });
+                    self.header_table_cache = Some(DetailHeaderCache { key, model });
                 }
                 let selected_row = app.detail_panel.selected_header_row;
                 let cache = self
                     .header_table_cache
                     .as_mut()
                     .expect("header table should be cached");
-                if cache.width != table_area.width {
-                    cache.model.set_width(table_area.width);
-                    cache.width = table_area.width;
-                }
+                cache.model.set_width(table_area.width);
                 let lines = cache.model.render_lines(selected_row);
                 let total_lines: u16 = lines.len().try_into().unwrap_or(u16::MAX);
                 let offset = app
@@ -249,19 +241,12 @@ impl MouseHandler for DetailView {
                         .is_some_and(|cache| Some(cache.key) == key);
                     if !cache_key_matches {
                         self.header_table_cache = live_header.and_then(|(key, request)| {
-                            HeaderTableModel::for_tab(&request, key.tab, content_area.width).map(
-                                |model| DetailHeaderCache {
-                                    key,
-                                    width: content_area.width,
-                                    model,
-                                },
-                            )
+                            HeaderTableModel::for_tab(&request, key.tab, content_area.width)
+                                .map(|model| DetailHeaderCache { key, model })
                         });
-                    } else if let Some(cache) = self.header_table_cache.as_mut()
-                        && cache.width != content_area.width
-                    {
+                    }
+                    if let Some(cache) = self.header_table_cache.as_mut() {
                         cache.model.set_width(content_area.width);
-                        cache.width = content_area.width;
                     }
                     let selected_row = self.header_table_cache.as_ref().and_then(|cache| {
                         header_table_row_at_position(

@@ -29,7 +29,7 @@ fn decoded_cache_accepts_only_terminal_stream_states() {
 }
 
 #[test]
-fn decoded_cache_keys_exact_generation_revision_side_and_representation() {
+fn decoded_cache_keys_exact_generation_revision_and_side() {
     let mut cache = DecodedBodyCache::new(64);
     let first = key(scope(19010), 3, BodySide::Request);
     let other_generation = key(scope(19011), 3, BodySide::Request);

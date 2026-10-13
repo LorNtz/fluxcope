@@ -4,7 +4,9 @@ use std::sync::{
 };
 
 use serde_json::json;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -29,8 +31,10 @@ struct BodyWorkAdmissionInner {
     semaphore: Arc<Semaphore>,
     queue: Mutex<QueueState>,
     active: AtomicUsize,
+    #[cfg(test)]
     active_waiters: AtomicUsize,
     rejected: AtomicU64,
+    #[cfg(test)]
     changed: Notify,
 }
 
@@ -47,8 +51,10 @@ impl BodyWorkAdmission {
                 semaphore: Arc::new(Semaphore::new(ACTIVE_BODY_WORK_LIMIT)),
                 queue: Mutex::new(QueueState::default()),
                 active: AtomicUsize::new(0),
+                #[cfg(test)]
                 active_waiters: AtomicUsize::new(0),
                 rejected: AtomicU64::new(0),
+                #[cfg(test)]
                 changed: Notify::new(),
             }),
         }
@@ -107,6 +113,7 @@ impl BodyWorkAdmission {
         queue.jobs += 1;
         queue.bytes = next_bytes;
         drop(queue);
+        #[cfg(test)]
         self.inner.changed.notify_waiters();
         Ok(QueuedBodyWorkLease {
             admission: self.clone(),
@@ -124,6 +131,7 @@ impl BodyWorkAdmission {
         queue.jobs = queue.jobs.saturating_sub(1);
         queue.bytes = queue.bytes.saturating_sub(input_bytes);
         drop(queue);
+        #[cfg(test)]
         self.inner.changed.notify_waiters();
     }
 
@@ -205,11 +213,14 @@ impl QueuedBodyWorkLease {
         deadline: Instant,
         cancelled: CancellationToken,
     ) -> Result<ActiveBodyWorkLease, ControlError> {
-        self.admission
-            .inner
-            .active_waiters
-            .fetch_add(1, Ordering::AcqRel);
-        self.admission.inner.changed.notify_waiters();
+        #[cfg(test)]
+        {
+            self.admission
+                .inner
+                .active_waiters
+                .fetch_add(1, Ordering::AcqRel);
+            self.admission.inner.changed.notify_waiters();
+        }
         let semaphore = Arc::clone(&self.admission.inner.semaphore);
         let permit = tokio::select! {
             biased;
@@ -224,6 +235,7 @@ impl QueuedBodyWorkLease {
                 )
             }),
         };
+        #[cfg(test)]
         self.admission
             .inner
             .active_waiters
@@ -280,6 +292,7 @@ impl ActiveBodyWorkLease {
 impl Drop for ActiveBodyWorkLease {
     fn drop(&mut self) {
         self.admission.inner.active.fetch_sub(1, Ordering::AcqRel);
+        #[cfg(test)]
         self.admission.inner.changed.notify_waiters();
     }
 }

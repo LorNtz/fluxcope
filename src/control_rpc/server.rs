@@ -12,10 +12,7 @@ use crate::{
         },
     },
     instance::InstanceIdentity,
-    settings::{
-        ConfigMode, PersistenceMode,
-        mapping_ops::{MappingMutation, MappingObjectRef},
-    },
+    settings::mapping_ops::{MappingMutation, MappingObjectRef},
 };
 use std::{
     future::Future,
@@ -56,9 +53,6 @@ pub(crate) struct ControlMutationAudit {
 #[derive(Clone, Debug)]
 pub(crate) enum ControlCallOutcome {
     Success {
-        instance: Option<InstanceScope>,
-        config_mode: Option<ConfigMode>,
-        persistence: Option<PersistenceMode>,
         settings_revision: Option<u64>,
         affected: Option<BoundedAuditTarget>,
     },
@@ -471,75 +465,39 @@ impl ControlCallOutcome {
                 retryable: error.retryable(),
             };
         };
-        let instance = Some(result.instance_scope().clone());
-        let (config_mode, persistence, settings_revision, affected) = match result {
+        let (settings_revision, affected) = match result {
             ControlResult::DescribeInstance {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
+                settings_revision, ..
             }
             | ControlResult::GetStatus {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
-            } => (
-                Some(*config_mode),
-                Some(*persistence),
-                Some(*settings_revision),
-                None,
-            ),
+                settings_revision, ..
+            } => (Some(*settings_revision), None),
             ControlResult::GetMappingSettings {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
+                settings_revision, ..
             }
             | ControlResult::ValidateMappingSettings {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
+                settings_revision, ..
             }
             | ControlResult::PreviewMappingMutation {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
+                settings_revision, ..
             }
             | ControlResult::ExplainMapping {
-                config_mode,
-                persistence,
-                settings_revision,
-                ..
-            } => (
-                Some(*config_mode),
-                Some(*persistence),
-                Some(settings_revision.get()),
-                None,
-            ),
+                settings_revision, ..
+            } => (Some(settings_revision.get()), None),
             ControlResult::MutateMapping {
-                config_mode,
-                persistence,
                 settings_revision,
                 affected,
                 ..
             } => {
                 let (target, truncated) = affected.bounded_clone(MAX_AUDIT_TARGET_NAME_BYTES);
                 (
-                    Some(*config_mode),
-                    Some(*persistence),
                     Some(settings_revision.get()),
                     Some(BoundedAuditTarget { target, truncated }),
                 )
             }
-            _ => (None, None, None, None),
+            _ => (None, None),
         };
         Self::Success {
-            instance,
-            config_mode,
-            persistence,
             settings_revision,
             affected,
         }

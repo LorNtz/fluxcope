@@ -233,13 +233,10 @@ fn contents_json(contents: ResourceContents) -> Value {
 #[test]
 fn raw_resource_base64_encodes_only_the_already_sliced_page_and_emits_exact_meta() {
     let requested = uri(BodySide::Response, BodyRepresentation::Raw, 1, 2);
-    let value = contents_json(
-        body_page_resource_contents(
-            &requested,
-            page(Bytes::from_static(&[0xff, 0x00]), BodyRepresentation::Raw),
-        )
-        .expect("raw contents"),
-    );
+    let value = contents_json(body_page_resource_contents(
+        &requested,
+        page(Bytes::from_static(&[0xff, 0x00]), BodyRepresentation::Raw),
+    ));
     assert_eq!(value["uri"], requested.as_str());
     assert_eq!(value["blob"], json!("/wA="));
     assert!(value.get("text").is_none());
@@ -271,13 +268,10 @@ fn raw_resource_base64_encodes_only_the_already_sliced_page_and_emits_exact_meta
 #[test]
 fn decoded_utf8_is_text_with_retained_mime_and_decoded_binary_is_blob() {
     let requested = uri(BodySide::Request, BodyRepresentation::Decoded, 1, 2);
-    let text = contents_json(
-        body_page_resource_contents(
-            &requested,
-            page(Bytes::from_static(b"ok"), BodyRepresentation::Decoded),
-        )
-        .expect("decoded text"),
-    );
+    let text = contents_json(body_page_resource_contents(
+        &requested,
+        page(Bytes::from_static(b"ok"), BodyRepresentation::Decoded),
+    ));
     assert_eq!(text["uri"], requested.as_str());
     assert_eq!(text["text"], json!("ok"));
     assert_eq!(text["mimeType"], json!("text/plain; charset=utf-8"));
@@ -291,16 +285,13 @@ fn decoded_utf8_is_text_with_retained_mime_and_decoded_binary_is_blob() {
         json!(true)
     );
 
-    let binary = contents_json(
-        body_page_resource_contents(
-            &requested,
-            page(
-                Bytes::from_static(&[0xff, 0x00]),
-                BodyRepresentation::Decoded,
-            ),
-        )
-        .expect("decoded binary"),
-    );
+    let binary = contents_json(body_page_resource_contents(
+        &requested,
+        page(
+            Bytes::from_static(&[0xff, 0x00]),
+            BodyRepresentation::Decoded,
+        ),
+    ));
     assert_eq!(binary["blob"], json!("/wA="));
     assert!(binary.get("text").is_none());
 }

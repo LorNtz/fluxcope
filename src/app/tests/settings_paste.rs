@@ -437,16 +437,15 @@ fn settings_paste_filters_presets_at_unicode_cursor_without_committing() {
     focus_settings_content(&mut app);
     app.handle_key_event(key(KeyCode::Enter));
     app.begin_request_search();
-    let target = app.settings_popup.active_select_target().unwrap();
     let focused = app
         .settings_popup
-        .select_state(target)
+        .select_state()
         .unwrap()
         .focused_filtered_index();
     app.handle_paste("\r\n\t");
     assert_eq!(
         app.settings_popup
-            .select_state(target)
+            .select_state()
             .unwrap()
             .focused_filtered_index(),
         focused
@@ -454,13 +453,10 @@ fn settings_paste_filters_presets_at_unicode_cursor_without_committing() {
     app.handle_paste("前猫");
     app.handle_key_event(key(KeyCode::Left));
     app.handle_paste("雪\n");
-    let state = app.settings_popup.select_state(target).unwrap();
+    let state = app.settings_popup.select_state().unwrap();
     assert_eq!(state.filter(), "前雪猫");
     app.handle_key_event(key(KeyCode::Backspace));
-    assert_eq!(
-        app.settings_popup.select_state(target).unwrap().filter(),
-        "前猫"
-    );
+    assert_eq!(app.settings_popup.select_state().unwrap().filter(), "前猫");
     assert_eq!(app.settings_popup.draft(), &settings);
     assert_eq!(app.request_search_query(), None);
     app.handle_key_event(key(KeyCode::Enter));
@@ -479,9 +475,8 @@ fn settings_paste_keeps_creation_available_without_an_implicit_commit() {
     focus_settings_content(&mut app);
     app.handle_key_event(key(KeyCode::Enter));
     app.handle_paste("unmatched\n");
-    let target = app.settings_popup.active_select_target().unwrap();
     assert_eq!(
-        app.settings_popup.select_state(target).unwrap().filter(),
+        app.settings_popup.select_state().unwrap().filter(),
         "unmatched"
     );
     assert!(app.settings_popup.draft().proxy.is_none());

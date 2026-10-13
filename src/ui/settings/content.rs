@@ -9,7 +9,7 @@ use ratatui::{
 };
 use tui_scrollview::ScrollView;
 
-use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SelectTarget, SettingsClickTarget};
+use crate::app::{BODY_TEXT_TAB_WIDTH, ProxyRuleTable, SettingsClickTarget};
 
 use super::hit_regions::ClickRegion;
 use super::prefilter::PrefilterTableWidget;
@@ -35,56 +35,17 @@ impl SettingsTableScrollRegion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SettingsFieldLayoutConfig {
-    selected_prefix: &'static str,
-    idle_prefix: &'static str,
-    label_control_gap: u16,
-}
-
-impl Default for SettingsFieldLayoutConfig {
-    fn default() -> Self {
-        Self {
-            selected_prefix: "  ",
-            idle_prefix: "  ",
-            label_control_gap: 2,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::ui) struct SettingsFieldLayout {
-    selected_prefix: &'static str,
-    idle_prefix: &'static str,
-    prefix_width: u16,
     label_width: u16,
-    label_control_gap: u16,
 }
 
 impl SettingsFieldLayout {
-    fn from_config(label_width: u16, config: SettingsFieldLayoutConfig) -> Self {
-        Self {
-            selected_prefix: config.selected_prefix,
-            idle_prefix: config.idle_prefix,
-            prefix_width: text_width(config.selected_prefix).max(text_width(config.idle_prefix)),
-            label_width,
-            label_control_gap: config.label_control_gap,
-        }
-    }
-
-    fn control_width(self, row_width: u16) -> u16 {
-        let consumed = self
-            .prefix_width
-            .saturating_add(self.label_width)
-            .saturating_add(self.label_control_gap);
-        row_width.saturating_sub(consumed)
-    }
-
     pub(in crate::ui) fn areas(self, area: Rect) -> SettingsFieldRowAreas {
         let label_y = area.y.saturating_add(area.height.saturating_sub(1) / 2);
-        let prefix_width = self.prefix_width.min(area.width);
+        let prefix_width = 2.min(area.width);
         let prefix = Rect::new(area.x, label_y, prefix_width, area.height.min(1));
 
-        let label_x = area.x.saturating_add(self.prefix_width).min(area.right());
+        let label_x = area.x.saturating_add(2).min(area.right());
         let label_right = label_x.saturating_add(self.label_width).min(area.right());
         let label = Rect::new(
             label_x,
@@ -95,7 +56,7 @@ impl SettingsFieldLayout {
 
         let control_x = label_x
             .saturating_add(self.label_width)
-            .saturating_add(self.label_control_gap)
+            .saturating_add(2)
             .min(area.right());
         let control = Rect::new(
             control_x,
@@ -108,14 +69,6 @@ impl SettingsFieldLayout {
             prefix,
             label,
             control,
-        }
-    }
-
-    fn prefix(self, selected: bool) -> &'static str {
-        if selected {
-            self.selected_prefix
-        } else {
-            self.idle_prefix
         }
     }
 }
@@ -149,7 +102,6 @@ fn settings_field_style(selected: bool, activity: SettingsControlActivity) -> Se
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::ui) struct SettingsSelectLayout {
-    pub(super) target: SelectTarget,
     pub(in crate::ui) layout: crate::ui::select_widget::SelectWidgetLayout,
 }
 
@@ -166,7 +118,7 @@ impl SettingsSelectLayout {
 }
 
 pub(super) trait SettingsControlView {
-    fn height_for_width(&self, width: u16) -> u16;
+    fn height(&self) -> u16;
     fn activity(&self) -> SettingsControlActivity {
         SettingsControlActivity::Idle
     }
@@ -218,9 +170,8 @@ impl<'a> SettingsFieldRow<'a> {
         text_width(self.label.as_ref())
     }
 
-    fn height(&self, layout: SettingsFieldLayout, width: u16) -> u16 {
-        let control_width = layout.control_width(width);
-        self.control.height_for_width(control_width).max(1)
+    fn height(&self) -> u16 {
+        self.control.height().max(1)
     }
 
     fn render_into(
@@ -235,13 +186,13 @@ impl<'a> SettingsFieldRow<'a> {
             return;
         }
 
-        let height = self.height(layout, area.width).min(area.height);
+        let height = self.height().min(area.height);
         let area = Rect::new(area.x, area.y, area.width, height);
         let areas = layout.areas(area);
         let style = settings_field_style(self.selected, self.control.activity());
 
         if !areas.prefix.is_empty() {
-            Line::styled(layout.prefix(self.selected), style.control).render(areas.prefix, buf);
+            Line::styled("  ", style.control).render(areas.prefix, buf);
         }
         if !areas.label.is_empty() {
             Line::styled(self.label.as_ref(), style.control).render(areas.label, buf);
@@ -269,7 +220,7 @@ impl<'a> SettingsFieldRow<'a> {
             return;
         }
 
-        let height = self.height(layout, area.width).min(area.height);
+        let height = self.height().min(area.height);
         let area = Rect::new(area.x, area.y, area.width, height);
         let areas = layout.areas(area);
         self.control
@@ -282,7 +233,7 @@ impl<'a> SettingsFieldRow<'a> {
         layout: SettingsFieldLayout,
         overlay_bounds: Rect,
     ) -> Option<SettingsSelectLayout> {
-        let height = self.height(layout, area.width).min(area.height);
+        let height = self.height().min(area.height);
         let area = Rect::new(area.x, area.y, area.width, height);
         let areas = layout.areas(area);
         self.control.select_layout(areas.control, overlay_bounds)
@@ -389,11 +340,11 @@ pub(in crate::ui) enum SettingsContentItem<'a> {
 }
 
 impl SettingsContentItem<'_> {
-    pub(in crate::ui) fn height(&self, layout: SettingsFieldLayout, width: u16) -> u16 {
+    pub(in crate::ui) fn height(&self) -> u16 {
         match self {
             Self::Line(_) => 1,
             Self::Divider { .. } => SETTINGS_DIVIDER_HEIGHT,
-            Self::Field { field, .. } => field.height(layout, width),
+            Self::Field { field, .. } => field.height(),
             Self::FullWidthTable { table, .. } => table.height(),
         }
     }
@@ -469,7 +420,6 @@ impl SettingsContentItem<'_> {
 
     pub(super) fn select_layout(
         &self,
-        target: Option<SelectTarget>,
         area: Rect,
         layout: SettingsFieldLayout,
         overlay_bounds: Rect,
@@ -477,11 +427,7 @@ impl SettingsContentItem<'_> {
         let Self::Field { field, .. } = self else {
             return None;
         };
-        let select = field.select_layout(area, layout, overlay_bounds)?;
-        match target {
-            Some(target) if select.target != target => None,
-            _ => Some(select),
-        }
+        field.select_layout(area, layout, overlay_bounds)
     }
 }
 
@@ -533,54 +479,41 @@ fn titled_divider_text(title: &str, width: u16) -> String {
 pub(in crate::ui) fn settings_field_layout(
     items: &[SettingsContentItem<'_>],
 ) -> SettingsFieldLayout {
-    settings_field_layout_with_config(items, SettingsFieldLayoutConfig::default())
-}
-
-fn settings_field_layout_with_config(
-    items: &[SettingsContentItem<'_>],
-    config: SettingsFieldLayoutConfig,
-) -> SettingsFieldLayout {
     let label_width = items
         .iter()
         .filter_map(SettingsContentItem::field_label_width)
         .max()
         .unwrap_or(0);
-    SettingsFieldLayout::from_config(label_width, config)
+    SettingsFieldLayout { label_width }
 }
 
-pub(super) fn settings_field_layout_for_rows(
-    rows: &[SettingsFieldRow<'_>],
-    config: SettingsFieldLayoutConfig,
-) -> SettingsFieldLayout {
+pub(super) fn settings_field_layout_for_rows(rows: &[SettingsFieldRow<'_>]) -> SettingsFieldLayout {
     let label_width = rows
         .iter()
         .map(SettingsFieldRow::label_width)
         .max()
         .unwrap_or(0);
-    SettingsFieldLayout::from_config(label_width, config)
+    SettingsFieldLayout { label_width }
 }
 
 pub(in crate::ui) fn settings_content_height(
     items: &[SettingsContentItem<'_>],
     min_height: u16,
-    layout: SettingsFieldLayout,
-    content_width: u16,
 ) -> u16 {
     items
         .iter()
-        .map(|item| item.height(layout, content_width))
+        .map(SettingsContentItem::height)
         .fold(0u16, u16::saturating_add)
         .max(min_height)
 }
 
 pub(super) fn settings_content_width_for_viewport(
     items: &[SettingsContentItem<'_>],
-    field_layout: SettingsFieldLayout,
     viewport_width: u16,
     viewport_height: u16,
 ) -> u16 {
     let full_width = viewport_width.max(1);
-    let body_height = settings_content_height(items, 0, field_layout, full_width);
+    let body_height = settings_content_height(items, 0);
 
     if body_height > viewport_height {
         full_width.saturating_sub(1).max(1)
@@ -606,7 +539,7 @@ impl<'items, 'content> SettingsContentLayout<'items, 'content> {
         content_width: u16,
         viewport_height: u16,
     ) -> Self {
-        let body_height = settings_content_height(items, 0, field_layout, content_width);
+        let body_height = settings_content_height(items, 0);
 
         Self {
             items,
@@ -624,7 +557,7 @@ impl<'items, 'content> SettingsContentLayout<'items, 'content> {
     ) -> impl Iterator<Item = (&SettingsContentItem<'content>, Rect)> + '_ {
         let mut y = 0;
         self.items.iter().map(move |item| {
-            let height = item.height(self.field_layout, self.content_width);
+            let height = item.height();
             let area = Rect::new(0, y, self.content_width, height);
             y = y.saturating_add(height);
 
@@ -663,17 +596,16 @@ impl<'items, 'content> SettingsContentLayout<'items, 'content> {
 #[cfg(test)]
 pub(in crate::ui) fn settings_select_layout(
     items: &[SettingsContentItem<'_>],
-    target: Option<SelectTarget>,
     layout: SettingsFieldLayout,
     content_width: u16,
     content_height: u16,
 ) -> Option<SettingsSelectLayout> {
     let mut y = 0;
     for item in items {
-        let height = item.height(layout, content_width);
+        let height = item.height();
         let row_area = Rect::new(0, y, content_width, height);
         let overlay_bounds = Rect::new(0, y, content_width, content_height.saturating_sub(y));
-        if let Some(select) = item.select_layout(target, row_area, layout, overlay_bounds) {
+        if let Some(select) = item.select_layout(row_area, layout, overlay_bounds) {
             return Some(select);
         }
         y = y.saturating_add(height);

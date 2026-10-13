@@ -131,7 +131,7 @@ struct ReadKey {
     operation: ControlOperationKind,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct KnownInstance {
     endpoint: String,
     run_id: String,
@@ -139,7 +139,6 @@ struct KnownInstance {
     persistence: Option<String>,
 }
 
-#[derive(Default)]
 struct AuditState {
     reads: HashMap<ReadKey, StoredReadAuditBucket>,
     overflow: HashMap<u64, StoredReadAuditBucket>,
@@ -149,7 +148,7 @@ struct AuditState {
     known: KnownInstance,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct InstanceAudit {
     state: Arc<Mutex<AuditState>>,
 }
@@ -168,7 +167,11 @@ impl InstanceAudit {
                     config_mode: enum_string(&config_mode),
                     persistence: enum_string(&persistence),
                 },
-                ..AuditState::default()
+                reads: HashMap::new(),
+                overflow: HashMap::new(),
+                minimum_window: None,
+                mutations: VecDeque::new(),
+                response_delivery_failures: 0,
             })),
         }
     }
@@ -177,7 +180,6 @@ impl InstanceAudit {
         let minimum_window = minimum_window(call.completed_unix_seconds);
         let mutation_record = {
             let mut state = self.state.lock().expect("instance audit lock poisoned");
-            update_known_instance(&mut state.known, &call.outcome);
             if call.response_delivery_failed {
                 state.response_delivery_failures =
                     state.response_delivery_failures.saturating_add(1);
@@ -258,32 +260,6 @@ fn prune_mutation_history(state: &mut AuditState, minimum_unix_seconds: u64) {
     state
         .mutations
         .retain(|record| record.completed_unix_seconds >= minimum_unix_seconds);
-}
-
-fn update_known_instance(known: &mut KnownInstance, outcome: &ControlCallOutcome) {
-    let ControlCallOutcome::Success {
-        instance,
-        config_mode,
-        persistence,
-        ..
-    } = outcome
-    else {
-        return;
-    };
-    if let Some(instance) = instance {
-        if known.endpoint.is_empty() {
-            known.endpoint = instance.proxy_endpoint.to_string();
-        }
-        if known.run_id.is_empty() {
-            known.run_id = instance.run_id.to_string();
-        }
-    }
-    if known.config_mode.is_none() {
-        known.config_mode = config_mode.as_ref().and_then(enum_string);
-    }
-    if known.persistence.is_none() {
-        known.persistence = persistence.as_ref().and_then(enum_string);
-    }
 }
 
 fn record_read(state: &mut AuditState, call: ControlCallAudit) {
@@ -453,6 +429,14 @@ mod tests {
         }
     }
 
+    fn audit() -> InstanceAudit {
+        InstanceAudit::new(
+            instance(),
+            ConfigMode::Temporary,
+            PersistenceMode::Ephemeral,
+        )
+    }
+
     fn client(name: &str) -> DeclaredClient {
         DeclaredClient {
             name: name.to_owned(),
@@ -493,9 +477,6 @@ mod tests {
             operation: ControlOperationKind::SearchCaptures,
             mutation: None,
             outcome: ControlCallOutcome::Success {
-                instance: Some(instance()),
-                config_mode: Some(ConfigMode::Temporary),
-                persistence: Some(PersistenceMode::Ephemeral),
                 settings_revision: None,
                 affected: None,
             },
@@ -507,7 +488,7 @@ mod tests {
 
     #[test]
     fn response_delivery_failures_are_counted_without_reclassifying_domain_outcomes() {
-        let audit = InstanceAudit::default();
+        let audit = audit();
         let mut call = read_call(client("agent"), 120, 0);
         call.response_delivery_failed = true;
         audit.record(call);
@@ -519,7 +500,11 @@ mod tests {
     }
     #[test]
     fn mutation_audit_excludes_traffic_and_mapping_values() {
-        let audit = InstanceAudit::default();
+        let audit = InstanceAudit::new(
+            instance(),
+            ConfigMode::DefaultOwned,
+            PersistenceMode::Persistent,
+        );
         audit.record(ControlCallAudit {
             response_delivery_failed: false,
             client: client("agent"),
@@ -534,9 +519,6 @@ mod tests {
                 })),
             }),
             outcome: ControlCallOutcome::Success {
-                instance: Some(instance()),
-                config_mode: Some(ConfigMode::DefaultOwned),
-                persistence: Some(PersistenceMode::Persistent),
                 settings_revision: Some(9),
                 affected: Some(bounded_target(MappingObjectRef::Rule {
                     preset: "dev".to_owned(),
@@ -633,7 +615,7 @@ mod tests {
 
     #[test]
     fn reads_aggregate_in_sixty_second_buckets_across_connections() {
-        let audit = InstanceAudit::default();
+        let audit = audit();
         audit.record(read_call(client("agent"), 120, 100));
         audit.record(read_call(client("agent"), 179, 250));
         audit.record(ControlCallAudit {
@@ -709,7 +691,7 @@ mod tests {
 
     #[test]
     fn read_aggregation_caps_keys_and_uses_one_overflow_bucket() {
-        let audit = InstanceAudit::default();
+        let audit = audit();
         for index in 0..300 {
             audit.record(read_call(client(&format!("agent-{index}")), 120, 1));
         }
@@ -726,7 +708,7 @@ mod tests {
 
     #[test]
     fn audit_error_records_only_stable_code_and_safe_details() {
-        let audit = InstanceAudit::default();
+        let audit = audit();
         audit.record(ControlCallAudit {
             response_delivery_failed: false,
             operation: ControlOperationKind::SetRecordingEnabled,

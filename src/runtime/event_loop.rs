@@ -816,7 +816,6 @@ fn execute_control_request(
         RuntimeRequest::GetCaptureBodyMetadata { capture_id, side } => {
             let record = retained_capture(app, capture_id)?;
             let snapshot = record.snapshot(CaptureSnapshotMode::MetadataOnly);
-            validate_capture_revision(capture_id, None, snapshot.revision)?;
             let (body, headers) = body_snapshot_parts(&snapshot, side);
             Ok(RuntimeReply::CaptureBodyMetadata(Box::new(
                 CaptureBodyMetadataReply {
@@ -840,7 +839,7 @@ fn execute_control_request(
         } => {
             let record = retained_capture(app, capture_id)?;
             let snapshot = record.snapshot(CaptureSnapshotMode::WithBodyPreviews);
-            validate_capture_revision(capture_id, Some(expected_revision), snapshot.revision)?;
+            validate_capture_revision(capture_id, expected_revision, snapshot.revision)?;
             let (body, headers) = body_snapshot_parts(&snapshot, side);
             Ok(RuntimeReply::CaptureBodySnapshot(Box::new(
                 CaptureBodySnapshotReply {
@@ -890,12 +889,10 @@ fn retained_capture(
 #[cfg(unix)]
 fn validate_capture_revision(
     capture_id: CaptureSequence,
-    expected_revision: Option<u64>,
+    expected_revision: u64,
     current_revision: u64,
 ) -> std::result::Result<(), ControlError> {
-    if let Some(expected_revision) = expected_revision
-        && expected_revision != current_revision
-    {
+    if expected_revision != current_revision {
         return Err(ControlError::new(
             ControlErrorCode::CaptureRevisionConflict,
             "capture revision changed",

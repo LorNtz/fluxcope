@@ -520,7 +520,6 @@ pub(super) struct BodyCacheKey {
     pub(super) capture_id: CaptureSequence,
     pub(super) capture_revision: u64,
     pub(super) side: BodySide,
-    pub(super) representation: BodyRepresentation,
 }
 
 struct DecodedCacheEntry {
@@ -694,7 +693,7 @@ impl RuntimeBodyServices {
             runtime,
             capture_changes,
             body_work: Arc::clone(&self.admission),
-            audit: InstanceAudit::default(),
+            audit: test_audit(),
             config_source: None,
         }
     }
@@ -1270,7 +1269,6 @@ impl BodyJobScheduler {
             capture_id: request.capture_id,
             capture_revision: request.capture_revision,
             side: request.side,
-            representation: request.representation,
         };
         let cached = (request.representation == BodyRepresentation::Decoded
             && should_cache_decoded_body(&metadata.status))
@@ -1656,6 +1654,16 @@ pub(super) struct ControlServiceContext {
     pub(super) config_source: Option<PathBuf>,
 }
 
+// These runtime fixtures do not inspect audit contents; use an explicit dummy identity.
+#[cfg(test)]
+fn test_audit() -> InstanceAudit {
+    InstanceAudit::new(
+        body_test_support::scope(8989),
+        crate::settings::ConfigMode::Temporary,
+        crate::settings::PersistenceMode::Ephemeral,
+    )
+}
+
 #[cfg(test)]
 impl From<RuntimeControlClient> for ControlServiceContext {
     fn from(runtime: RuntimeControlClient) -> Self {
@@ -1663,7 +1671,7 @@ impl From<RuntimeControlClient> for ControlServiceContext {
             runtime,
             capture_changes: CaptureChangeFeed::new(),
             body_work: Arc::new(BodyWorkAdmission::default()),
-            audit: InstanceAudit::default(),
+            audit: test_audit(),
             config_source: None,
         }
     }
@@ -2275,12 +2283,7 @@ impl ControlRpcHandler for RuntimeControlHandler {
                         .await?
                         .instance;
                     let result = client
-                        .mutate_mapping(
-                            *mutation,
-                            expected_revision,
-                            crate::runtime::settings::SettingsTransactionOrigin::Mcp,
-                            cancelled,
-                        )
+                        .mutate_mapping(*mutation, expected_revision, cancelled)
                         .await?;
                     Ok(ControlResult::MutateMapping {
                         instance: identity,

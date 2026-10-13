@@ -1,8 +1,8 @@
 use crate::app::{App, PanelFocus, PopupFocus, RequestTreeNodeSnapshot};
 #[cfg(test)]
 use crate::app::{
-    BODY_LOADING_TEXT, BodyViewerKey, MainDisplayTab, ProxyRow, ProxyRuleTable, SelectTarget,
-    SettingsPaneFocus, SettingsPopup, SettingsTopic,
+    BODY_LOADING_TEXT, BodyViewerKey, MainDisplayTab, ProxyRow, ProxyRuleTable, SettingsPaneFocus,
+    SettingsPopup, SettingsTopic,
 };
 use crossterm::event::MouseEvent;
 #[cfg(test)]

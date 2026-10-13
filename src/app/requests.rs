@@ -26,7 +26,7 @@ impl App {
         let evicted = self.captures.insert(record);
         log::info!("request received: {}", uri);
 
-        if !evicted.is_empty() {
+        if evicted {
             self.repair_request_list_after_retention_eviction();
         }
 

@@ -4,11 +4,11 @@ use edtui::{
     actions::motion::{MoveToFirstRow, MoveToLastRow},
     actions::search::StartSearch,
     actions::{
-        Action, CopyLine, CopySelection, FindNext, FindPrevious, MoveBackward, MoveDown,
-        MoveForward, MoveHalfPageDown, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst,
-        MoveToMatchinBracket, MoveToStartOfLine, MoveUp, MoveWordBackward, MoveWordForward,
-        MoveWordForwardToEndOfWord, RemoveCharFromSearch, SelectInnerBetween, SelectInnerWord,
-        SelectLine, SwitchMode, TriggerSearch,
+        Action, CopySelection, FindNext, FindPrevious, MoveBackward, MoveDown, MoveForward,
+        MoveHalfPageDown, MoveHalfPageUp, MoveToEndOfLine, MoveToFirst, MoveToMatchinBracket,
+        MoveToStartOfLine, MoveUp, MoveWordBackward, MoveWordForward, MoveWordForwardToEndOfWord,
+        RemoveCharFromSearch, SelectInnerBetween, SelectInnerWord, SelectLine, SwitchMode,
+        TriggerSearch,
     },
     events::{KeyEvent as EditorKeyEvent, KeyEventHandler, KeyEventRegister},
 };
@@ -121,11 +121,6 @@ fn read_only_keymap() -> HashMap<KeyEventRegister, Action> {
         &mut keymap,
         KeyEventRegister::v([EditorKeyEvent::Char('y')]),
         CopySelection,
-    );
-    bind(
-        &mut keymap,
-        KeyEventRegister::n([EditorKeyEvent::Char('y'), EditorKeyEvent::Char('y')]),
-        CopyLine,
     );
 
     keymap

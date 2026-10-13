@@ -442,7 +442,7 @@ impl fmt::Display for BodyResourceUri {
 pub(super) fn body_page_resource_contents(
     requested: &BodyResourceUri,
     page: BodyPage,
-) -> Result<ResourceContents, ControlError> {
+) -> ResourceContents {
     let next_uri = page
         .next_offset
         .map(|offset| requested.next_page(offset).to_string());
@@ -479,7 +479,7 @@ pub(super) fn body_page_resource_contents(
     if let Some(media_type) = page.media_type {
         contents = contents.with_mime_type(media_type);
     }
-    Ok(contents.with_meta(MetaObject(metadata)))
+    contents.with_meta(MetaObject(metadata))
 }
 
 pub(super) fn selection_page_resource_contents(

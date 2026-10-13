@@ -42,7 +42,6 @@ pub(crate) struct SelectCommit<Id> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SelectOutcome<Id> {
     None,
-    Opened,
     Closed,
     Committed(SelectCommit<Id>),
 }
@@ -179,12 +178,6 @@ impl SelectState {
         max_visible_items: usize,
     ) -> SelectOutcome<Id> {
         if !self.open {
-            if key.code == KeyCode::Enter {
-                self.open = true;
-                self.clamp_focus(items);
-                self.ensure_focus_visible(max_visible_items);
-                return SelectOutcome::Opened;
-            }
             return SelectOutcome::None;
         }
 

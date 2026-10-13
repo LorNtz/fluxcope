@@ -59,7 +59,7 @@ fn settings_mouse_dropdown_outside_consumes_one_layer_and_nonleft_is_inert() {
     app.open_settings_popup();
     app.settings_popup
         .select_topic_for_tests(SettingsTopic::Proxy);
-    app.settings_popup.start_select(SelectTarget::ProxyPreset);
+    app.settings_popup.start_proxy_preset_select();
     let (mut ui, _) = render_to_buffer_with_size(&mut app, 100, 28);
     for kind in [
         MouseEventKind::Down(MouseButton::Right),
@@ -68,14 +68,14 @@ fn settings_mouse_dropdown_outside_consumes_one_layer_and_nonleft_is_inert() {
         MouseEventKind::Drag(MouseButton::Left),
     ] {
         ui.handle_mouse(mouse(kind, 0, 0), &mut app);
-        assert!(app.settings_popup.active_select_target().is_some());
+        assert!(app.settings_popup.select_state().is_some());
     }
     let offset = app.settings_popup.scroll.offset();
     ui.handle_mouse(mouse(MouseEventKind::ScrollDown, 40, 24), &mut app);
     assert_eq!(app.settings_popup.scroll.offset(), offset);
     click(&mut ui, &mut app, Position::ORIGIN);
     assert!(app.settings_popup.visible);
-    assert!(app.settings_popup.active_select_target().is_none());
+    assert!(app.settings_popup.select_state().is_none());
     assert!(app.settings_popup.draft().proxy.is_none());
     redraw(&mut ui, &mut app, 100, 28);
     click(&mut ui, &mut app, Position::ORIGIN);
@@ -131,19 +131,13 @@ fn settings_mouse_filter_click_repositions_without_choosing_preset() {
     app.settings_popup
         .select_topic_for_tests(SettingsTopic::Proxy);
     app.settings_popup.draft_mut_for_tests().proxy = Some(proxy_settings("dev", &["dev", "qa"]));
-    app.settings_popup.start_select(SelectTarget::ProxyPreset);
+    app.settings_popup.start_proxy_preset_select();
     app.handle_paste("qa");
     let (mut ui, buffer) = render_to_buffer_with_size(&mut app, 100, 28);
     let filter = find_buffer_text(&buffer, settings_content_test_area(buffer.area), "qa").unwrap();
     click(&mut ui, &mut app, Position::new(filter.x + 1, filter.y));
     app.handle_paste("x");
-    assert_eq!(
-        app.settings_popup
-            .select_state(SelectTarget::ProxyPreset)
-            .unwrap()
-            .filter(),
-        "qxa"
-    );
+    assert_eq!(app.settings_popup.select_state().unwrap().filter(), "qxa");
     assert_eq!(
         app.settings_popup
             .draft()

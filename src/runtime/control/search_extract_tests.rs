@@ -77,7 +77,7 @@ fn handler() -> (
             runtime,
             capture_changes: CaptureChangeFeed::new(),
             body_work: Arc::clone(&admission),
-            audit: crate::control::audit::InstanceAudit::default(),
+            audit: super::test_audit(),
             config_source: None,
         }),
         receiver,

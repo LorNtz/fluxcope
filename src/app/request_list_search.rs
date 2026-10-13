@@ -47,7 +47,6 @@ struct EditingRollback {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TransientReasons {
-    match_reveal: bool,
     auto_expand: bool,
 }
 
@@ -330,7 +329,6 @@ impl RequestListSearch {
         };
         let mut paths_to_close = Vec::new();
         editing.transient_openings.retain(|path, reasons| {
-            reasons.match_reveal = false;
             if reasons.auto_expand {
                 true
             } else {
@@ -355,9 +353,8 @@ impl RequestListSearch {
             return;
         }
         let reasons = editing.transient_openings.entry(path).or_default();
-        match reason {
-            TransientOpeningReason::MatchReveal => reasons.match_reveal = true,
-            TransientOpeningReason::AutoExpand => reasons.auto_expand = true,
+        if matches!(reason, TransientOpeningReason::AutoExpand) {
+            reasons.auto_expand = true;
         }
     }
 

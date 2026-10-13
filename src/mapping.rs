@@ -81,12 +81,7 @@ impl MappingEngine {
         let effective_url = remote_url.as_ref().unwrap_or(&original.url);
 
         MappingTrace {
-            decision: MappingDecision {
-                mapped_uri: remote_url
-                    .as_ref()
-                    .and_then(|url| url.as_str().parse().ok()),
-                local_path: local.map(|matched| matched.target.clone()),
-            },
+            local_path: local.map(|matched| matched.target.clone()),
             effective_uri: effective_url.as_str().parse().ok(),
             remote_match: remote.map(|matched| matched.location),
             local_match: local.map(|matched| matched.location),
@@ -111,7 +106,7 @@ pub struct MappingDecision {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MappingTrace {
-    pub decision: MappingDecision,
+    pub local_path: Option<PathBuf>,
     pub effective_uri: Option<Uri>,
     pub remote_match: Option<MappingRuleLocation>,
     pub local_match: Option<MappingRuleLocation>,

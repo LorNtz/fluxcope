@@ -37,7 +37,7 @@ impl CaptureStore {
         }
     }
 
-    pub fn insert(&mut self, capture: Arc<CaptureRecord>) -> Vec<CaptureSequence> {
+    pub fn insert(&mut self, capture: Arc<CaptureRecord>) -> bool {
         let sequence = capture.sequence();
         let capture_bytes = capture.retained_bytes();
         if let Some(replaced) = self.captures.insert(sequence, Arc::clone(&capture)) {
@@ -118,15 +118,15 @@ impl CaptureStore {
         removed
     }
 
-    fn enforce_cached_retention(&mut self) -> Vec<CaptureSequence> {
-        let mut evicted = Vec::new();
+    fn enforce_cached_retention(&mut self) -> bool {
+        let mut evicted = false;
         while self.captures.len() > self.policy.max_records
             || self.retained_bytes > self.policy.max_bytes
         {
-            let Some(sequence) = self.evict_oldest() else {
+            if self.evict_oldest().is_none() {
                 break;
-            };
-            evicted.push(sequence);
+            }
+            evicted = true;
         }
         evicted
     }
@@ -178,9 +178,10 @@ mod tests {
         store.insert(capture(1, "one"));
         let evicted = store.insert(capture(3, "three"));
 
-        assert_eq!(evicted, vec![CaptureSequence::new(1)]);
+        assert!(evicted);
         assert!(store.get(CaptureSequence::new(1)).is_none());
         assert!(store.get(CaptureSequence::new(2)).is_some());
+        assert!(store.get(CaptureSequence::new(3)).is_some());
     }
 
     #[test]
@@ -196,7 +197,9 @@ mod tests {
         store.insert(first);
         let evicted = store.insert(second);
 
-        assert_eq!(evicted, vec![CaptureSequence::new(0)]);
+        assert!(evicted);
+        assert!(store.get(CaptureSequence::new(0)).is_none());
+        assert!(store.get(CaptureSequence::new(1)).is_some());
         assert_eq!(store.len(), 1);
         assert!(store.retained_bytes() <= max_bytes);
     }

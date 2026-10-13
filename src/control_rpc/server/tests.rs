@@ -534,9 +534,6 @@ async fn mutation_dispatch_awaits_terminal_result_after_disconnect() {
 #[test]
 fn committed_mutation_outcome_survives_response_delivery_failure() {
     let domain = super::ControlCallOutcome::Success {
-        instance: None,
-        config_mode: None,
-        persistence: None,
         settings_revision: Some(9),
         affected: None,
     };

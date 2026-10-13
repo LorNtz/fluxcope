@@ -11,12 +11,6 @@ use ratatui::{
 };
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct JumpCandidate {
-    label: char,
-    position: Position,
-}
-
 pub(super) fn detail_text_paragraph<'a>(text: impl Into<Text<'a>>, focused: bool) -> Paragraph<'a> {
     Paragraph::new(text)
         .block(detail_panel_block(focused))
@@ -99,15 +93,11 @@ fn render_jump_overlay(buffer: &mut Buffer, app: &mut App, area: Rect) {
     };
 
     let candidates = visible_jump_candidates(buffer, area, &query);
-    render_jump_candidates(buffer, &candidates.labeled);
+    render_jump_targets(buffer, &candidates.labeled);
     app.detail_panel.body_viewer.replace_visible_jump_targets(
         &query,
         area,
-        candidates
-            .labeled
-            .iter()
-            .map(|candidate| (candidate.label, candidate.position))
-            .collect(),
+        candidates.labeled,
         candidates.has_matches,
     );
 }
@@ -165,20 +155,12 @@ fn visible_jump_candidates(buffer: &Buffer, area: Rect, query: &str) -> VisibleJ
     let labeled = JUMP_LABELS
         .chars()
         .filter(|label| !ambiguous_labels.contains(&label.to_ascii_lowercase()))
-        .zip(matches.iter().copied())
-        .map(|(label, position)| JumpCandidate { label, position })
+        .zip(matches)
         .collect();
 
     VisibleJumpCandidates {
         has_matches,
         labeled,
-    }
-}
-
-fn render_jump_candidates(buffer: &mut Buffer, candidates: &[JumpCandidate]) {
-    let style = jump_label_style();
-    for candidate in candidates {
-        render_jump_label(buffer, candidate.label, candidate.position, style);
     }
 }
 
@@ -203,5 +185,5 @@ const JUMP_LABEL_COUNT: usize = JUMP_LABELS.len();
 #[derive(Default)]
 struct VisibleJumpCandidates {
     has_matches: bool,
-    labeled: Vec<JumpCandidate>,
+    labeled: Vec<(char, Position)>,
 }

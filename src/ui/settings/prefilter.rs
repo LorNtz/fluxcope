@@ -163,7 +163,6 @@ impl PrefilterTableWidget<'_> {
                 );
                 let input_area = prefilter_pattern_area(row_area);
                 let input = TextInput::new(edit.value, Some(edit.cursor))
-                    .tab_width(BODY_TEXT_TAB_WIDTH)
                     .style(Style::default().fg(Color::Indexed(208)))
                     .render_with_cursor_map(input_area, buf);
                 regions.push(ClickRegion::input(

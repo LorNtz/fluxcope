@@ -70,7 +70,7 @@ impl SettingsPopup {
                 self.focus_content_row(row);
                 self.toggle_selected_checkbox();
             }
-            SettingsClickTarget::Select(target) => self.start_select(target),
+            SettingsClickTarget::Select => self.start_proxy_preset_select(),
             SettingsClickTarget::PrefilterRow { index, toggle } => {
                 if index < self.prefilter_pattern_count() {
                     self.select_prefilter_pattern(index);

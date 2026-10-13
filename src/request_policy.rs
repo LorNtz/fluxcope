@@ -2,10 +2,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::{
-    mapping::{
-        DiagnosticSeverity as MappingDiagnosticSeverity, MappingDecision, MappingDiagnosticCode,
-        MappingEngine, MappingLocation,
-    },
+    mapping::{DiagnosticSeverity as MappingDiagnosticSeverity, MappingDecision, MappingEngine},
     recording::{PrefilterDiagnostic, RecordingPrefilter},
     settings::AppSettings,
 };
@@ -29,10 +26,6 @@ impl RequestPolicy {
                     MappingDiagnosticSeverity::Warning => RequestPolicyDiagnosticSeverity::Warning,
                     MappingDiagnosticSeverity::Error => RequestPolicyDiagnosticSeverity::Error,
                 },
-                source: RequestPolicyDiagnosticSource::ProxyMapping {
-                    code: diagnostic.code,
-                    location: diagnostic.location,
-                },
                 message: diagnostic.message,
             })
             .chain(
@@ -40,7 +33,6 @@ impl RequestPolicy {
                     .into_iter()
                     .map(|PrefilterDiagnostic { message }| RequestPolicyDiagnostic {
                         severity: RequestPolicyDiagnosticSeverity::Error,
-                        source: RequestPolicyDiagnosticSource::RecordingPrefilter,
                         message,
                     }),
             )
@@ -95,19 +87,9 @@ pub(crate) enum RequestPolicyDiagnosticSeverity {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RequestPolicyDiagnosticSource {
-    ProxyMapping {
-        code: MappingDiagnosticCode,
-        location: Option<MappingLocation>,
-    },
-    RecordingPrefilter,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RequestPolicyDiagnostic {
     pub severity: RequestPolicyDiagnosticSeverity,
-    pub source: RequestPolicyDiagnosticSource,
     pub message: String,
 }
 
@@ -227,13 +209,6 @@ mod tests {
             compilation.diagnostics[0].severity,
             RequestPolicyDiagnosticSeverity::Warning
         );
-        assert_eq!(
-            compilation.diagnostics[0].source,
-            RequestPolicyDiagnosticSource::ProxyMapping {
-                code: MappingDiagnosticCode::ActivePresetNotFound,
-                location: None,
-            }
-        );
         assert!(
             compilation.diagnostics[0]
                 .message
@@ -242,10 +217,6 @@ mod tests {
         assert_eq!(
             compilation.diagnostics[1].severity,
             RequestPolicyDiagnosticSeverity::Error
-        );
-        assert_eq!(
-            compilation.diagnostics[1].source,
-            RequestPolicyDiagnosticSource::RecordingPrefilter
         );
         assert!(
             compilation.diagnostics[1]

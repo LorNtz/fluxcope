@@ -94,7 +94,6 @@ pub(super) struct SettingsHitRegions {
     popup_area: Rect,
     topics: Rect,
     viewport: Rect,
-    scroll_y: u16,
     scrolling_enabled: bool,
     table_scroll_regions: Vec<SettingsTableScrollRegion>,
     controls: Vec<ClickRegion>,
@@ -114,12 +113,11 @@ impl SettingsHitRegions {
                 vertical: 1,
             }),
             viewport,
-            scroll_y: 0,
             scrolling_enabled: false,
             table_scroll_regions: Vec::new(),
             controls: Vec::new(),
             active_select: None,
-            modal_active: popup.active_select_target().is_some()
+            modal_active: popup.select_state().is_some()
                 || popup.rule_editor().is_some()
                 || popup.is_confirming_unsaved(),
             overlay: None,
@@ -150,9 +148,8 @@ impl SettingsHitRegions {
                     content_layout.content_width,
                     content_layout.buffer_height.saturating_sub(area.y),
                 );
-                if let Some(select) =
-                    item.select_layout(None, area, content_layout.field_layout, bounds)
-                    && popup.active_select_target() == Some(select.target)
+                if let Some(select) = item.select_layout(area, content_layout.field_layout, bounds)
+                    && popup.select_state().is_some()
                     && select.layout.box_area.width >= 3
                     && select.layout.box_area.height >= 3
                 {
@@ -247,7 +244,6 @@ impl SettingsHitRegions {
     }
 
     pub(super) fn set_scroll_y(&mut self, scroll_y: u16) {
-        self.scroll_y = scroll_y;
         self.key.scroll_y = scroll_y;
     }
     pub(super) fn viewport(&self) -> Rect {
@@ -262,7 +258,7 @@ impl SettingsHitRegions {
             mouse
                 .row
                 .saturating_sub(self.viewport.y)
-                .saturating_add(self.scroll_y),
+                .saturating_add(self.key.scroll_y),
         )
     }
     pub(super) fn table_hit(&self, position: Position) -> Option<SettingsTableHit> {

@@ -4,10 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    SettingsTransactionOrigin,
-    test_support::{SettingsRuntimeFixture, create_preset},
-};
+use super::test_support::{SettingsRuntimeFixture, create_preset};
 use crate::{
     control_rpc::protocol::ControlErrorCode,
     settings::{ConfigMode, PersistenceMode, ProxySettings},
@@ -170,7 +167,6 @@ async fn cancelled_mapping_read_workers_hold_both_permits_until_their_work_exits
         fixture.client().mutate_mapping(
             create_preset("shared-admission"),
             fixture.snapshot().revision,
-            SettingsTransactionOrigin::Mcp,
             transaction_cancelled.clone(),
         ),
     )

@@ -9,8 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    BODY_TEXT_TAB_WIDTH, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, SelectTarget, SettingsClickTarget,
-    SettingsPopup, SettingsSelectId,
+    PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS, ProxyPresetChoice, SettingsClickTarget, SettingsPopup,
 };
 use crate::select::{SelectItem, SelectState};
 use crate::text_input::TextInput;
@@ -44,7 +43,7 @@ impl SettingsTextInputControl<'_> {
 }
 
 impl SettingsControlView for SettingsTextInputControl<'_> {
-    fn height_for_width(&self, _width: u16) -> u16 {
+    fn height(&self) -> u16 {
         SETTING_TEXT_FIELD_HEIGHT + u16::from(self.hint.is_some())
     }
 
@@ -85,7 +84,6 @@ impl SettingsControlView for SettingsTextInputControl<'_> {
         block.render(field_area, buf);
         let input = TextInput::new(self.value.as_ref(), self.cursor)
             .padding(1)
-            .tab_width(BODY_TEXT_TAB_WIDTH)
             .style(style.control)
             .render_with_cursor_map(inner, buf);
         if let Some(hint) = self.hint
@@ -114,7 +112,7 @@ pub(super) struct SettingsCheckboxControl {
 }
 
 impl SettingsControlView for SettingsCheckboxControl {
-    fn height_for_width(&self, _width: u16) -> u16 {
+    fn height(&self) -> u16 {
         1
     }
 
@@ -145,36 +143,33 @@ impl SettingsControlView for SettingsCheckboxControl {
 
 pub(in crate::ui) fn settings_select_control<'a>(
     popup: &'a SettingsPopup,
-    target: SelectTarget,
 ) -> SettingsSelectControl<'a> {
     SettingsSelectControl {
-        target,
-        selected_label: popup.select_selected_label(target),
-        items: popup.select_items(target),
-        state: popup.select_state(target),
+        selected_label: popup.proxy_preset_label(),
+        items: popup.proxy_preset_select_items(),
+        state: popup.select_state(),
         max_visible_items: PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS,
     }
 }
 
 pub(in crate::ui) struct SettingsSelectControl<'a> {
-    target: SelectTarget,
     selected_label: &'a str,
-    items: Vec<SelectItem<'a, SettingsSelectId>>,
+    items: Vec<SelectItem<'a, ProxyPresetChoice>>,
     state: Option<&'a SelectState>,
     max_visible_items: usize,
 }
 
 impl SettingsSelectControl<'_> {
     #[cfg(test)]
-    pub(in crate::ui) fn height_for_width(&self, width: u16) -> u16 {
-        <Self as SettingsControlView>::height_for_width(self, width)
+    pub(in crate::ui) fn height(&self) -> u16 {
+        <Self as SettingsControlView>::height(self)
     }
 
     fn is_open(&self) -> bool {
         self.state.is_some_and(SelectState::is_open)
     }
 
-    fn widget(&self, style: Style) -> SelectWidget<'_, SettingsSelectId> {
+    fn widget(&self, style: Style) -> SelectWidget<'_, ProxyPresetChoice> {
         SelectWidget::new(self.selected_label, &self.items, self.state)
             .with_style(style)
             .max_visible_items(self.max_visible_items)
@@ -192,7 +187,7 @@ impl SettingsSelectControl<'_> {
 }
 
 impl SettingsControlView for SettingsSelectControl<'_> {
-    fn height_for_width(&self, _width: u16) -> u16 {
+    fn height(&self) -> u16 {
         self.widget(Style::default()).height()
     }
 
@@ -205,7 +200,7 @@ impl SettingsControlView for SettingsSelectControl<'_> {
     }
 
     fn click_target(&self, _row: usize) -> SettingsClickTarget {
-        SettingsClickTarget::Select(self.target)
+        SettingsClickTarget::Select
     }
 
     fn render(
@@ -249,7 +244,6 @@ impl SettingsControlView for SettingsSelectControl<'_> {
         overlay_bounds: Rect,
     ) -> Option<SettingsSelectLayout> {
         Some(SettingsSelectLayout {
-            target: self.target,
             layout: self.layout(control_area, overlay_bounds),
         })
     }

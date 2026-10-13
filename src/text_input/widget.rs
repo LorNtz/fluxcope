@@ -7,12 +7,13 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+const INPUT_TAB_WIDTH: usize = 4;
+
 /// Single-line presentation. Cursor and mouse targets use UTF-8 byte offsets.
 pub(crate) struct TextInput<'a> {
     value: &'a str,
     cursor: Option<usize>,
     padding: usize,
-    tab_width: usize,
     style: Style,
 }
 
@@ -22,7 +23,6 @@ impl<'a> TextInput<'a> {
             value,
             cursor,
             padding: 0,
-            tab_width: 4,
             style: Style::default(),
         }
     }
@@ -34,11 +34,6 @@ impl<'a> TextInput<'a> {
 
     pub(crate) fn style(mut self, style: Style) -> Self {
         self.style = style;
-        self
-    }
-
-    pub(crate) fn tab_width(mut self, tab_width: usize) -> Self {
-        self.tab_width = tab_width;
         self
     }
 
@@ -63,7 +58,6 @@ struct InputLayout<'a> {
     start_byte: usize,
     padding: usize,
     cursor: Option<usize>,
-    tab_width: usize,
 }
 
 impl<'a> InputLayout<'a> {
@@ -75,7 +69,6 @@ impl<'a> InputLayout<'a> {
             start_byte: 0,
             padding: input.padding,
             cursor: input.cursor.map(|cursor| cursor.min(input.value.len())),
-            tab_width: input.tab_width,
         };
         if area.is_empty() {
             return layout;
@@ -108,7 +101,7 @@ impl<'a> InputLayout<'a> {
 
     fn grapheme_width(&self, grapheme: &str) -> usize {
         if grapheme == "\t" {
-            self.tab_width
+            INPUT_TAB_WIDTH
         } else {
             UnicodeWidthStr::width(grapheme)
         }

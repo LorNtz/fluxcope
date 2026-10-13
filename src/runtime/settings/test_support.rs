@@ -418,12 +418,11 @@ impl SettingsRuntimeFixture {
         &self,
         mutation: MappingMutation,
         revision: SettingsRevision,
-        origin: SettingsTransactionOrigin,
         cancelled: CancellationToken,
     ) -> Result<SettingsTransactionResult, ControlError> {
         self.inner
             .client
-            .mutate_mapping(mutation, revision, origin, cancelled)
+            .mutate_mapping(mutation, revision, cancelled)
             .await
     }
 

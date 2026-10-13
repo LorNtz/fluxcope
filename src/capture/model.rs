@@ -172,7 +172,6 @@ struct BodyChunkNode {
 #[derive(Clone, Debug)]
 pub struct CapturedBodyPreview {
     canonical_tail: Option<Arc<BodyChunkNode>>,
-    canonical_chunks: usize,
     trailing: Bytes,
     len: usize,
     _budget_lease: Arc<CaptureBudgetLease>,
@@ -187,10 +186,8 @@ impl CapturedBodyPreview {
         len: usize,
         budget_lease: Arc<CaptureBudgetLease>,
     ) -> Self {
-        let canonical_chunks = canonical_tail.as_ref().map_or(0, |tail| tail.count);
         Self {
             canonical_tail,
-            canonical_chunks,
             trailing,
             len,
             #[cfg(test)]
@@ -212,7 +209,8 @@ impl CapturedBodyPreview {
     }
 
     pub fn chunks(&self) -> CapturedBodyChunks<'_> {
-        let mut canonical = Vec::with_capacity(self.canonical_chunks);
+        let mut canonical =
+            Vec::with_capacity(self.canonical_tail.as_ref().map_or(0, |tail| tail.count));
         let mut node = self.canonical_tail.as_deref();
         while let Some(current) = node {
             canonical.push(current.bytes.as_ref());
@@ -248,7 +246,7 @@ impl CapturedBodyPreview {
 
     #[cfg(test)]
     pub(crate) fn test_canonical_chunk_ids(&self) -> Vec<usize> {
-        let mut ids = Vec::with_capacity(self.canonical_chunks);
+        let mut ids = Vec::with_capacity(self.canonical_tail.as_ref().map_or(0, |tail| tail.count));
         let mut node = self.canonical_tail.as_deref();
         while let Some(current) = node {
             ids.push(current as *const BodyChunkNode as usize);

@@ -355,7 +355,7 @@ fn mapping_default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StrictMappingRule {
     from: String,
@@ -364,7 +364,7 @@ struct StrictMappingRule {
     enable: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct StrictMappingRuleTable {
     #[serde(default = "mapping_default_enabled")]
@@ -381,7 +381,7 @@ impl Default for StrictMappingRuleTable {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct StrictProxyPresetSettings {
     name: String,
@@ -389,7 +389,7 @@ struct StrictProxyPresetSettings {
     map_local: StrictMappingRuleTable,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct StrictProxySettings {
     #[serde(default = "mapping_default_enabled")]
@@ -404,26 +404,6 @@ impl Default for StrictProxySettings {
             enable: true,
             active_preset: None,
             presets: Vec::new(),
-        }
-    }
-}
-
-impl From<ProxyMapRemoteRule> for StrictMappingRule {
-    fn from(rule: ProxyMapRemoteRule) -> Self {
-        Self {
-            from: rule.from,
-            to: rule.to,
-            enable: rule.enable,
-        }
-    }
-}
-
-impl From<ProxyMapLocalRule> for StrictMappingRule {
-    fn from(rule: ProxyMapLocalRule) -> Self {
-        Self {
-            from: rule.from,
-            to: rule.to,
-            enable: rule.enable,
         }
     }
 }
@@ -444,27 +424,6 @@ impl From<StrictMappingRule> for ProxyMapLocalRule {
             from: rule.from,
             to: rule.to,
             enable: rule.enable,
-        }
-    }
-}
-
-impl From<ProxyPresetSettings> for StrictProxyPresetSettings {
-    fn from(preset: ProxyPresetSettings) -> Self {
-        Self {
-            name: preset.name,
-            map_remote: StrictMappingRuleTable {
-                enable: preset.map_remote.enable,
-                rules: preset
-                    .map_remote
-                    .rules
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-            },
-            map_local: StrictMappingRuleTable {
-                enable: preset.map_local.enable,
-                rules: preset.map_local.rules.into_iter().map(Into::into).collect(),
-            },
         }
     }
 }
@@ -490,16 +449,6 @@ impl From<StrictProxyPresetSettings> for ProxyPresetSettings {
     }
 }
 
-impl From<ProxySettings> for StrictProxySettings {
-    fn from(proxy: ProxySettings) -> Self {
-        Self {
-            enable: proxy.enable,
-            active_preset: proxy.active_preset,
-            presets: proxy.presets.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 impl From<StrictProxySettings> for ProxySettings {
     fn from(proxy: StrictProxySettings) -> Self {
         Self {
@@ -510,7 +459,7 @@ impl From<StrictProxySettings> for ProxySettings {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StrictMappingMutation {
     CreatePreset {
@@ -584,111 +533,6 @@ enum StrictMappingMutation {
         enabled: bool,
     },
 }
-impl From<MappingMutation> for StrictMappingMutation {
-    fn from(mutation: MappingMutation) -> Self {
-        match mutation {
-            MappingMutation::CreatePreset { name, initial } => Self::CreatePreset {
-                name,
-                initial: initial.map(Into::into),
-            },
-            MappingMutation::RenamePreset { name, new_name } => {
-                Self::RenamePreset { name, new_name }
-            }
-            MappingMutation::DeletePreset { name } => Self::DeletePreset { name },
-            MappingMutation::SetActivePreset { name } => Self::SetActivePreset { name },
-            MappingMutation::SetGlobalEnabled { enabled } => Self::SetGlobalEnabled { enabled },
-            MappingMutation::SetTableEnabled {
-                preset,
-                table,
-                enabled,
-            } => Self::SetTableEnabled {
-                preset,
-                table,
-                enabled,
-            },
-            MappingMutation::AppendRemoteRule { preset, rule } => Self::AppendRemoteRule {
-                preset,
-                rule: rule.into(),
-            },
-            MappingMutation::InsertRemoteRule {
-                preset,
-                index,
-                rule,
-            } => Self::InsertRemoteRule {
-                preset,
-                index,
-                rule: rule.into(),
-            },
-            MappingMutation::UpdateRemoteRule {
-                preset,
-                index,
-                from,
-                to,
-            } => Self::UpdateRemoteRule {
-                preset,
-                index,
-                from,
-                to,
-            },
-            MappingMutation::AppendLocalRule { preset, rule } => Self::AppendLocalRule {
-                preset,
-                rule: rule.into(),
-            },
-            MappingMutation::InsertLocalRule {
-                preset,
-                index,
-                rule,
-            } => Self::InsertLocalRule {
-                preset,
-                index,
-                rule: rule.into(),
-            },
-            MappingMutation::UpdateLocalRule {
-                preset,
-                index,
-                from,
-                to,
-            } => Self::UpdateLocalRule {
-                preset,
-                index,
-                from,
-                to,
-            },
-            MappingMutation::DeleteRule {
-                preset,
-                table,
-                index,
-            } => Self::DeleteRule {
-                preset,
-                table,
-                index,
-            },
-            MappingMutation::MoveRule {
-                preset,
-                table,
-                from,
-                to,
-            } => Self::MoveRule {
-                preset,
-                table,
-                from,
-                to,
-            },
-            MappingMutation::SetRuleEnabled {
-                preset,
-                table,
-                index,
-                enabled,
-            } => Self::SetRuleEnabled {
-                preset,
-                table,
-                index,
-                enabled,
-            },
-        }
-    }
-}
-
 impl From<StrictMappingMutation> for MappingMutation {
     fn from(mutation: StrictMappingMutation) -> Self {
         match mutation {
@@ -796,13 +640,13 @@ impl From<StrictMappingMutation> for MappingMutation {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ValidateMappingSettingsArguments {
     proxy: StrictProxySettings,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExplainMappingArguments {
     url: String,
@@ -810,14 +654,14 @@ struct ExplainMappingArguments {
     proposed_proxy: Option<StrictProxySettings>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MutateMappingArguments {
     expected_revision: SettingsRevision,
     mutation: StrictMappingMutation,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviewMappingMutationArguments {
     expected_revision: SettingsRevision,

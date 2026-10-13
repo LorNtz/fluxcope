@@ -5,8 +5,8 @@ use super::ProxyRow;
 use super::{
     EditMode, FieldApplyOutcome, FieldEditKind, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS,
     ProxyPresetChoice, ProxyRuleTable, ProxyWidget, RuleEditField, RuleEditorState,
-    SelectCommitEffect, SelectTarget, SettingsPaneFocus, SettingsPopup, SettingsPopupAction,
-    SettingsSelectId, SettingsTableState, SettingsTopic,
+    SelectCommitEffect, SettingsPaneFocus, SettingsPopup, SettingsPopupAction, SettingsTableState,
+    SettingsTopic,
 };
 use crate::{
     select::{
@@ -41,26 +41,25 @@ static DEFAULT_PROXY_PRESET: LazyLock<ProxyPresetSettings> =
 
 impl SettingsPopup {
     pub(super) fn handle_select_key(&mut self, key: KeyEvent) -> SettingsPopupAction {
-        let EditMode::Select { target, mut state } =
-            std::mem::replace(&mut self.mode, EditMode::Browse)
+        let EditMode::Select { mut state } = std::mem::replace(&mut self.mode, EditMode::Browse)
         else {
             return SettingsPopupAction::None;
         };
 
-        let items = self.select_items(target);
+        let items = self.proxy_preset_select_items();
         let outcome = state.handle_key(key, &items, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS);
         drop(items);
 
         match outcome {
             SelectOutcome::Committed(commit) => {
-                let effect = self.apply_select_commit(target, commit);
-                self.apply_select_commit_effect(effect, target, state);
+                let effect = self.apply_select_commit(commit);
+                self.apply_select_commit_effect(effect, state);
             }
             SelectOutcome::Closed => {
                 self.mode = EditMode::Browse;
             }
-            SelectOutcome::None | SelectOutcome::Opened => {
-                self.mode = EditMode::Select { target, state };
+            SelectOutcome::None => {
+                self.mode = EditMode::Select { state };
             }
         }
 
@@ -68,14 +67,15 @@ impl SettingsPopup {
     }
 
     pub(crate) fn start_proxy_preset_select(&mut self) {
-        self.start_select(SelectTarget::ProxyPreset);
-    }
-
-    pub(crate) fn start_select(&mut self, target: SelectTarget) {
         self.bump_presentation_revision();
-        self.focus_select_target(target);
-        let items = self.select_items(target);
-        let selected = self.active_select_id(target);
+        self.focus = SettingsPaneFocus::Content;
+        self.topic = SettingsTopic::Proxy;
+        self.selected_row = self
+            .proxy_widget_row(ProxyWidget::Preset)
+            .unwrap_or_default();
+        self.request_selected_visible();
+        let items = self.proxy_preset_select_items();
+        let selected = self.active_proxy_preset_select_id();
         let mut state = SelectState::new();
         state.open_with_selected(
             &items,
@@ -83,48 +83,13 @@ impl SettingsPopup {
             PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS,
         );
         drop(items);
-        self.mode = EditMode::Select { target, state };
+        self.mode = EditMode::Select { state };
     }
 
-    fn focus_select_target(&mut self, target: SelectTarget) {
-        match target {
-            SelectTarget::ProxyPreset => {
-                self.focus = SettingsPaneFocus::Content;
-                self.topic = SettingsTopic::Proxy;
-                self.selected_row = self
-                    .proxy_widget_row(ProxyWidget::Preset)
-                    .unwrap_or_default();
-                self.request_selected_visible();
-            }
-        }
-    }
-
-    pub(crate) fn active_select_target(&self) -> Option<SelectTarget> {
+    pub(crate) fn select_state(&self) -> Option<&SelectState> {
         match &self.mode {
-            EditMode::Select { target, .. } => Some(*target),
+            EditMode::Select { state } => Some(state),
             _ => None,
-        }
-    }
-
-    pub(crate) fn select_state(&self, target: SelectTarget) -> Option<&SelectState> {
-        match &self.mode {
-            EditMode::Select {
-                target: active,
-                state,
-            } if *active == target => Some(state),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn select_is_selected(&self, target: SelectTarget) -> bool {
-        match target {
-            SelectTarget::ProxyPreset => self.proxy_preset_is_selected(),
-        }
-    }
-
-    pub(crate) fn select_selected_label(&self, target: SelectTarget) -> &str {
-        match target {
-            SelectTarget::ProxyPreset => self.proxy_preset_label(),
         }
     }
 
@@ -138,23 +103,22 @@ impl SettingsPopup {
     }
 
     pub(crate) fn commit_active_select_filtered_index(&mut self, filtered_index: usize) -> bool {
-        let EditMode::Select { target, mut state } =
-            std::mem::replace(&mut self.mode, EditMode::Browse)
+        let EditMode::Select { mut state } = std::mem::replace(&mut self.mode, EditMode::Browse)
         else {
             return false;
         };
 
-        let items = self.select_items(target);
+        let items = self.proxy_preset_select_items();
         let commit = state.commit_filtered_index(&items, filtered_index);
         drop(items);
 
         if let Some(commit) = commit {
-            let effect = self.apply_select_commit(target, commit);
-            self.apply_select_commit_effect(effect, target, state);
+            let effect = self.apply_select_commit(commit);
+            self.apply_select_commit_effect(effect, state);
             self.bump_presentation_revision();
             true
         } else {
-            self.mode = EditMode::Select { target, state };
+            self.mode = EditMode::Select { state };
             false
         }
     }
@@ -168,20 +132,19 @@ impl SettingsPopup {
     }
 
     fn scroll_active_select(&mut self, down: bool) -> bool {
-        let EditMode::Select { target, mut state } =
-            std::mem::replace(&mut self.mode, EditMode::Browse)
+        let EditMode::Select { mut state } = std::mem::replace(&mut self.mode, EditMode::Browse)
         else {
             return false;
         };
 
-        let items = self.select_items(target);
+        let items = self.proxy_preset_select_items();
         if down {
             state.scroll_down(&items, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS);
         } else {
             state.scroll_up(&items, PROXY_PRESET_SELECT_MAX_VISIBLE_ITEMS);
         }
         drop(items);
-        self.mode = EditMode::Select { target, state };
+        self.mode = EditMode::Select { state };
         self.bump_presentation_revision();
         true
     }
@@ -214,7 +177,7 @@ impl SettingsPopup {
             && self.selected_proxy_widget() == Some(ProxyWidget::Preset)
     }
 
-    fn proxy_preset_select_items(&self) -> Vec<SelectItem<'_, SettingsSelectId>> {
+    pub(crate) fn proxy_preset_select_items(&self) -> Vec<SelectItem<'_, ProxyPresetChoice>> {
         let presets = self
             .draft
             .proxy
@@ -223,18 +186,15 @@ impl SettingsPopup {
         let mut items = Vec::with_capacity(presets.len().max(1) + 1);
         if presets.is_empty() {
             items.push(SelectItem::value(
-                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default),
+                ProxyPresetChoice::Default,
                 DEFAULT_PROXY_PRESET.name.as_str(),
             ));
         }
         items.extend(presets.iter().enumerate().map(|(index, preset)| {
-            SelectItem::value(
-                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)),
-                preset.name.as_str(),
-            )
+            SelectItem::value(ProxyPresetChoice::Existing(index), preset.name.as_str())
         }));
         items.push(SelectItem {
-            id: SettingsSelectId::ProxyPreset(ProxyPresetChoice::Create),
+            id: ProxyPresetChoice::Create,
             label: "+ Create new preset".into(),
             role: SelectItemRole::Action,
             filter_mode: SelectFilterMode::AlwaysVisible,
@@ -242,69 +202,35 @@ impl SettingsPopup {
         items
     }
 
-    pub(crate) fn select_items(
-        &self,
-        target: SelectTarget,
-    ) -> Vec<SelectItem<'_, SettingsSelectId>> {
-        match target {
-            SelectTarget::ProxyPreset => self.proxy_preset_select_items(),
-        }
-    }
-
-    fn active_select_id(&self, target: SelectTarget) -> Option<SettingsSelectId> {
-        match target {
-            SelectTarget::ProxyPreset => self.active_proxy_preset_select_id(),
-        }
-    }
-
-    fn active_proxy_preset_select_id(&self) -> Option<SettingsSelectId> {
+    fn active_proxy_preset_select_id(&self) -> Option<ProxyPresetChoice> {
         if self.has_virtual_proxy_preset() {
-            return Some(SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default));
+            return Some(ProxyPresetChoice::Default);
         }
-        active_preset_index(&self.draft)
-            .map(|index| SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)))
+        active_preset_index(&self.draft).map(ProxyPresetChoice::Existing)
     }
 
     fn apply_select_commit(
         &mut self,
-        target: SelectTarget,
-        commit: SelectCommit<SettingsSelectId>,
+        commit: SelectCommit<ProxyPresetChoice>,
     ) -> SelectCommitEffect {
-        match (target, commit.id, commit.role) {
-            (
-                SelectTarget::ProxyPreset,
-                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Existing(index)),
-                SelectItemRole::Value,
-            ) => {
+        match (commit.id, commit.role) {
+            (ProxyPresetChoice::Existing(index), SelectItemRole::Value) => {
                 self.apply_proxy_preset_selection(index);
                 SelectCommitEffect::Close
             }
-            (
-                SelectTarget::ProxyPreset,
-                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Default),
-                SelectItemRole::Value,
-            ) => SelectCommitEffect::Close,
-            (
-                SelectTarget::ProxyPreset,
-                SettingsSelectId::ProxyPreset(ProxyPresetChoice::Create),
-                SelectItemRole::Action,
-            ) => self.create_proxy_preset(),
+            (ProxyPresetChoice::Default, SelectItemRole::Value) => SelectCommitEffect::Close,
+            (ProxyPresetChoice::Create, SelectItemRole::Action) => self.create_proxy_preset(),
             _ => SelectCommitEffect::KeepOpen,
         }
     }
 
-    fn apply_select_commit_effect(
-        &mut self,
-        effect: SelectCommitEffect,
-        target: SelectTarget,
-        state: SelectState,
-    ) {
+    fn apply_select_commit_effect(&mut self, effect: SelectCommitEffect, state: SelectState) {
         match effect {
             SelectCommitEffect::Close => {
                 self.mode = EditMode::Browse;
             }
             SelectCommitEffect::KeepOpen => {
-                self.mode = EditMode::Select { target, state };
+                self.mode = EditMode::Select { state };
             }
         }
     }

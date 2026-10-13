@@ -52,6 +52,5 @@ pub(super) fn key(instance: InstanceScope, revision: u64, side: BodySide) -> Bod
         capture_id: CaptureSequence::new(7),
         capture_revision: revision,
         side,
-        representation: BodyRepresentation::Decoded,
     }
 }
