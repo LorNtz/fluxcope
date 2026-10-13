@@ -59,49 +59,49 @@ impl Drop for DirectoryPermissionsGuard {
     }
 }
 
-fn yaml_from_path(path: &Path) -> io::Result<serde_yaml::Value> {
-    serde_yaml::from_str(&fs::read_to_string(path)?).map_err(yaml_error)
+fn yaml_from_path(path: &Path) -> io::Result<yaml_serde::Value> {
+    yaml_serde::from_str(&fs::read_to_string(path)?).map_err(yaml_error)
 }
 
-fn mapping_entry<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
-    let serde_yaml::Value::Mapping(mapping) = value else {
+fn mapping_entry<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
+    let yaml_serde::Value::Mapping(mapping) = value else {
         return None;
     };
     mapping.get(key)
 }
 
 fn sequence_entry<'a>(
-    value: &'a serde_yaml::Value,
+    value: &'a yaml_serde::Value,
     key: &str,
-) -> Option<&'a Vec<serde_yaml::Value>> {
-    let serde_yaml::Value::Sequence(sequence) = mapping_entry(value, key)? else {
+) -> Option<&'a Vec<yaml_serde::Value>> {
+    let yaml_serde::Value::Sequence(sequence) = mapping_entry(value, key)? else {
         return None;
     };
     Some(sequence)
 }
 
-fn bool_entry(value: &serde_yaml::Value, key: &str) -> Option<bool> {
-    let serde_yaml::Value::Bool(field) = mapping_entry(value, key)? else {
+fn bool_entry(value: &yaml_serde::Value, key: &str) -> Option<bool> {
+    let yaml_serde::Value::Bool(field) = mapping_entry(value, key)? else {
         return None;
     };
     Some(*field)
 }
 
-fn string_entry<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a str> {
-    let serde_yaml::Value::String(field) = mapping_entry(value, key)? else {
+fn string_entry<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a str> {
+    let yaml_serde::Value::String(field) = mapping_entry(value, key)? else {
         return None;
     };
     Some(field)
 }
 
-fn mapping_keys(value: &serde_yaml::Value) -> Vec<&str> {
-    let serde_yaml::Value::Mapping(mapping) = value else {
+fn mapping_keys(value: &yaml_serde::Value) -> Vec<&str> {
+    let yaml_serde::Value::Mapping(mapping) = value else {
         return Vec::new();
     };
     mapping
         .keys()
         .filter_map(|key| match key {
-            serde_yaml::Value::String(key) => Some(key.as_str()),
+            yaml_serde::Value::String(key) => Some(key.as_str()),
             _ => None,
         })
         .collect()
@@ -110,3 +110,4 @@ fn mapping_keys(value: &serde_yaml::Value) -> Vec<&str> {
 mod basic;
 mod prefilter;
 mod proxy;
+mod yaml_compatibility;

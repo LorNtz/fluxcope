@@ -349,7 +349,7 @@ impl SettingsRuntimeFixture {
         if let Some(path) = &persisted_path {
             fs::write(
                 path,
-                serde_yaml::to_string(&settings).expect("fixture YAML"),
+                yaml_serde::to_string(&settings).expect("fixture YAML"),
             )
             .expect("fixture settings file");
         }
@@ -549,7 +549,7 @@ impl SettingsRuntimeFixture {
             .unwrap_or_default()
     }
     pub(crate) fn persisted_settings(&self) -> AppSettings {
-        serde_yaml::from_slice(&self.persisted_bytes()).expect("persisted settings YAML")
+        yaml_serde::from_slice(&self.persisted_bytes()).expect("persisted settings YAML")
     }
     pub(crate) fn worker_jobs_started(&self) -> usize {
         self.inner

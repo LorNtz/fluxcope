@@ -477,8 +477,8 @@ fn settings_popup_create_preset_rename_survives_save_roundtrip() {
     app.handle_key_event(key(KeyCode::Enter));
     app.handle_key_event(key(KeyCode::Char('s')));
     let saved = app.take_settings_save_request().expect("save new preset");
-    let yaml = serde_yaml::to_string(&saved).expect("serialize settings");
-    let reloaded: AppSettings = serde_yaml::from_str(&yaml).expect("reload settings");
+    let yaml = yaml_serde::to_string(&saved).expect("serialize settings");
+    let reloaded: AppSettings = yaml_serde::from_str(&yaml).expect("reload settings");
     let proxy = reloaded.proxy.as_ref().expect("persisted proxy");
     assert_eq!(proxy.active_preset.as_deref(), Some("local dev"));
     assert_eq!(proxy.presets[0].name, "local dev");

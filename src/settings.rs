@@ -642,12 +642,12 @@ fn prepare_settings_temporary(path: &Path, settings: &AppSettings) -> io::Result
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     crate::private_fs::ensure_directory(directory)?;
-    let mut value = serde_yaml::to_value(settings).map_err(yaml_error)?;
+    let mut value = yaml_serde::to_value(settings).map_err(yaml_error)?;
     if let Some(mut previous) = read_yaml_value(path)? {
         let _ = remove_malformed_prefilter_pattern_entries(&mut previous);
         preserve_semantic_noop_entries(&mut value, &previous, settings)?;
     }
-    let content = serde_yaml::to_string(&value).map_err(yaml_error)?;
+    let content = yaml_serde::to_string(&value).map_err(yaml_error)?;
     crate::private_fs::prepare_file(path, content.as_bytes())
 }
 
@@ -818,22 +818,22 @@ fn home_dir() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home))
 }
 
-fn yaml_error(error: serde_yaml::Error) -> io::Error {
+fn yaml_error(error: yaml_serde::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
 fn deserialize_settings_tolerantly(
     content: &str,
 ) -> io::Result<(AppSettings, Vec<SettingsLoadDiagnostic>)> {
-    let mut sanitized: serde_yaml::Value = serde_yaml::from_str(content).map_err(yaml_error)?;
+    let mut sanitized: yaml_serde::Value = yaml_serde::from_str(content).map_err(yaml_error)?;
     let mut diagnostics = remove_malformed_prefilter_pattern_entries(&mut sanitized);
-    match serde_yaml::from_value(sanitized.clone()) {
+    match yaml_serde::from_value(sanitized.clone()) {
         Ok(settings) => Ok((settings, diagnostics)),
         Err(original_error) => {
             let Some(error) = replace_malformed_prefilter(&mut sanitized)? else {
                 return Err(yaml_error(original_error));
             };
-            let settings = serde_yaml::from_value(sanitized).map_err(yaml_error)?;
+            let settings = yaml_serde::from_value(sanitized).map_err(yaml_error)?;
             diagnostics.push(SettingsLoadDiagnostic {
                 message: format!("recording.prefilter is malformed and has been disabled: {error}"),
             });
@@ -843,17 +843,17 @@ fn deserialize_settings_tolerantly(
 }
 
 fn remove_malformed_prefilter_pattern_entries(
-    value: &mut serde_yaml::Value,
+    value: &mut yaml_serde::Value,
 ) -> Vec<SettingsLoadDiagnostic> {
-    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+    let key = |name: &str| yaml_serde::Value::String(name.to_string());
     let Some(patterns) = value
         .as_mapping_mut()
         .and_then(|root| root.get_mut(key("recording")))
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(yaml_serde::Value::as_mapping_mut)
         .and_then(|recording| recording.get_mut(key("prefilter")))
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(yaml_serde::Value::as_mapping_mut)
         .and_then(|prefilter| prefilter.get_mut(key("include_url_patterns")))
-        .and_then(serde_yaml::Value::as_sequence_mut)
+        .and_then(yaml_serde::Value::as_sequence_mut)
     else {
         return Vec::new();
     };
@@ -861,7 +861,7 @@ fn remove_malformed_prefilter_pattern_entries(
     let mut diagnostics = Vec::new();
     let mut valid_patterns = Vec::with_capacity(patterns.len());
     for (index, value) in std::mem::take(patterns).into_iter().enumerate() {
-        match serde_yaml::from_value::<RecordingPrefilterPatternSettings>(value.clone()) {
+        match yaml_serde::from_value::<RecordingPrefilterPatternSettings>(value.clone()) {
             Ok(_) => valid_patterns.push(value),
             Err(error) => diagnostics.push(SettingsLoadDiagnostic {
                 message: format!(
@@ -874,21 +874,21 @@ fn remove_malformed_prefilter_pattern_entries(
     diagnostics
 }
 
-fn replace_malformed_prefilter(value: &mut serde_yaml::Value) -> io::Result<Option<String>> {
-    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+fn replace_malformed_prefilter(value: &mut yaml_serde::Value) -> io::Result<Option<String>> {
+    let key = |name: &str| yaml_serde::Value::String(name.to_string());
     let Some(prefilter) = value
         .as_mapping_mut()
         .and_then(|root| root.get_mut(key("recording")))
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(yaml_serde::Value::as_mapping_mut)
         .and_then(|recording| recording.get_mut(key("prefilter")))
     else {
         return Ok(None);
     };
-    let Err(error) = serde_yaml::from_value::<RecordingPrefilterSettings>(prefilter.clone()) else {
+    let Err(error) = yaml_serde::from_value::<RecordingPrefilterSettings>(prefilter.clone()) else {
         return Ok(None);
     };
     *prefilter =
-        serde_yaml::to_value(RecordingPrefilterSettings::disabled()).map_err(yaml_error)?;
+        yaml_serde::to_value(RecordingPrefilterSettings::disabled()).map_err(yaml_error)?;
     Ok(Some(error.to_string()))
 }
 
@@ -900,7 +900,7 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
-fn read_yaml_value(path: &Path) -> io::Result<Option<serde_yaml::Value>> {
+fn read_yaml_value(path: &Path) -> io::Result<Option<yaml_serde::Value>> {
     match crate::private_fs::open_file(path, false) {
         Ok(mut file) => {
             let mut content = String::new();
@@ -908,7 +908,7 @@ fn read_yaml_value(path: &Path) -> io::Result<Option<serde_yaml::Value>> {
             if content.trim().is_empty() {
                 Ok(None)
             } else {
-                serde_yaml::from_str(&content).map(Some).map_err(yaml_error)
+                yaml_serde::from_str(&content).map(Some).map_err(yaml_error)
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -917,8 +917,8 @@ fn read_yaml_value(path: &Path) -> io::Result<Option<serde_yaml::Value>> {
 }
 
 fn preserve_semantic_noop_entries(
-    value: &mut serde_yaml::Value,
-    previous: &serde_yaml::Value,
+    value: &mut yaml_serde::Value,
+    previous: &yaml_serde::Value,
     settings: &AppSettings,
 ) -> io::Result<()> {
     // Preserve explicit default entries without teaching each setting type how to track presence.
@@ -935,7 +935,7 @@ fn preserve_semantic_noop_entries(
         )
     });
     if inserted_all
-        && let Ok(batch_settings) = serde_yaml::from_value::<AppSettings>(batch.clone())
+        && let Ok(batch_settings) = yaml_serde::from_value::<AppSettings>(batch.clone())
         && batch_settings == *settings
     {
         *value = batch;
@@ -949,7 +949,7 @@ fn preserve_semantic_noop_entries(
             continue;
         }
 
-        let Ok(candidate_settings) = serde_yaml::from_value::<AppSettings>(candidate.clone())
+        let Ok(candidate_settings) = yaml_serde::from_value::<AppSettings>(candidate.clone())
         else {
             continue;
         };
@@ -986,30 +986,30 @@ pub(crate) fn benchmark_yaml_semantic_preservation(rule_count: usize) -> usize {
         }),
         ..AppSettings::default()
     };
-    let mut value = serde_yaml::to_value(&settings).expect("benchmark settings should serialize");
+    let mut value = yaml_serde::to_value(&settings).expect("benchmark settings should serialize");
     let mut previous = value.clone();
     add_explicit_default_enable_fields(&mut previous);
     preserve_semantic_noop_entries(&mut value, &previous, &settings)
         .expect("benchmark preservation should remain semantically valid");
-    serde_yaml::to_string(&value)
+    yaml_serde::to_string(&value)
         .expect("benchmark settings should serialize to text")
         .len()
 }
 
 #[cfg(feature = "benchmark")]
-fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
-    let key = |name: &str| serde_yaml::Value::String(name.to_string());
+fn add_explicit_default_enable_fields(value: &mut yaml_serde::Value) {
+    let key = |name: &str| yaml_serde::Value::String(name.to_string());
     let Some(proxy) = value
         .as_mapping_mut()
         .and_then(|root| root.get_mut(key("proxy")))
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .and_then(yaml_serde::Value::as_mapping_mut)
     else {
         return;
     };
-    proxy.insert(key("enable"), serde_yaml::Value::Bool(true));
+    proxy.insert(key("enable"), yaml_serde::Value::Bool(true));
     let Some(presets) = proxy
         .get_mut(key("presets"))
-        .and_then(serde_yaml::Value::as_sequence_mut)
+        .and_then(yaml_serde::Value::as_sequence_mut)
     else {
         return;
     };
@@ -1017,18 +1017,18 @@ fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
         let Some(remote) = preset
             .as_mapping_mut()
             .and_then(|preset| preset.get_mut(key("map_remote")))
-            .and_then(serde_yaml::Value::as_mapping_mut)
+            .and_then(yaml_serde::Value::as_mapping_mut)
         else {
             continue;
         };
-        remote.insert(key("enable"), serde_yaml::Value::Bool(true));
+        remote.insert(key("enable"), yaml_serde::Value::Bool(true));
         if let Some(rules) = remote
             .get_mut(key("rules"))
-            .and_then(serde_yaml::Value::as_sequence_mut)
+            .and_then(yaml_serde::Value::as_sequence_mut)
         {
             for rule in rules {
                 if let Some(rule) = rule.as_mapping_mut() {
-                    rule.insert(key("enable"), serde_yaml::Value::Bool(true));
+                    rule.insert(key("enable"), yaml_serde::Value::Bool(true));
                 }
             }
         }
@@ -1036,13 +1036,13 @@ fn add_explicit_default_enable_fields(value: &mut serde_yaml::Value) {
 }
 
 fn collect_missing_entries(
-    current: &serde_yaml::Value,
-    previous: &serde_yaml::Value,
+    current: &yaml_serde::Value,
+    previous: &yaml_serde::Value,
     path: &mut Vec<ConfigPathSegment>,
     missing: &mut Vec<MissingConfigEntry>,
 ) {
     match (current, previous) {
-        (serde_yaml::Value::Mapping(current), serde_yaml::Value::Mapping(previous)) => {
+        (yaml_serde::Value::Mapping(current), yaml_serde::Value::Mapping(previous)) => {
             for (key, previous_child) in previous {
                 if let Some(current_child) = current.get(key) {
                     path.push(ConfigPathSegment::Key(key.clone()));
@@ -1057,7 +1057,7 @@ fn collect_missing_entries(
                 }
             }
         }
-        (serde_yaml::Value::Sequence(current), serde_yaml::Value::Sequence(previous)) => {
+        (yaml_serde::Value::Sequence(current), yaml_serde::Value::Sequence(previous)) => {
             for (index, previous_child) in previous.iter().enumerate().take(current.len()) {
                 path.push(ConfigPathSegment::Index(index));
                 collect_missing_entries(&current[index], previous_child, path, missing);
@@ -1069,16 +1069,16 @@ fn collect_missing_entries(
 }
 
 fn insert_config_entry(
-    value: &mut serde_yaml::Value,
+    value: &mut yaml_serde::Value,
     path: &[ConfigPathSegment],
-    key: serde_yaml::Value,
-    entry: serde_yaml::Value,
+    key: yaml_serde::Value,
+    entry: yaml_serde::Value,
 ) -> bool {
     let mut current = value;
     for segment in path {
         match segment {
             ConfigPathSegment::Key(key) => {
-                let serde_yaml::Value::Mapping(mapping) = current else {
+                let yaml_serde::Value::Mapping(mapping) = current else {
                     return false;
                 };
                 let Some(next) = mapping.get_mut(key) else {
@@ -1087,7 +1087,7 @@ fn insert_config_entry(
                 current = next;
             }
             ConfigPathSegment::Index(index) => {
-                let serde_yaml::Value::Sequence(sequence) = current else {
+                let yaml_serde::Value::Sequence(sequence) = current else {
                     return false;
                 };
                 let Some(next) = sequence.get_mut(*index) else {
@@ -1098,17 +1098,17 @@ fn insert_config_entry(
         }
     }
 
-    let serde_yaml::Value::Mapping(mapping) = current else {
+    let yaml_serde::Value::Mapping(mapping) = current else {
         return false;
     };
     mapping.insert(key, entry);
     true
 }
 
-fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serde_yaml::Value) {
+fn reorder_mappings_like_previous(value: &mut yaml_serde::Value, previous: &yaml_serde::Value) {
     match (value, previous) {
-        (serde_yaml::Value::Mapping(current), serde_yaml::Value::Mapping(previous)) => {
-            let mut ordered = serde_yaml::Mapping::new();
+        (yaml_serde::Value::Mapping(current), yaml_serde::Value::Mapping(previous)) => {
+            let mut ordered = yaml_serde::Mapping::new();
 
             for (key, previous_child) in previous {
                 let Some(mut current_child) = current.remove(key) else {
@@ -1123,7 +1123,7 @@ fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serd
             }
             *current = ordered;
         }
-        (serde_yaml::Value::Sequence(current), serde_yaml::Value::Sequence(previous)) => {
+        (yaml_serde::Value::Sequence(current), yaml_serde::Value::Sequence(previous)) => {
             for (current_child, previous_child) in current.iter_mut().zip(previous) {
                 reorder_mappings_like_previous(current_child, previous_child);
             }
@@ -1135,13 +1135,13 @@ fn reorder_mappings_like_previous(value: &mut serde_yaml::Value, previous: &serd
 #[derive(Clone)]
 struct MissingConfigEntry {
     parent_path: Vec<ConfigPathSegment>,
-    key: serde_yaml::Value,
-    value: serde_yaml::Value,
+    key: yaml_serde::Value,
+    value: yaml_serde::Value,
 }
 
 #[derive(Clone)]
 enum ConfigPathSegment {
-    Key(serde_yaml::Value),
+    Key(yaml_serde::Value),
     Index(usize),
 }
 

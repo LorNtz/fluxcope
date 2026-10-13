@@ -186,7 +186,7 @@ proxy:
     assert_eq!(bool_entry(proxy, "enable"), Some(true));
     assert!(matches!(
         mapping_entry(proxy, "active_preset"),
-        Some(serde_yaml::Value::Null)
+        Some(yaml_serde::Value::Null)
     ));
     let presets = sequence_entry(proxy, "presets").expect("presets should be serialized");
     let preset = presets.first().expect("preset should be serialized");
@@ -195,7 +195,7 @@ proxy:
     assert_eq!(bool_entry(map_remote, "enable"), Some(true));
     assert_eq!(sequence_entry(map_remote, "rules").map(Vec::len), Some(0));
     let map_local = mapping_entry(preset, "map_local").expect("map_local should be preserved");
-    assert!(matches!(map_local, serde_yaml::Value::Mapping(mapping) if mapping.is_empty()));
+    assert!(matches!(map_local, yaml_serde::Value::Mapping(mapping) if mapping.is_empty()));
     Ok(())
 }
 
