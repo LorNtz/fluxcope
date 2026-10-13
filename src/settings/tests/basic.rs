@@ -17,7 +17,7 @@ fn creates_default_config_when_missing() -> io::Result<()> {
     assert!(path.exists());
 
     let saved: AppSettings =
-        serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        yaml_serde::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
     assert_eq!(DEFAULT_PROXY_PORT, saved.server.port);
     assert_eq!(DEFAULT_CERTIFICATE_STORE_DIR, saved.certificate.store_dir);
     assert_eq!(
@@ -62,7 +62,7 @@ fn reads_existing_config_and_updates_file() -> io::Result<()> {
     assert!(!manager.ui_settings().request_list.auto_expand);
 
     let saved: AppSettings =
-        serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        yaml_serde::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
     assert_eq!(9010, saved.server.port);
     assert_eq!(DEFAULT_CERTIFICATE_STORE_DIR, saved.certificate.store_dir);
     assert_eq!(
@@ -103,7 +103,7 @@ fn reads_request_list_auto_expand_setting() -> io::Result<()> {
     assert!(manager.ui_settings().request_list.auto_expand);
 
     let saved: AppSettings =
-        serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        yaml_serde::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
     assert!(saved.ui.request_list.auto_expand);
     Ok(())
 }
@@ -121,7 +121,7 @@ fn reads_start_record_on_launch_setting() -> io::Result<()> {
     assert!(!manager.recording_settings().start_record_on_launch);
 
     let saved: AppSettings =
-        serde_yaml::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
+        yaml_serde::from_str(&fs::read_to_string(&path)?).map_err(yaml_error)?;
     assert!(!saved.recording.start_record_on_launch);
     Ok(())
 }
@@ -151,7 +151,7 @@ fn mcp_enable_defaults_to_disabled_and_is_omitted() -> io::Result<()> {
     let settings = AppSettings::default();
 
     assert!(!settings.mcp.enable);
-    let saved = serde_yaml::to_string(&settings).map_err(yaml_error)?;
+    let saved = yaml_serde::to_string(&settings).map_err(yaml_error)?;
     assert!(!saved.contains("mcp:"), "{saved}");
     Ok(())
 }
@@ -253,7 +253,7 @@ fn default_owned_session_persists_under_an_isolated_home() -> io::Result<()> {
         "default-owned settings child failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let saved: AppSettings = serde_yaml::from_str(&fs::read_to_string(
+    let saved: AppSettings = yaml_serde::from_str(&fs::read_to_string(
         home.path().join(".fluxcope/config.yml"),
     )?)
     .map_err(yaml_error)?;
@@ -419,7 +419,7 @@ fn persistent_prepare_does_not_replace_target_before_commit() -> io::Result<()> 
         prepared.commit()?;
         assert_eq!(prepared.phase(), SettingsCommitPhase::Committed);
         let saved: AppSettings =
-            serde_yaml::from_str(&fs::read_to_string(path)?).map_err(yaml_error)?;
+            yaml_serde::from_str(&fs::read_to_string(path)?).map_err(yaml_error)?;
         assert_eq!(saved.server.port, 9192);
         return Ok(());
     }
