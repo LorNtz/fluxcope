@@ -114,6 +114,11 @@ CI evidence outside the signed payload to avoid a circular manifest hash. A fina
 public download check is required for completion. New client dependencies are
 version/hash pinned; the initial rollout qualifies all four native targets.
 
+The `package-preview-client` composite owns the native packaging recipe shared by
+preview publication and PR packaging checks. Its callers still choose the checkout:
+protected controller code for publication, candidate code for PR validation.
+Permissions, platform matrices and artifact uploads remain in those workflows.
+
 Closing a terminal leaves CI running. Use `preview-status` to resume; inspect a
 failed run before `preview-retry`. Reruns retain the original source and workflow.
 Fixing source or controller code requires a new preview, and published bytes are
