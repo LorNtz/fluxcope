@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/LorNtz/fluxcope/compare/v0.2.1...v0.2.2) - 2026-10-14
+
+### Added
+
+- add settings open and close mouse buttons ([#43](https://github.com/LorNtz/fluxcope/pull/43))
+- add settings mouse interactions and shared text inputs ([#37](https://github.com/LorNtz/fluxcope/pull/37))
+
+### Changed
+
+- *(ci)* simplify preview and installation workflows ([#44](https://github.com/LorNtz/fluxcope/pull/44))
+- remove unused internal abstractions and duplicate state ([#39](https://github.com/LorNtz/fluxcope/pull/39))
+
+### Fixed
+
+- replace unmaintained YAML dependencies ([#40](https://github.com/LorNtz/fluxcope/pull/40))
+- correct preset dropdown scrollbar sizing and bounds ([#36](https://github.com/LorNtz/fluxcope/pull/36))
+
 ### Added
 
 - Direct mouse interaction throughout settings: clickable topics, checkboxes, inputs, preset options and dialog controls; whole-table focus including empty tables; same-row double-click table editing; Unicode-aware cursor placement and one-layer outside-click dismissal.
