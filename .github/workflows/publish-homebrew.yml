@@ -83,19 +83,13 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: Homebrew/actions/setup-homebrew@082c94ee19e776205cfa8e43802917d1425e2fe7 # reviewed 2026-09-14
+      - uses: ./.github/actions/verify-homebrew-install
         with:
-          stable: true
-          brew-gh-api-token: ''
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.14'
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          TAP_COMMIT: ${{ needs.update.outputs.commit }}
-          TARGET: ${{ matrix.target }}
-        run: python3 scripts/homebrew_release.py install --tag "$TAG" --commit "$TAP_COMMIT" --target "$TARGET"
+          tag: ${{ inputs.tag }}
+          tap-commit: ${{ needs.update.outputs.commit }}
+          target: ${{ matrix.target }}
+          tooling: release
+          github-token: ${{ github.token }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: homebrew-${{ matrix.target }}-${{ github.run_attempt }}
@@ -110,17 +104,11 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: ./.github/actions/verify-registry-install
         with:
-          python-version: '3.14'
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          key: registry-install
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        run: python3 scripts/registry_install.py --tag "$TAG"
+          tag: ${{ inputs.tag }}
+          tooling: release
+          github-token: ${{ github.token }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: registry-install-${{ github.run_attempt }}

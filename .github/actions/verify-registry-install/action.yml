@@ -1,0 +1,41 @@
+name: Verify registry installation
+description: Set up Python and Rust and verify registry installation with the checked-out release or recovery tooling.
+inputs:
+  tag:
+    description: Published stable tag to verify.
+    required: true
+  tooling:
+    description: Verification tooling mode (release or recovery).
+    required: true
+  github-token:
+    description: GitHub token for installation verification.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.14'
+    - shell: bash
+      run: rustup show active-toolchain
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      with:
+        key: registry-install
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TAG: ${{ inputs.tag }}
+        TOOLING: ${{ inputs.tooling }}
+      run: |
+        case "$TOOLING" in
+          release)
+            python3 scripts/registry_install.py --tag "$TAG"
+            ;;
+          recovery)
+            python3 scripts/verify_installations.py registry --tag "$TAG"
+            ;;
+          *)
+            printf 'Unknown tooling mode: %s\n' "$TOOLING" >&2
+            exit 1
+            ;;
+        esac

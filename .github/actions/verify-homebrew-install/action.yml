@@ -1,0 +1,48 @@
+name: Verify Homebrew installation
+description: Set up Homebrew and verify installation with the checked-out release or recovery tooling.
+inputs:
+  tag:
+    description: Published stable tag to verify.
+    required: true
+  tap-commit:
+    description: Verified tap commit supplied by the caller.
+    required: true
+  target:
+    description: Installation target from the caller matrix.
+    required: true
+  tooling:
+    description: Verification tooling mode (release or recovery).
+    required: true
+  github-token:
+    description: GitHub token for installation verification.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: Homebrew/actions/setup-homebrew@082c94ee19e776205cfa8e43802917d1425e2fe7 # reviewed 2026-09-14
+      with:
+        stable: true
+        brew-gh-api-token: ''
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.14'
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TAG: ${{ inputs.tag }}
+        TAP_COMMIT: ${{ inputs.tap-commit }}
+        TARGET: ${{ inputs.target }}
+        TOOLING: ${{ inputs.tooling }}
+      run: |
+        case "$TOOLING" in
+          release)
+            python3 scripts/homebrew_release.py install --tag "$TAG" --commit "$TAP_COMMIT" --target "$TARGET"
+            ;;
+          recovery)
+            python3 scripts/verify_installations.py homebrew --tag "$TAG" --commit "$TAP_COMMIT" --target "$TARGET"
+            ;;
+          *)
+            printf 'Unknown tooling mode: %s\n' "$TOOLING" >&2
+            exit 1
+            ;;
+        esac

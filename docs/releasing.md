@@ -207,3 +207,9 @@ When GitHub Release and crates.io are already published but Homebrew or registry
 Homebrew CI pins the recorded tap commit and compares its formula byte-for-byte with the Release snapshot before running `brew trust --formula LorNtz/tap/fluxcope` and installing. It trusts only that formula and keeps Homebrew's trust checks enabled. Users keep the README command `brew install LorNtz/tap/fluxcope`, which grants item-specific trust for that fully qualified name; see [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 The master tooling commit and original release source SHA remain separate. Installation reports must identify the original version and source. Recovery never moves a tag, replaces assets or repeats the crate upload; the observer signs and archives the unified result after every required check passes.
+
+Normal publication and master recovery share the `verify-homebrew-install` and
+`verify-registry-install` composites, but not authorization entry points. Their
+closed `release`/`recovery` tooling choice invokes the existing context-specific
+Python commands. Callers retain gates, checkouts, job/report identities and uploads;
+the GitHub token is exposed only to the installation execution step.

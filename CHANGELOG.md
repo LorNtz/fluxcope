@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify internal RPC, capture, settings and UI representations by removing unused adapters, duplicate metadata and unexercised configurability; keep test-only instrumentation out of production builds.
 - Simplify preview CI by removing the custom cache-denial probe and unused identity handoff; retain restricted cache modes and trust-boundary checks.
 - Share native preview-client packaging between publication and PR checks without changing checkout authority, targets or pinned tools.
+- Share Homebrew and registry installation recipes while preserving separate normal-release and historical-recovery authorization.
 
 ### Fixed
 
