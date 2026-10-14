@@ -150,6 +150,7 @@ fn settings_mouse_filter_click_repositions_without_choosing_preset() {
     );
 }
 
+mod close_button;
 mod confirmation;
 mod inputs;
 mod tables;

@@ -6,13 +6,13 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect, Size},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use tui_scrollview::{ScrollView, ScrollbarVisibility};
 
 use super::chrome::{base_panel_block, centered_rect, panel_block};
-use super::terminal_text::{fit_text_to_width, text_width};
+use super::terminal_text::{fit_text, fit_text_to_width, text_width};
 
 mod content;
 use content::{
@@ -67,6 +67,7 @@ pub(super) fn settings_table_max_height(viewport_height: u16) -> u16 {
 #[derive(Clone, Copy)]
 pub(super) struct SettingsPopupLayout {
     area: Rect,
+    close_button: Rect,
     topics: Rect,
     content_panel: Rect,
     #[cfg(test)]
@@ -91,6 +92,11 @@ pub(super) fn settings_popup_layout(area: Rect) -> SettingsPopupLayout {
 
     SettingsPopupLayout {
         area: popup_area,
+        close_button: if popup_area.width >= 5 && popup_area.height > 0 {
+            Rect::new(popup_area.right() - 4, popup_area.y, 3, 1)
+        } else {
+            Rect::default()
+        },
         topics: chunks[0],
         content_panel: chunks[1],
         #[cfg(test)]
@@ -178,10 +184,15 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
     } else {
         ""
     };
+    let title = format!(" Settings — {}{dirty} ", app.settings_popup.mode_label());
+    let title_width = area
+        .width
+        .saturating_sub(if layout.close_button.is_empty() { 2 } else { 6 });
     let mut block = Block::default()
-        .title(format!(
-            " Settings — {}{dirty} ",
-            app.settings_popup.mode_label()
+        .title(fit_text(
+            &title,
+            usize::from(title_width),
+            BODY_TEXT_TAB_WIDTH,
         ))
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
@@ -200,6 +211,10 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) -> Option<SettingsHit
         block = block.title_bottom(Line::from(key_hint_text).alignment(Alignment::Center));
     }
     frame.render_widget(block, area);
+    frame.render_widget(
+        Span::styled("[x]", Style::default().fg(Color::Reset)),
+        layout.close_button,
+    );
 
     render_settings_topics(frame, &app.settings_popup, layout.topics);
     let mut hit_regions = render_settings_content(
