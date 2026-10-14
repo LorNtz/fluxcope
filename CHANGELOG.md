@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings inputs, preset filtering and request search now share one text input state/widget with grapheme-aware editing and consistent mouse positioning. Request search retains its 512-byte limit and atomic paste rejection; settings and filters remain uncapped.
 - Replace the unmaintained `serde_yaml`/`unsafe-libyaml` dependency chain with `yaml_serde`/`libyaml-rs`, preserving configuration loading, ordered serialization and persistence behavior.
 - Simplify internal RPC, capture, settings and UI representations by removing unused adapters, duplicate metadata and unexercised configurability; keep test-only instrumentation out of production builds.
+- Simplify preview CI by removing the custom cache-denial probe and unused identity handoff; retain restricted cache modes and trust-boundary checks.
+- Share native preview-client packaging between publication and PR checks without changing checkout authority, targets or pinned tools.
+- Share Homebrew and registry installation recipes while preserving separate normal-release and historical-recovery authorization.
+- Consolidate preview metadata and bounded-download verification without changing signed formats, installer behavior, expiry rules or offline launch.
 
 ### Fixed
 

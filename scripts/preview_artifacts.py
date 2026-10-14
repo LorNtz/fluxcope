@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 from pathlib import Path
 import re
@@ -16,7 +17,9 @@ from release_support import ReleaseError, api, pages, repository_path, run, run_
 
 from preview_client.model import (LIMIT, BUNDLE, MANIFEST, INSTALLER, client_asset,
                                   platform_assets, payload_assets, public_assets,
-                                  identity_matches, validate_manifest)
+                                  identity_matches, release_assets, validate_manifest,
+                                  validate_signed_assets, validate_snapshot)
+from preview_client.remote import download_public_asset, public_asset_limit
 
 
 def require_job(current: dict, name: str) -> dict:
@@ -147,36 +150,21 @@ def resolve_preview_tag(identity: dict) -> str | None:
 
 
 def download_asset(identity: dict, asset: dict, directory: Path):
-    name = asset['name']
-    limit = LIMIT if name.endswith('.tar.xz') else 2 * 1024 * 1024
-    if name not in public_assets(identity) or asset['size'] > limit:
-        raise ReleaseError('Unrecognized or oversized public preview asset.')
-    path = directory / name
+    limit = public_asset_limit(identity, asset)
+    path = directory / asset['name']
     if path.exists() or path.is_symlink():
         raise ReleaseError('Download destination must be fresh.')
-    url = f"https://github.com/{REPO}/releases/download/{identity['tag']}/{name}"
-    # Public accessibility is part of completion. Never attach credentials.
-    with urlopen(url, timeout=60) as response, path.open('xb') as stream:
-        size = 0
-        while chunk := response.read(1024 * 1024):
-            size += len(chunk)
-            if size > limit:
-                raise ReleaseError('Public preview download exceeded its size limit.')
-            stream.write(chunk)
-    if size != asset['size'] or asset.get('digest') != 'sha256:' + digest(path):
-        raise ReleaseError('Public preview asset differs from its GitHub digest.')
+    download_public_asset(identity, asset, path, limit, partial(urlopen, timeout=60))
 
 
-def download_public(identity: dict, directory: Path, *, target: str | None = None,
+def download_public(identity: dict, directory: Path, *,
                     metadata_only: bool = False, allow_expired: bool = False) -> tuple[dict, dict]:
     release = release_for(identity)
     if not release or release['draft'] or not release.get('immutable') or not release['prerelease']:
         raise ReleaseError('Preview has no immutable public prerelease.')
     if not allow_expired and datetime.now(timezone.utc) >= timestamp(release['published_at']) + timedelta(days=identity['retention_days']):
         raise ReleaseError('Preview downloads expired. Request a new preview; this ID is never reused.')
-    assets = {a['name']: a for a in release['assets']}
-    if not {MANIFEST, BUNDLE} <= assets.keys() or len(assets) != len(release['assets']):
-        raise ReleaseError('Public preview asset set is invalid.')
+    assets = release_assets(release)
     directory.mkdir(parents=True, exist_ok=True)
     for name in (MANIFEST, BUNDLE):
         download_asset(identity, assets[name], directory)
@@ -188,20 +176,11 @@ def download_public(identity: dict, directory: Path, *, target: str | None = Non
     if resolve_preview_tag(identity) != manifest['snapshot']:
         raise ReleaseError('Protected preview tag does not match signed source evidence.')
     commit = api(repository_path(f"git/commits/{manifest['snapshot']}"))
-    if [p['sha'] for p in commit['parents']] != [identity['source']] or commit['tree']['sha'] != manifest['tree']:
-        raise ReleaseError('Preview snapshot ancestry/tree does not match its manifest.')
-    if any(assets[name].get('digest') != 'sha256:' + checksum for name, checksum in manifest['files'].items()):
-        raise ReleaseError('Public payload digests differ from the signed manifest.')
+    validate_snapshot(manifest, identity, commit)
+    validate_signed_assets(manifest, assets)
     if metadata_only:
         return release, manifest
-    if target is not None:
-        if target not in identity['targets']:
-            raise ReleaseError('This preview does not include the host platform; request its profile or all.')
-        archive = f'fluxcope-{target}.tar.xz'
-        download_asset(manifest, assets[archive], directory)
-        provenance(directory / archive, identity, bundle=directory / BUNDLE)
-    else:
-        for name in sorted(set(assets) - {MANIFEST, BUNDLE}):
-            download_asset(manifest, assets[name], directory)
-        validate_public_directory(directory, identity)
+    for name in sorted(set(assets) - {MANIFEST, BUNDLE}):
+        download_asset(manifest, assets[name], directory)
+    validate_public_directory(directory, identity)
     return release, manifest

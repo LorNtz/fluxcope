@@ -114,6 +114,18 @@ CI evidence outside the signed payload to avoid a circular manifest hash. A fina
 public download check is required for completion. New client dependencies are
 version/hash pinned; the initial rollout qualifies all four native targets.
 
+The `package-preview-client` composite owns the native packaging recipe shared by
+preview publication and PR packaging checks. Its callers still choose the checkout:
+protected controller code for publication, candidate code for PR validation.
+Permissions, platform matrices and artifact uploads remain in those workflows.
+
+CI and the standalone client share release asset-map, snapshot ancestry/tree,
+signed-digest and bounded anonymous-transfer rules in `preview_client.model` and
+`preview_client.remote`. Authentication, provenance, CA/proxy handling, expiry
+exceptions and full-CI versus selected-client payload verification remain with
+their existing callers. Historical formats 1 and 2 and both smoke reports remain
+supported; the signed payload format is unchanged.
+
 Closing a terminal leaves CI running. Use `preview-status` to resume; inspect a
 failed run before `preview-retry`. Reruns retain the original source and workflow.
 Fixing source or controller code requires a new preview, and published bytes are
@@ -127,9 +139,12 @@ This applies only to the command and its children; it does not change shell or s
 One-time preview setup: create the `preview-release` environment with a custom
 **branch** policy allowing only `master`; import the existing source App ID/key
 as `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`. Retain existing immutable release
-and `v*` tag rules. Build/verification jobs enforce `cache-mode: read` and probe
-the cache service for an explicit write denial before executing candidate code;
-if the hosted service does not support this policy, publication remains blocked.
+and `v*` tag rules. Candidate build/verification jobs retain `cache-mode: read`
+or `none`; GitHub's scoped runtime tokens enforce cache access. Workflow policy
+tests reject missing or write-enabled cache/token permissions and preserve the
+signing, qualification and publication boundaries. There is no custom cache-service
+probe. Qualify workflow changes on hosted runners before merging; local policy
+checks do not prove hosted enforcement.
 
 ## One-time account and repository setup
 
@@ -199,3 +214,9 @@ When GitHub Release and crates.io are already published but Homebrew or registry
 Homebrew CI pins the recorded tap commit and compares its formula byte-for-byte with the Release snapshot before running `brew trust --formula LorNtz/tap/fluxcope` and installing. It trusts only that formula and keeps Homebrew's trust checks enabled. Users keep the README command `brew install LorNtz/tap/fluxcope`, which grants item-specific trust for that fully qualified name; see [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 The master tooling commit and original release source SHA remain separate. Installation reports must identify the original version and source. Recovery never moves a tag, replaces assets or repeats the crate upload; the observer signs and archives the unified result after every required check passes.
+
+Normal publication and master recovery share the `verify-homebrew-install` and
+`verify-registry-install` composites, but not authorization entry points. Their
+closed `release`/`recovery` tooling choice invokes the existing context-specific
+Python commands. Callers retain gates, checkouts, job/report identities and uploads;
+the GitHub token is exposed only to the installation execution step.

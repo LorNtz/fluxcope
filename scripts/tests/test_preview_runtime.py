@@ -3,7 +3,6 @@ import json
 import unittest
 from unittest.mock import patch
 
-from preview_build import require_cache_mode
 import preview_record
 from preview_identity import identity_from_run
 from release_support import ReleaseError
@@ -27,20 +26,6 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsNone(command.call_args.kwargs['env'])
             release_support.pages('fixture', token='draft-reader')
             self.assertEqual(command.call_args.kwargs['env']['GH_TOKEN'], 'draft-reader')
-
-    def test_shell_requires_verified_probe_marker_in_actions(self):
-        for mode in ('read', 'none'):
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'FLUXCOPE_PREVIEW_CACHE_MODE': mode}, clear=True):
-                require_cache_mode()
-        for mode in ('', 'write', 'write-only'):
-            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'ACTIONS_CACHE_MODE': 'read',
-                                        'FLUXCOPE_PREVIEW_CACHE_MODE': mode}, clear=True):
-                with self.assertRaises(ReleaseError):
-                    require_cache_mode()
-
-    def test_local_or_isolated_container_does_not_require_actions_context(self):
-        with patch.dict(os.environ, {}, clear=True):
-            require_cache_mode()
 
     def test_result_accepts_github_rewritten_display_url(self):
         identity = identity_from_run(current_run())

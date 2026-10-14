@@ -34,7 +34,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.identity.outputs.matrix }}
-      snapshot: ${{ steps.identity.outputs.snapshot }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -48,12 +47,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/preview_build.py gate --identity "$RUNNER_TEMP/identity.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: preview-identity-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/identity.json
-          if-no-files-found: error
-          retention-days: 30
   quality:
     name: Preview quality
     needs: gate
@@ -66,7 +59,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/preview-cache-check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
@@ -105,7 +97,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/preview-cache-check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
@@ -164,7 +155,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/preview-cache-check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
@@ -214,34 +204,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     cache-mode: read
-    env:
-      TARGET: ${{ matrix.target }}
-      CONTAINER: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/preview-cache-check
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: ./.github/actions/package-preview-client
         with:
-          python-version: '3.14'
-      - name: Package native macOS client from controller code
-        if: runner.os == 'macOS'
-        run: |
-          python3 scripts/preview_client_build.py python --target "$TARGET" --directory "$RUNNER_TEMP/client-python"
-          "$RUNNER_TEMP/client-python/python/bin/python3" -m venv "$RUNNER_TEMP/client-venv"
-          "$RUNNER_TEMP/client-venv/bin/pip" install --require-hashes -r scripts/preview-client-requirements.txt
-          "$RUNNER_TEMP/client-venv/bin/python" scripts/preview_client_build.py --target "$TARGET" --directory "$RUNNER_TEMP/client"
-      - name: Package native Linux client in glibc 2.28
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p "$RUNNER_TEMP/client"
-          docker run --rm --user "$(id -u):$(id -g)" \
-            --mount "type=bind,src=$PWD,dst=$PWD,readonly" \
-            --mount "type=bind,src=$RUNNER_TEMP/client,dst=$RUNNER_TEMP/client" \
-            --env "CONTROLLER=$PWD" --env CLIENT_PHASE=build --env "TARGET=$TARGET" \
-            --env "OUTPUT=$RUNNER_TEMP/client" "$CONTAINER" bash "$PWD/scripts/preview_client_linux.sh"
+          target: ${{ matrix.target }}
+          container: ${{ matrix.container }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: preview-client-${{ matrix.target }}-${{ github.run_attempt }}
@@ -311,7 +282,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/preview-cache-check
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'

@@ -176,6 +176,6 @@ def snapshot(identity: dict, *, checkout: Path | None = None) -> dict:
 def write_identity(identity: dict, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(identity, sort_keys=True, indent=2) + '\n')
-    for key in ('id', 'version', 'tag', 'source', 'controller', 'snapshot', 'profile'):
+    for key in ('id', 'version', 'tag', 'source', 'controller', 'profile'):
         output(key, identity[key])
     output('matrix', {'include': platforms(identity['profile'])})
