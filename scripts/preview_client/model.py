@@ -74,6 +74,13 @@ def public_assets(identity):
     return payload_assets(identity) | {MANIFEST, BUNDLE, 'sha256.sum'}
 
 
+def release_assets(release):
+    assets = {asset['name']: asset for asset in release['assets']}
+    if len(assets) != len(release['assets']) or not {MANIFEST, BUNDLE} <= assets.keys():
+        raise PreviewError('Public preview asset set is invalid.')
+    return assets
+
+
 def identity_matches(data, identity):
     if any(data.get(key) != value for key, value in identity.items()):
         raise PreviewError('Preview evidence belongs to another source, controller, profile or run.')
@@ -88,6 +95,17 @@ def validate_manifest(manifest, identity):
             or any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
                    for value in manifest['files'].values())):
         raise PreviewError('Malformed signed preview manifest.')
+
+
+def validate_snapshot(manifest, identity, commit):
+    if ([parent['sha'] for parent in commit['parents']] != [identity['source']]
+            or commit['tree']['sha'] != manifest['tree']):
+        raise PreviewError('Preview snapshot ancestry/tree differs from signed evidence.')
+
+
+def validate_signed_assets(manifest, assets):
+    if any(assets[name].get('digest') != 'sha256:' + sha for name, sha in manifest['files'].items()):
+        raise PreviewError('Public assets differ from the signed manifest.')
 
 
 def asset_limit(name):

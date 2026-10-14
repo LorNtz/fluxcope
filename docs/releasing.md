@@ -119,6 +119,13 @@ preview publication and PR packaging checks. Its callers still choose the checko
 protected controller code for publication, candidate code for PR validation.
 Permissions, platform matrices and artifact uploads remain in those workflows.
 
+CI and the standalone client share release asset-map, snapshot ancestry/tree,
+signed-digest and bounded anonymous-transfer rules in `preview_client.model` and
+`preview_client.remote`. Authentication, provenance, CA/proxy handling, expiry
+exceptions and full-CI versus selected-client payload verification remain with
+their existing callers. Historical formats 1 and 2 and both smoke reports remain
+supported; the signed payload format is unchanged.
+
 Closing a terminal leaves CI running. Use `preview-status` to resume; inspect a
 failed run before `preview-retry`. Reruns retain the original source and workflow.
 Fixing source or controller code requires a new preview, and published bytes are

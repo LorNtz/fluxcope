@@ -12,7 +12,8 @@ from urllib.request import Request, urlopen
 
 from .model import (BASE, BUNDLE, MANIFEST, REPO, SIGNER, TITLE, WORKFLOW,
                     PreviewError, asset_limit, digest, identity_from_run,
-                    preview_id, public_assets, timestamp, validate_manifest)
+                    preview_id, public_assets, release_assets, timestamp,
+                    validate_manifest, validate_signed_assets, validate_snapshot)
 
 
 def clean_environment(home):
@@ -36,6 +37,28 @@ def public_open(request):
     return urlopen(request, timeout=60, context=ssl.create_default_context(cafile=ca_file))
 
 
+def public_asset_limit(identity, asset):
+    name = asset['name']
+    limit = asset_limit(name)
+    if name not in public_assets(identity) or asset['size'] > limit:
+        raise PreviewError('Unrecognized or oversized public preview asset.')
+    return limit
+
+
+def download_public_asset(identity, asset, path, limit, opener):
+    url = f"https://github.com/{REPO}/releases/download/{identity['tag']}/{asset['name']}"
+    size = 0
+    # Public accessibility is part of completion. Never attach credentials.
+    with opener(url) as response, path.open('xb') as stream:
+        while chunk := response.read(1024 * 1024):
+            size += len(chunk)
+            if size > limit:
+                raise PreviewError('Public preview download exceeded its size limit.')
+            stream.write(chunk)
+    if size != asset['size'] or asset.get('digest') != 'sha256:' + digest(path):
+        raise PreviewError('Public preview asset differs from its GitHub digest.')
+
+
 class PublicTransport:
     """Only fixed public GitHub endpoints; no credentials or configurable repository."""
 
@@ -57,21 +80,10 @@ class PublicTransport:
         return json.loads(data)
 
     def download(self, identity, asset, directory):
-        name = asset['name']
-        if (name not in public_assets(identity) or asset['size'] > asset_limit(name)
-                or asset['size'] < 0):
+        limit = public_asset_limit(identity, asset)
+        if asset['size'] < 0:
             raise PreviewError('Unrecognized or oversized public preview asset.')
-        path = directory / name
-        url = f"https://github.com/{REPO}/releases/download/{identity['tag']}/{name}"
-        size = 0
-        with public_open(url) as response, path.open('xb') as stream:
-            while chunk := response.read(1024 * 1024):
-                size += len(chunk)
-                if size > asset_limit(name):
-                    raise PreviewError('Public preview download exceeded its size limit.')
-                stream.write(chunk)
-        if size != asset['size'] or asset.get('digest') != 'sha256:' + digest(path):
-            raise PreviewError('Public preview asset differs from its GitHub digest.')
+        download_public_asset(identity, asset, directory / asset['name'], limit, public_open)
 
 
 def provenance(path, identity, bundle, verifier, trusted_root=None):
@@ -117,9 +129,7 @@ class Downloads:
             raise PreviewError('Preview has no immutable public prerelease.')
         if datetime.now(timezone.utc) >= timestamp(release['published_at']) + timedelta(days=identity['retention_days']):
             raise PreviewError('Preview downloads expired. Request a new preview ID.')
-        assets = {a['name']: a for a in release['assets']}
-        if len(assets) != len(release['assets']) or not {MANIFEST, BUNDLE} <= assets.keys():
-            raise PreviewError('Public preview asset set is invalid.')
+        assets = release_assets(release)
         for name in (MANIFEST, BUNDLE):
             self.transport.download(identity, assets[name], directory)
         self.verify(directory / MANIFEST, identity, directory)
@@ -131,11 +141,8 @@ class Downloads:
         if ref['type'] != 'commit' or ref['sha'] != manifest['snapshot']:
             raise PreviewError('Protected preview tag differs from signed evidence.')
         commit = self.transport.api(f"git/commits/{manifest['snapshot']}")
-        if ([p['sha'] for p in commit['parents']] != [identity['source']]
-                or commit['tree']['sha'] != manifest['tree']):
-            raise PreviewError('Preview snapshot ancestry/tree differs from signed evidence.')
-        if any(assets[name].get('digest') != 'sha256:' + sha for name, sha in manifest['files'].items()):
-            raise PreviewError('Public assets differ from the signed manifest.')
+        validate_snapshot(manifest, identity, commit)
+        validate_signed_assets(manifest, assets)
         return manifest, assets
 
     def payload(self, manifest, assets, name, directory):
