@@ -127,9 +127,12 @@ This applies only to the command and its children; it does not change shell or s
 One-time preview setup: create the `preview-release` environment with a custom
 **branch** policy allowing only `master`; import the existing source App ID/key
 as `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`. Retain existing immutable release
-and `v*` tag rules. Build/verification jobs enforce `cache-mode: read` and probe
-the cache service for an explicit write denial before executing candidate code;
-if the hosted service does not support this policy, publication remains blocked.
+and `v*` tag rules. Candidate build/verification jobs retain `cache-mode: read`
+or `none`; GitHub's scoped runtime tokens enforce cache access. Workflow policy
+tests reject missing or write-enabled cache/token permissions and preserve the
+signing, qualification and publication boundaries. There is no custom cache-service
+probe. Qualify workflow changes on hosted runners before merging; local policy
+checks do not prove hosted enforcement.
 
 ## One-time account and repository setup
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
@@ -16,11 +15,6 @@ from preview_identity import authorize, snapshot, write_identity
 from release_support import CONFIG, ROOT, ReleaseError, output, run
 
 
-def require_cache_mode():
-    if os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('FLUXCOPE_PREVIEW_CACHE_MODE') not in ('read', 'none'):
-        raise ReleaseError('The preview cache probe did not verify read-only cache permissions.')
-
-
 def clean_source(source: Path, identity: dict):
     if (run('git', 'rev-parse', 'HEAD', cwd=source) != identity['snapshot']
             or run('git', 'status', '--porcelain', cwd=source)):
@@ -28,7 +22,6 @@ def clean_source(source: Path, identity: dict):
 
 
 def quality(source: Path, identity: dict, directory: Path):
-    require_cache_mode()
     clean_source(source, identity)
     run('cargo', 'fmt', '--all', '--', '--check', cwd=source, capture=False)
     run('cargo', 'clippy', '--all-targets', '--all-features', '--locked', '--', '-D', 'warnings', cwd=source, capture=False)
@@ -51,7 +44,6 @@ def quality(source: Path, identity: dict, directory: Path):
 
 
 def build(source: Path, identity: dict, target: str, directory: Path):
-    require_cache_mode()
     clean_source(source, identity)
     if target not in identity['targets']:
         raise ReleaseError('Target is outside the approved preview profile.')
@@ -80,7 +72,6 @@ def build(source: Path, identity: dict, target: str, directory: Path):
 
 
 def verify(source: Path, identity: dict, target: str, directory: Path):
-    require_cache_mode()
     clean_source(source, identity)
     expected = {f'fluxcope-{target}.tar.xz', f'fluxcope-{target}.tar.xz.sha256',
                 f'{target}-build-smoke.json', f'{target}-dist-manifest.json'}
