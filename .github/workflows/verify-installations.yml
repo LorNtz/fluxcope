@@ -26,7 +26,7 @@ jobs:
       matrix: ${{ steps.gate.outputs.matrix }}
       commit: ${{ steps.gate.outputs.commit }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: gate
@@ -34,13 +34,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: python3 scripts/verify_installations.py gate --tag "$TAG"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tap-commit-${{ github.run_attempt }}
           path: target/tap-commit.json
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: public-verification-${{ github.run_attempt }}
           path: target/public-verification.json
@@ -57,7 +57,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_ANALYTICS: '1'
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/verify-homebrew-install
@@ -67,7 +67,7 @@ jobs:
           target: ${{ matrix.target }}
           tooling: recovery
           github-token: ${{ github.token }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: homebrew-${{ matrix.target }}-${{ github.run_attempt }}
           path: target/homebrew-${{ matrix.target }}.json
@@ -78,7 +78,7 @@ jobs:
     needs: gate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/verify-registry-install
@@ -86,7 +86,7 @@ jobs:
           tag: ${{ inputs.tag }}
           tooling: recovery
           github-token: ${{ github.token }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: registry-install-${{ github.run_attempt }}
           path: target/registry-install.json
