@@ -92,6 +92,7 @@ impl SettingsHitRegionKey {
 pub(super) struct SettingsHitRegions {
     key: SettingsHitRegionKey,
     popup_area: Rect,
+    close_button: Rect,
     topics: Rect,
     viewport: Rect,
     scrolling_enabled: bool,
@@ -108,6 +109,7 @@ impl SettingsHitRegions {
         Self {
             key: SettingsHitRegionKey::from_popup(root_area, popup, 0),
             popup_area: layout.area,
+            close_button: layout.close_button,
             topics: layout.topics.inner(Margin {
                 horizontal: 1,
                 vertical: 1,
@@ -205,7 +207,7 @@ impl SettingsHitRegions {
             }
             return Some(SettingsClickTarget::Outside);
         }
-        if !self.popup_area.contains(position) {
+        if !self.popup_area.contains(position) || self.close_button.contains(position) {
             return Some(SettingsClickTarget::Outside);
         }
         if self.topics.contains(position) {

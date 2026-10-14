@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Direct mouse interaction throughout settings: clickable topics, checkboxes, inputs, preset options and dialog controls; whole-table focus including empty tables; same-row double-click table editing; Unicode-aware cursor placement and one-layer outside-click dismissal.
+- A right-aligned status-bar Settings button and a top-right settings popup close button that preserves existing outside-click validation, unsaved-change confirmation, and one-layer dismissal behavior.
 
 ### Changed
 

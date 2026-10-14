@@ -4,22 +4,17 @@ use crate::app::{
     BODY_LOADING_TEXT, BodyViewerKey, MainDisplayTab, ProxyRow, ProxyRuleTable, SettingsPaneFocus,
     SettingsPopup, SettingsTopic,
 };
-use crossterm::event::MouseEvent;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
-use crossterm::event::MouseEventKind;
+use ratatui::layout::Position;
 #[cfg(test)]
 use ratatui::symbols;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-};
-#[cfg(test)]
-use ratatui::{
-    layout::{Margin, Position},
-    style::Modifier,
 };
 #[cfg(test)]
 use std::borrow::Cow;
@@ -170,6 +165,10 @@ impl MouseHandler for RootView {
             return true;
         }
 
+        if self.status.handle_mouse(mouse, app) {
+            return true;
+        }
+
         if app.log_panel.visible {
             self.log.handle_mouse(mouse, app)
         } else if app.is_request_search_editing() {
@@ -180,6 +179,8 @@ impl MouseHandler for RootView {
     }
 }
 
+const SETTINGS_BUTTON: &str = "[Settings]";
+
 struct StatusView {
     area: Rect,
 }
@@ -189,6 +190,18 @@ impl StatusView {
         Self {
             area: Rect::default(),
         }
+    }
+
+    fn settings_button_area(&self) -> Rect {
+        let inner = self.area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let width = SETTINGS_BUTTON.len() as u16;
+        if inner.width < width || inner.is_empty() {
+            return Rect::default();
+        }
+        Rect::new(inner.right() - width, inner.y, width, 1)
     }
 }
 
@@ -216,12 +229,37 @@ impl View for StatusView {
             ),
         ]);
 
+        let block = panel_block("Status", false);
+        let mut text_area = block.inner(self.area);
+        let button_area = self.settings_button_area();
+        if !button_area.is_empty() {
+            text_area.width = button_area.x.saturating_sub(text_area.x).saturating_sub(1);
+        }
+        frame.render_widget(block, self.area);
+        frame.render_widget(Paragraph::new(status).alignment(Alignment::Left), text_area);
         frame.render_widget(
-            Paragraph::new(status)
-                .block(panel_block("Status", false))
-                .alignment(Alignment::Left),
-            self.area(),
+            Span::styled(
+                SETTINGS_BUTTON,
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            button_area,
         );
+    }
+}
+
+impl MouseHandler for StatusView {
+    fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self
+                .settings_button_area()
+                .contains((mouse.column, mouse.row).into())
+        {
+            app.open_settings_popup();
+            return true;
+        }
+        false
     }
 }
 
