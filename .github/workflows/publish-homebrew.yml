@@ -28,7 +28,7 @@ jobs:
     outputs:
       matrix: ${{ steps.gate.outputs.matrix }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: gate
@@ -46,10 +46,10 @@ jobs:
     outputs:
       commit: ${{ steps.tap.outputs.commit }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         with:
           app-id: ${{ vars.TAP_APP_ID }}
@@ -63,7 +63,7 @@ jobs:
           GIT_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ inputs.tag }}
         run: python3 scripts/homebrew_release.py publish --tag "$TAG"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tap-commit-${{ github.run_attempt }}
           path: target/tap-commit.json
@@ -80,7 +80,7 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_ANALYTICS: '1'
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/verify-homebrew-install
@@ -90,7 +90,7 @@ jobs:
           target: ${{ matrix.target }}
           tooling: release
           github-token: ${{ github.token }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: homebrew-${{ matrix.target }}-${{ github.run_attempt }}
           path: target/homebrew-${{ matrix.target }}.json
@@ -101,7 +101,7 @@ jobs:
     needs: gate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/verify-registry-install
@@ -109,7 +109,7 @@ jobs:
           tag: ${{ inputs.tag }}
           tooling: release
           github-token: ${{ github.token }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: registry-install-${{ github.run_attempt }}
           path: target/registry-install.json
